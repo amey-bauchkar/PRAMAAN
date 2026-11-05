@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { AuthService } from '../src/services/auth-service.js';
 import { JwtVerifier } from '../src/services/jwt-verifier.js';
+import { createTestToken, TEST_JWT_SECRET } from '../src/testing/test-jwt-utils.js';
 import { InMemoryUserRepository } from '../src/repositories/user-repository.js';
 import { User, Membership } from '@pramaan/contracts';
 
@@ -9,7 +10,7 @@ describe('AuthService: Genuine Supabase JWT Verification & Membership Derivation
   let jwtVerifier: JwtVerifier;
   let userRepo: InMemoryUserRepository;
 
-  const testSecret = 'pramaan-super-secure-test-jwt-secret-key-32chars!';
+  const testSecret = TEST_JWT_SECRET;
   const apexOrgId = '00000000-0000-0000-0000-000000000001';
   const zenithOrgId = '00000000-0000-0000-0000-000000000002';
 
@@ -93,7 +94,7 @@ describe('AuthService: Genuine Supabase JWT Verification & Membership Derivation
   });
 
   it('5. Rejects expired JWT token', async () => {
-    const expiredToken = await jwtVerifier.createTestToken(
+    const expiredToken = await createTestToken(
       { sub: tpoUser.authSubject, email: tpoUser.email },
       { expiresIn: '-10s' } // Expired 10 seconds ago
     );
@@ -105,7 +106,7 @@ describe('AuthService: Genuine Supabase JWT Verification & Membership Derivation
   });
 
   it('6. Rejects forged JWT token signed with an invalid secret', async () => {
-    const forgedToken = await jwtVerifier.createTestToken(
+    const forgedToken = await createTestToken(
       { sub: tpoUser.authSubject, email: tpoUser.email },
       { customSecret: 'wrong-attacker-secret-key-32chars!' }
     );
@@ -117,7 +118,7 @@ describe('AuthService: Genuine Supabase JWT Verification & Membership Derivation
   });
 
   it('7. Rejects authenticated identity not registered in PRAMAAN institution database', async () => {
-    const unknownToken = await jwtVerifier.createTestToken({
+    const unknownToken = await createTestToken({
       sub: 'supabase-unregistered-user-999',
       email: 'stranger@external.com'
     });
@@ -138,7 +139,7 @@ describe('AuthService: Genuine Supabase JWT Verification & Membership Derivation
     };
     await userRepo.registerUser(orphanUser);
 
-    const token = await jwtVerifier.createTestToken({
+    const token = await createTestToken({
       sub: orphanUser.authSubject,
       email: orphanUser.email
     });
@@ -167,7 +168,7 @@ describe('AuthService: Genuine Supabase JWT Verification & Membership Derivation
       createdAt: new Date().toISOString()
     });
 
-    const token = await jwtVerifier.createTestToken({
+    const token = await createTestToken({
       sub: suspendedUser.authSubject,
       email: suspendedUser.email
     });
@@ -196,7 +197,7 @@ describe('AuthService: Genuine Supabase JWT Verification & Membership Derivation
       createdAt: new Date().toISOString()
     });
 
-    const token = await jwtVerifier.createTestToken({
+    const token = await createTestToken({
       sub: revokedUser.authSubject,
       email: revokedUser.email
     });
@@ -208,7 +209,7 @@ describe('AuthService: Genuine Supabase JWT Verification & Membership Derivation
   });
 
   it('11. Derives tenant and role strictly from verified active membership (Valid login)', async () => {
-    const token = await jwtVerifier.createTestToken({
+    const token = await createTestToken({
       sub: tpoUser.authSubject,
       email: tpoUser.email
     });
@@ -221,7 +222,7 @@ describe('AuthService: Genuine Supabase JWT Verification & Membership Derivation
   });
 
   it('12. Rejects spoofed client x-org-id when user holds no membership in that organization', async () => {
-    const token = await jwtVerifier.createTestToken({
+    const token = await createTestToken({
       sub: tpoUser.authSubject,
       email: tpoUser.email
     });
@@ -244,7 +245,7 @@ describe('AuthService: Genuine Supabase JWT Verification & Membership Derivation
       createdAt: new Date().toISOString()
     });
 
-    const token = await jwtVerifier.createTestToken({
+    const token = await createTestToken({
       sub: tpoUser.authSubject,
       email: tpoUser.email
     });

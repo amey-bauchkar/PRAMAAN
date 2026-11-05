@@ -6,7 +6,7 @@ import { TenantStore } from './services/tenant-store.js';
 import { AuditService } from './services/audit-service.js';
 import { ConsentService } from './services/consent-service.js';
 import { AuthService } from './services/auth-service.js';
-import { SessionContext } from '@pramaan/contracts';
+import { SessionContext, UserRole } from '@pramaan/contracts';
 import { ITenantRepository, InMemoryTenantRepository, PgTenantRepository } from './repositories/tenant-repository.js';
 import { IAuditRepository, InMemoryAuditRepository, PgAuditRepository } from './repositories/audit-repository.js';
 import { IConsentRepository, InMemoryConsentRepository, PgConsentRepository } from './repositories/consent-repository.js';
@@ -26,6 +26,29 @@ export interface AppOptions {
 }
 
 export function buildApp(opts: AppOptions = {}): FastifyInstance {
+  const isProduction = process.env.NODE_ENV === 'production';
+
+  // Production Fail-Closed Guards: In-memory fallback and missing database/JWT credentials strictly prohibited
+  if (isProduction) {
+    if (!process.env.DATABASE_URL) {
+      throw new Error('FATAL: Production mode requires a valid DATABASE_URL. In-memory storage is prohibited.');
+    }
+    if (
+      opts.tenantStore || 
+      opts.auditService || 
+      opts.consentService ||
+      opts.tenantRepository instanceof InMemoryTenantRepository ||
+      opts.auditRepository instanceof InMemoryAuditRepository ||
+      opts.consentRepository instanceof InMemoryConsentRepository ||
+      opts.userRepository instanceof InMemoryUserRepository
+    ) {
+      throw new Error('FATAL: Production mode prohibits in-memory repositories or mock stores.');
+    }
+    if (!process.env.SUPABASE_URL && !process.env.SUPABASE_JWKS_URI && !process.env.SUPABASE_JWT_SECRET) {
+      throw new Error('FATAL: Production mode requires Supabase JWT configuration (SUPABASE_URL, SUPABASE_JWKS_URI, or SUPABASE_JWT_SECRET).');
+    }
+  }
+
   const app = Fastify({ logger: false });
 
   // Resolve repositories (PostgreSQL if DATABASE_URL configured and not explicitly using memory/legacy opts)
@@ -115,7 +138,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
     return authRes.context;
   };
 
-  // Organizations / Tenants (Protected: requires valid session)
+  // Organizations / Tenants (Protected: requires valid session, returns discovery DTO only)
   app.get('/api/tenants', async (req, reply) => {
     const context = await resolveSessionContext(req, reply);
     if (!context) return;
@@ -123,15 +146,30 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
     return tenantRepo.listOrganizations();
   });
 
-  // Students under RLS & RBAC
+  // Students under RLS & Positive RBAC Allowlists
+  // Allowed: student (own record only), officer (cohort), mentor (cohort)
   app.get('/api/students', async (req, reply) => {
     const context = await resolveSessionContext(req, reply);
     if (!context) return;
 
-    return tenantRepo.listStudents(context);
+    const allowedRoles: UserRole[] = ['student', 'officer', 'mentor'];
+    if (!allowedRoles.includes(context.role as UserRole)) {
+      return reply.status(403).send({
+        error: `FORBIDDEN_ROLE: Role '${context.role}' is not authorized to list students.`
+      });
+    }
+
+    const students = await tenantRepo.listStudents(context);
+
+    // If caller is student, return strictly their own student record
+    if (context.role === 'student') {
+      return students.filter(s => s.userId === context.userId);
+    }
+
+    return students;
   });
 
-  // Consent API: Grant
+  // Consent API: Grant (Restricted strictly to students for their own identity)
   app.post('/api/consent/grant', async (req, reply) => {
     const context = await resolveSessionContext(req, reply);
     if (!context) return;
@@ -142,17 +180,15 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
       return reply.status(400).send({ error: 'Missing studentId or purpose' });
     }
 
-    // Role & Ownership Guards:
-    // 1. Placement officers cannot grant consent on behalf of students
-    if (context.role === 'officer' || context.role === 'mentor') {
+    // Positive RBAC: Student ONLY
+    if (context.role !== 'student') {
       return reply.status(403).send({
-        error: 'FORBIDDEN_ROLE: Placement officers and mentors cannot grant consent on behalf of students.'
+        error: 'FORBIDDEN_ROLE: Placement officers and mentors cannot grant consent on behalf of students. Only students may grant consent for their own data.'
       });
     }
 
-    // 2. Students may only grant consent for their own student identity
-    if (context.role === 'student' && body.studentId !== context.userId) {
-      // Check if studentId is the student's record id or user id
+    // Ownership check: studentId must belong to the authenticated student
+    if (body.studentId !== context.userId) {
       const studentRec = await tenantRepo.getStudent(context, body.studentId);
       if (!studentRec || studentRec.userId !== context.userId) {
         return reply.status(403).send({
@@ -172,15 +208,40 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
     return reply.status(201).send(grant);
   });
 
-  // Consent API: Revoke
+  // Consent API: Revoke (Allowed for student [own grant] or officer [documented reason])
   app.post('/api/consent/revoke', async (req, reply) => {
     const context = await resolveSessionContext(req, reply);
     if (!context) return;
+
+    const allowedRoles: UserRole[] = ['student', 'officer'];
+    if (!allowedRoles.includes(context.role as UserRole)) {
+      return reply.status(403).send({
+        error: `FORBIDDEN_ROLE: Role '${context.role}' cannot revoke consent.`
+      });
+    }
 
     const body = req.body as any;
 
     if (!body?.grantId) {
       return reply.status(400).send({ error: 'Missing grantId' });
+    }
+
+    if (context.role === 'officer' && (!body.reason || typeof body.reason !== 'string' || body.reason.trim() === '')) {
+      return reply.status(400).send({
+        error: 'OFFICER_REASON_REQUIRED: Placement officers must supply a documented reason for revoking student consent.'
+      });
+    }
+
+    if (context.role === 'student') {
+      const grant = await consentRepo.getGrant(context, body.grantId);
+      if (grant) {
+        const studentRec = await tenantRepo.getStudent(context, grant.studentId);
+        if (studentRec && studentRec.userId !== context.userId) {
+          return reply.status(403).send({
+            error: 'FORBIDDEN_OWNERSHIP: Students may only revoke their own consent grants.'
+          });
+        }
+      }
     }
 
     const result = await consentRepo.revokeConsent(context, body.grantId, body.reason);
@@ -191,28 +252,30 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
     return reply.send(result);
   });
 
-  // Audit API: List (Restricted to officers, platform admins, university admins)
+  // Audit API: List (Restricted strictly to officer, platform_admin, university_admin)
   app.get('/api/audit', async (req, reply) => {
     const context = await resolveSessionContext(req, reply);
     if (!context) return;
 
-    if (context.role === 'student') {
+    const allowedRoles: UserRole[] = ['officer', 'platform_admin', 'university_admin'];
+    if (!allowedRoles.includes(context.role as UserRole)) {
       return reply.status(403).send({
-        error: 'FORBIDDEN_ROLE: Audit ledger access is restricted to placement officers and compliance auditors.'
+        error: `FORBIDDEN_ROLE: Audit ledger access is restricted to placement officers and compliance auditors.`
       });
     }
 
     return auditRepo.getEventsForTenant(context);
   });
 
-  // Audit API: Verify Cryptographic Chain (Restricted to officers and admins)
+  // Audit API: Verify Cryptographic Chain (Restricted strictly to officer, platform_admin)
   app.get('/api/audit/verify', async (req, reply) => {
     const context = await resolveSessionContext(req, reply);
     if (!context) return;
 
-    if (context.role === 'student') {
+    const allowedRoles: UserRole[] = ['officer', 'platform_admin'];
+    if (!allowedRoles.includes(context.role as UserRole)) {
       return reply.status(403).send({
-        error: 'FORBIDDEN_ROLE: Audit chain verification is restricted to placement officers and compliance auditors.'
+        error: `FORBIDDEN_ROLE: Audit chain verification is restricted to placement officers and platform administrators.`
       });
     }
 

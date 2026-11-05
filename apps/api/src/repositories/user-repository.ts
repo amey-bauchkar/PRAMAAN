@@ -7,7 +7,7 @@ export interface UserWithMemberships {
 }
 
 export interface IUserRepository {
-  findByAuthSubjectOrEmail(authSubject: string, email?: string): Promise<UserWithMemberships | null>;
+  findByAuthSubject(authSubject: string): Promise<UserWithMemberships | null>;
   registerUser(user: User): Promise<User>;
   addMembership(membership: Membership): Promise<Membership>;
 }
@@ -77,10 +77,14 @@ export class InMemoryUserRepository implements IUserRepository {
     return this.addMembershipSync(membership);
   }
 
-  public async findByAuthSubjectOrEmail(authSubject: string, email?: string): Promise<UserWithMemberships | null> {
+  /**
+   * Strictly matches verified auth_subject UUID/claim.
+   * Prohibits insecure automatic identity linking via matching email address.
+   */
+  public async findByAuthSubject(authSubject: string): Promise<UserWithMemberships | null> {
     let matchedUser: User | undefined;
     for (const u of this.users.values()) {
-      if (u.authSubject === authSubject || u.id === authSubject || (email && u.email === email)) {
+      if (u.authSubject === authSubject) {
         matchedUser = u;
         break;
       }
@@ -99,26 +103,29 @@ export class InMemoryUserRepository implements IUserRepository {
 export class PgUserRepository implements IUserRepository {
   constructor(private pool: pg.Pool) {}
 
-  public async findByAuthSubjectOrEmail(authSubject: string, email?: string): Promise<UserWithMemberships | null> {
+  /**
+   * Resolves authenticated identity and associated memberships using the narrowly scoped
+   * resolve_user_identity(p_auth_subject) SECURITY DEFINER stored procedure.
+   * Strictly matches p_auth_subject — NEVER links accounts automatically by email.
+   */
+  public async findByAuthSubject(authSubject: string): Promise<UserWithMemberships | null> {
     const query = `
       SELECT 
-        u.id as user_id, 
-        u.auth_subject, 
-        u.email, 
-        u.full_name, 
-        u.created_at as user_created_at,
-        m.id as membership_id, 
-        m.org_id, 
-        m.department_id, 
-        m.role, 
-        m.status, 
-        m.created_at as membership_created_at
-      FROM users u
-      LEFT JOIN memberships m ON m.user_id = u.id
-      WHERE u.auth_subject = $1 OR u.id::text = $1 OR (u.email = $2 AND $2 IS NOT NULL);
+        user_id,
+        auth_subject,
+        email,
+        full_name,
+        user_created_at,
+        membership_id,
+        org_id,
+        department_id,
+        role,
+        status,
+        membership_created_at
+      FROM resolve_user_identity($1);
     `;
 
-    const res = await this.pool.query(query, [authSubject, email || null]);
+    const res = await this.pool.query(query, [authSubject]);
     if (res.rows.length === 0) {
       return null;
     }

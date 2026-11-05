@@ -97,10 +97,9 @@ export class AuthService {
 
     const claims = verifyResult.payload;
     const authSubject = claims.sub;
-    const email = claims.email as string | undefined;
 
-    // 4. Resolve Identity in Database
-    const userRecord = await this.userRepository.findByAuthSubjectOrEmail(authSubject, email);
+    // 4. Resolve Identity in Database strictly by verified authSubject (prevents email takeover)
+    const userRecord = await this.userRepository.findByAuthSubject(authSubject);
     if (!userRecord || !userRecord.user) {
       return {
         authenticated: false,

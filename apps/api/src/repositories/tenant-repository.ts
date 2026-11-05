@@ -1,11 +1,11 @@
 import pg from 'pg';
-import { Organization, Student, SessionContext } from '@pramaan/contracts';
+import { Organization, OrganizationDiscovery, Student, SessionContext } from '@pramaan/contracts';
 import { withTenantTransaction, getDbPool } from '../db/pool.js';
 import { TenantStore } from '../services/tenant-store.js';
 
 export interface ITenantRepository {
   getOrganization(id: string): Promise<Organization | null>;
-  listOrganizations(): Promise<Organization[]>;
+  listOrganizations(): Promise<OrganizationDiscovery[]>;
   listStudents(context: SessionContext): Promise<Student[]>;
   getStudent(context: SessionContext, studentId: string): Promise<Student | null>;
 }
@@ -17,8 +17,15 @@ export class InMemoryTenantRepository implements ITenantRepository {
     return this.store.getOrganization(id) ?? null;
   }
 
-  public async listOrganizations(): Promise<Organization[]> {
-    return this.store.listOrganizations();
+  public async listOrganizations(): Promise<OrganizationDiscovery[]> {
+    return this.store.listOrganizations().map(org => ({
+      id: org.id,
+      parentId: org.parentId,
+      kind: org.kind,
+      name: org.name,
+      createdAt: org.createdAt,
+      updatedAt: org.updatedAt
+    }));
   }
 
   public async listStudents(context: SessionContext): Promise<Student[]> {
@@ -55,9 +62,14 @@ export class PgTenantRepository implements ITenantRepository {
     };
   }
 
-  public async listOrganizations(): Promise<Organization[]> {
+  /**
+   * Safe public discovery query:
+   * Returns discovery metadata ONLY (id, name, kind, parent_id).
+   * Masks internal tenant configuration, rate limits, and cryptographic key references.
+   */
+  public async listOrganizations(): Promise<OrganizationDiscovery[]> {
     const query = `
-      SELECT id, parent_id, kind, name, config, key_ref, rate_limit_config, created_at, updated_at
+      SELECT id, parent_id, kind, name, created_at, updated_at
       FROM organizations
       ORDER BY name;
     `;
@@ -67,9 +79,6 @@ export class PgTenantRepository implements ITenantRepository {
       parentId: row.parent_id,
       kind: row.kind,
       name: row.name,
-      config: row.config,
-      keyRef: row.key_ref,
-      rateLimitConfig: row.rate_limit_config,
       createdAt: new Date(row.created_at).toISOString(),
       updatedAt: new Date(row.updated_at).toISOString()
     }));
@@ -148,3 +157,4 @@ export class PgTenantRepository implements ITenantRepository {
     }, this.pool);
   }
 }
+

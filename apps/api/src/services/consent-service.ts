@@ -46,6 +46,10 @@ export class ConsentService {
     this.studentSkills.set(skill.id, skill);
   }
 
+  public getGrant(grantId: string): ConsentGrant | undefined {
+    return this.grants.get(grantId);
+  }
+
   /**
    * Grants purpose-specific consent for a student.
    */

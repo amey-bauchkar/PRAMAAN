@@ -3,6 +3,7 @@ import { buildApp } from '../src/app.js';
 import { FastifyInstance } from 'fastify';
 import { AuthService } from '../src/services/auth-service.js';
 import { JwtVerifier } from '../src/services/jwt-verifier.js';
+import { createTestToken } from '../src/testing/test-jwt-utils.js';
 import { InMemoryUserRepository } from '../src/repositories/user-repository.js';
 import { TenantStore } from '../src/services/tenant-store.js';
 import { AuditService } from '../src/services/audit-service.js';
@@ -88,15 +89,15 @@ describe('PRAMAAN Fastify HTTP Endpoints: Authentication & RBAC Authorization', 
       }
     );
 
-    tpoToken = await jwtVerifier.createTestToken({
+    tpoToken = await createTestToken({
       sub: tpoAuthSubject,
       email: 'priya.sharma@apex.edu'
-    });
+    }, { customSecret: testSecret });
 
-    studentToken = await jwtVerifier.createTestToken({
+    studentToken = await createTestToken({
       sub: studentAuthSubject,
       email: 'aarav.patel@apex.edu'
-    });
+    }, { customSecret: testSecret });
 
     app = buildApp({
       authService,

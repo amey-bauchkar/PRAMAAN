@@ -3,6 +3,7 @@ import { getDbPool } from '../src/db/pool.js';
 import { PgUserRepository } from '../src/repositories/user-repository.js';
 import { AuthService } from '../src/services/auth-service.js';
 import { JwtVerifier } from '../src/services/jwt-verifier.js';
+import { createTestToken } from '../src/testing/test-jwt-utils.js';
 import pg from 'pg';
 
 describe('Real PostgreSQL Supabase Integration: Authenticated Identity & Membership Mapping', () => {
@@ -67,10 +68,10 @@ describe('Real PostgreSQL Supabase Integration: Authenticated Identity & Members
 
   it('Verifies authenticated JWT identity against live PostgreSQL users and memberships tables', async () => {
     // 1. Issue a cryptographically signed JWT with sub = TEST_AUTH_SUB
-    const token = await jwtVerifier.createTestToken({
+    const token = await createTestToken({
       sub: TEST_AUTH_SUB,
       email: TEST_EMAIL
-    });
+    }, { customSecret: testSecret });
 
     // 2. Resolve session context via AuthService (which queries PostgreSQL via PgUserRepository)
     const result = await authService.resolveContext(`Bearer ${token}`);
@@ -84,10 +85,10 @@ describe('Real PostgreSQL Supabase Integration: Authenticated Identity & Members
 
   it('Rejects request when user attempts to access foreign organization in live PostgreSQL', async () => {
     const foreignOrgId = 'f0000000-0000-0000-0000-000000000099';
-    const token = await jwtVerifier.createTestToken({
+    const token = await createTestToken({
       sub: TEST_AUTH_SUB,
       email: TEST_EMAIL
-    });
+    }, { customSecret: testSecret });
 
     const result = await authService.resolveContext(`Bearer ${token}`, foreignOrgId);
     expect(result.authenticated).toBe(false);
@@ -95,3 +96,4 @@ describe('Real PostgreSQL Supabase Integration: Authenticated Identity & Members
     expect(result.error).toMatch(/FORBIDDEN_TENANT_ACCESS/);
   });
 });
+

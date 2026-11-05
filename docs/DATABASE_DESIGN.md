@@ -444,3 +444,40 @@ This ensures:
 2. Changes are auditable in git diffs.
 3. Zero silent policy deletions occur.
 
+### 4.3 Restricted Runtime Application User & Pre-Tenant Identity Resolution (`007_restricted_runtime_role.sql`)
+To eliminate the use of administrative credentials for normal application runtime:
+1. **Dedicated Application Role:** `pramaan_app_user` created with `NOBYPASSRLS`, `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`, `NOINHERIT`.
+2. **Membership in `app_api`:** Role is granted `app_api`, restricting all queries to RLS policies.
+3. **Pre-Tenant Identity Resolution Stored Procedure:** Before tenant context is known, looking up user memberships is handled by a narrowly scoped `SECURITY DEFINER` function:
+   ```sql
+   CREATE OR REPLACE FUNCTION resolve_user_identity(p_auth_subject TEXT)
+   RETURNS TABLE (...)
+   SECURITY DEFINER
+   SET search_path = public
+   LANGUAGE plpgsql AS $$
+   BEGIN
+       RETURN QUERY
+       SELECT u.id, u.auth_subject, u.email, u.full_name, u.created_at,
+              m.id, m.org_id, m.department_id, m.role, m.status, m.created_at
+       FROM users u
+       LEFT JOIN memberships m ON m.user_id = u.id
+       WHERE u.auth_subject = p_auth_subject;
+   END;
+   $$;
+   ```
+4. **Account Takeover Immunity:** The procedure queries strictly by verified `auth_subject`. It never accepts or links accounts by email, immunizing the system against OAuth email collision / takeover attacks.
+5. **Least Privilege Execution:** Execution is revoked from `PUBLIC` and granted strictly to `pramaan_app_user` and `app_api`.
+
+### 4.4 Parameterized Transaction Context Isolation (`withTenantTransaction`)
+PostgreSQL does not permit `$1` parameters in `SET LOCAL` statements directly. Parameterization is achieved via `set_config` with `is_local = true`:
+```sql
+SELECT 
+  set_config('app.current_org_id', $1, true),
+  set_config('app.current_user_id', $2, true),
+  set_config('app.current_user_role', $3, true);
+```
+This guarantees:
+1. Zero SQL injection risk when binding tenant or user context variables.
+2. Transaction-scoped lifetime: variables reset automatically upon transaction commit or rollback.
+3. Fail-closed defense: connections returned to the pool clear their local settings immediately.
+

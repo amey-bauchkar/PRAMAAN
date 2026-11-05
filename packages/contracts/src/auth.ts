@@ -31,6 +31,16 @@ export const OrganizationSchema = z.object({
 });
 export type Organization = z.infer<typeof OrganizationSchema>;
 
+export const OrganizationDiscoverySchema = z.object({
+  id: z.string().uuid(),
+  parentId: z.string().uuid().nullable().optional(),
+  kind: OrgKindSchema,
+  name: z.string().min(2).max(255),
+  createdAt: z.string().datetime().optional(),
+  updatedAt: z.string().datetime().optional(),
+});
+export type OrganizationDiscovery = z.infer<typeof OrganizationDiscoverySchema>;
+
 export const UserSchema = z.object({
   id: z.string().uuid(),
   authSubject: z.string().min(1),

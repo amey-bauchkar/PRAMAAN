@@ -66,7 +66,13 @@ export async function withTenantTransaction<T>(
   try {
     await client.query('BEGIN;');
     await client.query('SET LOCAL ROLE app_api;');
-    await client.query('SET LOCAL "app.current_org_id" = $1;', [context.orgId]);
+    await client.query(
+      `SELECT 
+        set_config('app.current_org_id', $1, true),
+        set_config('app.current_user_id', $2, true),
+        set_config('app.current_user_role', $3, true);`,
+      [context.orgId, context.userId || '', context.role || '']
+    );
 
     const result = await callback(client);
 
@@ -83,3 +89,4 @@ export async function withTenantTransaction<T>(
     client.release();
   }
 }
+
