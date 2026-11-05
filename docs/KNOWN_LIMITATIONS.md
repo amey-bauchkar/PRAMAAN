@@ -28,3 +28,11 @@
 1. **Provisional Nature of Predictive Placement Models:** Placement forecasting models (AD-03) output cohort-level scenario ranges (e.g. estimated placement rate bands). These are explicitly watermarked and labeled as "Provisional Estimates — Not Statistically Validated." The platform strictly prohibits applying automated negative labels or intervention flags to individual students without TPO review.
 2. **Accreditation Data Exports:** Reports generated for NAAC (Criterion 5.2.1) and NIRF formats provide deduplicated placement counts and transparent calculation formulas. These exports are watermarked as "Draft for Institutional Verification" until verified against official university registers.
 3. **Synthetic Demo Data:** All demo environments use synthetic tenant data and mock student profiles. Synthetic outcomes are strictly partitioned and can never be merged into real institutional production databases.
+
+---
+
+## 4. Authentication & Infrastructure Boundaries
+
+1. **Client-Side Refresh Token Handling:** In production, Supabase Auth issues short-lived JWT access tokens (typically 1 hour) and refresh tokens. The backend API validates individual access tokens stateless via `jose` and resolves institutional memberships against PostgreSQL. Refresh token lifecycle and silent renewal are managed client-side by `@supabase/supabase-js`.
+2. **PostgreSQL Direct Socket vs Pooler Latency:** For serverless and edge container deployments, connections route through the Supabase transaction pooler (port 6543) using `pool_mode = transaction`. Physical connection reuse and `SET LOCAL` context reset have been mathematically proven on this pooler (`db/tests/connection-pool-reuse.test.ts`).
+3. **Off-site Audit Log Mirroring:** Database triggers block UPDATE/DELETE on `audit_events`, and the cryptographic hash chain provides tamper-evidence. However, continuous export to an external write-once WORM storage (such as AWS S3 Object Lock) is recommended for high-stakes compliance environments to defend against privileged superusers.

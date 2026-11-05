@@ -126,15 +126,49 @@ ALTER TABLE fairness_reviews FORCE ROW LEVEL SECURITY;
 ALTER TABLE fairness_simulations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE fairness_simulations FORCE ROW LEVEL SECURITY;
 
--- 2. Drop existing policies to ensure clean, comprehensive re-creation
-DO $$
-DECLARE
-    r RECORD;
-BEGIN
-    FOR r IN (SELECT tablename, policyname FROM pg_policies WHERE schemaname = 'public') LOOP
-        EXECUTE format('DROP POLICY IF EXISTS %I ON %I', r.policyname, r.tablename);
-    END LOOP;
-END $$;
+-- 2. Explicit, Scoped, Idempotent Policy Drops (Non-destructive to other schemas/tables)
+DROP POLICY IF EXISTS tenant_isolation_organizations ON organizations;
+DROP POLICY IF EXISTS tenant_isolation_departments ON departments;
+DROP POLICY IF EXISTS tenant_isolation_memberships ON memberships;
+DROP POLICY IF EXISTS tenant_isolation_students ON students;
+DROP POLICY IF EXISTS tenant_isolation_academic_records ON academic_records;
+DROP POLICY IF EXISTS tenant_isolation_student_group_attributes ON student_group_attributes;
+DROP POLICY IF EXISTS read_catalog_consent_purposes ON consent_purposes;
+DROP POLICY IF EXISTS read_catalog_skills ON skills;
+DROP POLICY IF EXISTS read_catalog_rubric_versions ON rubric_versions;
+DROP POLICY IF EXISTS read_catalog_probe_definitions ON probe_definitions;
+DROP POLICY IF EXISTS tenant_isolation_consent_grants ON consent_grants;
+DROP POLICY IF EXISTS tenant_isolation_guardian_consents ON guardian_consents;
+DROP POLICY IF EXISTS tenant_isolation_data_requests ON data_requests;
+DROP POLICY IF EXISTS tenant_isolation_connected_accounts ON connected_accounts;
+DROP POLICY IF EXISTS tenant_isolation_repositories ON repositories;
+DROP POLICY IF EXISTS tenant_isolation_repo_snapshots ON repo_snapshots;
+DROP POLICY IF EXISTS tenant_isolation_evidence_items ON evidence_items;
+DROP POLICY IF EXISTS tenant_isolation_student_skills ON student_skills;
+DROP POLICY IF EXISTS tenant_isolation_skill_evidence ON skill_evidence;
+DROP POLICY IF EXISTS tenant_isolation_attestations ON attestations;
+DROP POLICY IF EXISTS tenant_isolation_skill_state_events ON skill_state_events;
+DROP POLICY IF EXISTS tenant_isolation_verification_sessions ON verification_sessions;
+DROP POLICY IF EXISTS tenant_isolation_verification_questions ON verification_questions;
+DROP POLICY IF EXISTS tenant_isolation_probe_runs ON probe_runs;
+DROP POLICY IF EXISTS tenant_isolation_human_reviews ON human_reviews;
+DROP POLICY IF EXISTS tenant_isolation_companies ON companies;
+DROP POLICY IF EXISTS tenant_isolation_job_roles ON job_roles;
+DROP POLICY IF EXISTS tenant_isolation_job_role_skills ON job_role_skills;
+DROP POLICY IF EXISTS tenant_isolation_drives ON drives;
+DROP POLICY IF EXISTS tenant_isolation_eligibility_rule_sets ON eligibility_rule_sets;
+DROP POLICY IF EXISTS tenant_isolation_eligibility_rule_versions ON eligibility_rule_versions;
+DROP POLICY IF EXISTS tenant_isolation_eligibility_decisions ON eligibility_decisions;
+DROP POLICY IF EXISTS tenant_isolation_eligibility_overrides ON eligibility_overrides;
+DROP POLICY IF EXISTS tenant_isolation_recruiter_access_grants ON recruiter_access_grants;
+DROP POLICY IF EXISTS tenant_isolation_applications ON applications;
+DROP POLICY IF EXISTS tenant_isolation_student_outcomes ON student_outcomes;
+DROP POLICY IF EXISTS tenant_isolation_agent_runs ON agent_runs;
+DROP POLICY IF EXISTS tenant_isolation_proposals ON proposals;
+DROP POLICY IF EXISTS tenant_isolation_audit_events ON audit_events;
+DROP POLICY IF EXISTS tenant_insert_audit_events ON audit_events;
+DROP POLICY IF EXISTS tenant_isolation_fairness_reviews ON fairness_reviews;
+DROP POLICY IF EXISTS tenant_isolation_fairness_simulations ON fairness_simulations;
 
 -- 3. Define Clean, Scoped Tenant Policies with Explicit USING and WITH CHECK clauses
 
@@ -508,3 +542,4 @@ GRANT USAGE ON SCHEMA public TO fairness_job;
 GRANT SELECT ON students, student_group_attributes, drives, eligibility_decisions, eligibility_rule_versions TO fairness_job;
 GRANT SELECT, INSERT, UPDATE ON fairness_reviews, fairness_simulations TO fairness_job;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO fairness_job;
+

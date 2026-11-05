@@ -14,11 +14,12 @@ $$\text{Evidence} \rightarrow \text{Observed Skill} \rightarrow \text{Verificati
 
 Following the initial M0 and M1 build, an **independent engineering verification audit** was conducted against live PostgreSQL 17 on Supabase (`db.qshujrddrzoemlzmleru.supabase.co`).
 - Real database RLS isolation was proven at the database kernel level under `app_api` (`NOBYPASSRLS`) across all 42 tables.
-- Skill state database constraints and verification triggers (`trg_check_skill_evidence_owner`, `trg_verify_skill_evidence`) were deployed and verified across all 8 verification paths.
-- The 5-state skill lifecycle was expanded to cover all authoritative transitions.
-- The consent revocation workflow was enhanced to handle local token purge, derived artifact withdrawal, and skill downgrades.
-- The audit log was hardened with two-layer defense-in-depth (least privilege DCL + BEFORE trigger immutability) and SHA-256 hash chaining across 6 tampering scenarios.
-- All 68 tests pass in CI across unit, mocked API, and genuine PostgreSQL 17 integration layers.
+- Genuine Supabase JWT authentication was implemented and verified with `jose` and `AuthService`, eliminating `x-user-id` and plain user ID fallbacks.
+- Application-to-database integration adapters (`PgTenantRepository`, `PgAuditRepository`, `PgConsentRepository`, `PgUserRepository`) were built on Node.js `pg.Pool` with transaction-scoped `SET LOCAL` isolation.
+- Genuine connection-pool socket reuse was verified using backend PID comparison on a single physical connection pool.
+- Endpoint-level RBAC and ownership authorization guards were deployed on `/api/tenants`, `/api/students`, `/api/consent/grant`, `/api/consent/revoke`, `/api/audit`, and `/api/audit/verify`.
+- Safe, scoped, versioned RLS migration replaced dynamic drop loops in `db/policies/002_comprehensive_rls_hardening.sql`.
+- All 82 tests pass across 13 test files covering pure domain logic, Fastify mock API tests, and genuine live Supabase PostgreSQL integration.
 
 ---
 
@@ -27,9 +28,9 @@ Following the initial M0 and M1 build, an **independent engineering verification
 | Tier | Description | Files / Tests | Status |
 | :--- | :--- | :--- | :--- |
 | **Pure Unit Tests** | Pure domain logic: state machine, anchor hashing, audit hash chaining, eligibility rules, 4/5ths fairness math. | 5 files, 29 tests | `UNIT_TESTED` (Passing in 30ms) |
-| **API & Membership Mock Tests** | Fastify HTTP endpoints, session derivation strictly from user memberships, tenant isolation, and consent ledger. | 5 files, 20 tests | `INTEGRATION_TESTED` (Passing in 290ms) |
-| **Live Database Tests** | Real PostgreSQL 17 on Supabase: RLS isolation, cross-tenant mutation rejection, triggers, constraints, DCL permissions. | 1 file, 19 tests | `SECURITY_VERIFIED` (Passing on live Supabase DB) |
-| **Total Suite** | Full monorepo test pack running under Vitest. | **11 files, 68 tests** | **100% Passing** |
+| **API & Authentication Tests** | Fastify HTTP endpoints, genuine Supabase JWT verification (signature, expiry, forgery), RBAC and ownership guards. | 5 files, 31 tests | `INTEGRATION_TESTED` (Passing in 320ms) |
+| **Live Database Tests** | Real PostgreSQL 17 on Supabase: RLS isolation, cross-tenant mutation rejection, triggers, constraints, DCL permissions, physical connection reuse via backend PID, and live identity resolution. | 3 files, 22 tests | `SECURITY_VERIFIED` (Passing on live Supabase DB) |
+| **Total Suite** | Full monorepo test pack running under Vitest. | **13 files, 82 tests** | **100% Passing** |
 
 ---
 

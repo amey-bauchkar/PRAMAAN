@@ -3,116 +3,132 @@ import {
   Membership,
   SessionContext
 } from '@pramaan/contracts';
+import { JwtVerifier, VerifiedTokenPayload } from './jwt-verifier.js';
+import { IUserRepository, InMemoryUserRepository } from '../repositories/user-repository.js';
 
 export interface AuthResolutionResult {
   authenticated: boolean;
   context?: SessionContext;
+  tokenClaims?: VerifiedTokenPayload;
   statusCode?: number;
   error?: string;
 }
 
+export interface AuthServiceOptions {
+  jwtVerifier?: JwtVerifier;
+  userRepository?: IUserRepository;
+}
+
 export class AuthService {
-  private users: Map<string, User> = new Map();
-  private memberships: Map<string, Membership[]> = new Map(); // userId -> memberships
+  private jwtVerifier: JwtVerifier;
+  private userRepository: IUserRepository;
 
-  constructor() {
-    this.seedDefaultUsers();
+  constructor(opts: AuthServiceOptions = {}) {
+    this.jwtVerifier = opts.jwtVerifier ?? new JwtVerifier();
+    this.userRepository = opts.userRepository ?? new InMemoryUserRepository();
   }
 
-  private seedDefaultUsers() {
-    // TPO Priya Sharma (Apex Institute)
-    const tpoUser: User = {
-      id: '20000000-0000-0000-0000-000000000001',
-      authSubject: 'auth0|tpo_priya',
-      email: 'priya.sharma@apex.edu',
-      fullName: 'Priya Sharma',
-      createdAt: new Date().toISOString()
-    };
-    this.registerUser(tpoUser);
-    this.addMembership({
-      id: '30000000-0000-0000-0000-000000000001',
-      userId: tpoUser.id,
-      orgId: '00000000-0000-0000-0000-000000000001', // Apex
-      role: 'officer',
-      status: 'active',
-      createdAt: new Date().toISOString()
-    });
-
-    // Student Aarav Patel (Apex Institute)
-    const studentUser: User = {
-      id: '20000000-0000-0000-0000-000000000003',
-      authSubject: 'auth0|student_aarav',
-      email: 'aarav.patel@apex.edu',
-      fullName: 'Aarav Patel',
-      createdAt: new Date().toISOString()
-    };
-    this.registerUser(studentUser);
-    this.addMembership({
-      id: '30000000-0000-0000-0000-000000000003',
-      userId: studentUser.id,
-      orgId: '00000000-0000-0000-0000-000000000001', // Apex
-      departmentId: '10000000-0000-0000-0000-000000000001',
-      role: 'student',
-      status: 'active',
-      createdAt: new Date().toISOString()
-    });
+  public getJwtVerifier(): JwtVerifier {
+    return this.jwtVerifier;
   }
 
-  public registerUser(user: User): User {
-    this.users.set(user.id, user);
-    return user;
+  public getUserRepository(): IUserRepository {
+    return this.userRepository;
   }
 
-  public addMembership(membership: Membership): Membership {
-    const list = this.memberships.get(membership.userId) || [];
-    list.push(membership);
-    this.memberships.set(membership.userId, list);
-    return membership;
+  // Delegation helpers for testing convenience
+  public async registerUser(user: User): Promise<User> {
+    return this.userRepository.registerUser(user);
+  }
+
+  public async addMembership(membership: Membership): Promise<Membership> {
+    return this.userRepository.addMembership(membership);
   }
 
   /**
-   * Resolves session context strictly from authenticated user memberships.
-   * If a client supplies a requestedOrgId, it is verified against active memberships.
-   * Fails closed if unauthenticated or if user attempts to access an organization they do not belong to.
+   * Resolves and verifies session context:
+   * 1. Requires standard 'Authorization: Bearer <JWT>' header.
+   * 2. Rejects plain user IDs, malformed tokens, or fallback headers (x-user-id).
+   * 3. Cryptographically verifies JWT signature, expiry (exp), and claims.
+   * 4. Resolves authenticated identity against PRAMAAN users and active memberships.
+   * 5. Enforces tenant scope: requestedOrgId must match an active membership.
+   * 6. Fails closed with 401/403 for any violation.
    */
-  public resolveContext(
+  public async resolveContext(
     authHeader?: string,
     requestedOrgId?: string
-  ): AuthResolutionResult {
-    if (!authHeader) {
+  ): Promise<AuthResolutionResult> {
+    // 1. Check for authorization header
+    if (!authHeader || typeof authHeader !== 'string') {
       return {
         authenticated: false,
         statusCode: 401,
-        error: 'AUTHENTICATION_REQUIRED: Missing authorization header.'
+        error: 'AUTHENTICATION_REQUIRED: Missing Authorization header.'
       };
     }
 
-    // In production, verify JWT. In this mock/service layer, authHeader represents userId or Bearer token
-    const userId = authHeader.replace(/^Bearer\s+/i, '').trim();
-    const user = this.users.get(userId);
-    if (!user) {
+    // 2. Enforce Bearer scheme (Reject plain user IDs or other schemes)
+    if (!authHeader.startsWith('Bearer ')) {
       return {
         authenticated: false,
         statusCode: 401,
-        error: 'INVALID_CREDENTIALS: User identity could not be verified.'
+        error: 'INVALID_TOKEN_SCHEME: Authorization header must use Bearer scheme (Authorization: Bearer <JWT>).'
       };
     }
 
-    const userMemberships = (this.memberships.get(user.id) || []).filter(
-      m => m.status === 'active'
-    );
+    const token = authHeader.slice(7).trim();
+    if (!token) {
+      return {
+        authenticated: false,
+        statusCode: 401,
+        error: 'EMPTY_TOKEN: Bearer token is empty.'
+      };
+    }
 
-    if (userMemberships.length === 0) {
+    // 3. Cryptographic JWT Verification (Signature, Exp, Structure)
+    const verifyResult = await this.jwtVerifier.verifyToken(token);
+    if (!verifyResult.valid || !verifyResult.payload) {
+      return {
+        authenticated: false,
+        statusCode: 401,
+        error: `INVALID_OR_EXPIRED_JWT: ${verifyResult.error}`
+      };
+    }
+
+    const claims = verifyResult.payload;
+    const authSubject = claims.sub;
+    const email = claims.email as string | undefined;
+
+    // 4. Resolve Identity in Database
+    const userRecord = await this.userRepository.findByAuthSubjectOrEmail(authSubject, email);
+    if (!userRecord || !userRecord.user) {
       return {
         authenticated: false,
         statusCode: 403,
-        error: 'NO_ACTIVE_MEMBERSHIP: User holds no active memberships in any educational institution.'
+        error: `UNREGISTERED_IDENTITY: Authenticated identity '${authSubject}' is not registered with any institution.`
       };
     }
 
-    // If client requested a specific tenant, verify membership
+    const user = userRecord.user;
+
+    // 5. Evaluate Memberships & Tenancy
+    const allMemberships = userRecord.memberships;
+    const activeMemberships = allMemberships.filter(m => m.status === 'active');
+
+    if (activeMemberships.length === 0) {
+      const hasSuspended = allMemberships.some(m => m.status === 'suspended');
+      const hasRevoked = allMemberships.some(m => m.status === 'revoked');
+      const reason = hasSuspended ? 'Membership is suspended.' : hasRevoked ? 'Membership is revoked.' : 'User holds no active memberships in any educational institution.';
+      return {
+        authenticated: false,
+        statusCode: 403,
+        error: `NO_ACTIVE_MEMBERSHIP: ${reason}`
+      };
+    }
+
+    // 6. Handle Client-Requested Tenant Scope
     if (requestedOrgId) {
-      const targetMembership = userMemberships.find(m => m.orgId === requestedOrgId);
+      const targetMembership = activeMemberships.find(m => m.orgId === requestedOrgId);
       if (!targetMembership) {
         return {
           authenticated: false,
@@ -128,12 +144,13 @@ export class AuthService {
           orgId: targetMembership.orgId,
           role: targetMembership.role,
           departmentId: targetMembership.departmentId ?? null
-        }
+        },
+        tokenClaims: claims
       };
     }
 
-    // Default to user's first active membership
-    const primary = userMemberships[0];
+    // 7. Default to User's Primary Active Membership
+    const primary = activeMemberships[0];
     return {
       authenticated: true,
       context: {
@@ -141,7 +158,8 @@ export class AuthService {
         orgId: primary.orgId,
         role: primary.role,
         departmentId: primary.departmentId ?? null
-      }
+      },
+      tokenClaims: claims
     };
   }
 }

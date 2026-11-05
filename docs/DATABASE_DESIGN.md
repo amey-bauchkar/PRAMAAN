@@ -415,3 +415,32 @@ CREATE POLICY tenant_isolation_policy ON students
 - **RLS-13:** Evidence grafting is prohibited at the database kernel level: `trg_check_skill_evidence_owner` rejects linking foreign student evidence to student skills.
 - **RLS-14:** Skill state promotion to `verified` requires qualifying accepted evidence and passing verification session via `trg_verify_skill_evidence`.
 
+---
+
+## 4. Connection Pooling Architecture & Safe Migrations
+
+### 4.1 Node.js PostgreSQL Pool & `withTenantTransaction` Pattern
+To maintain strict tenant isolation across pooled physical connections without bleed:
+1. Connections are acquired from `pg.Pool` (`max: 10`, `connectionTimeoutMillis: 5000`).
+2. Every request is wrapped in an explicit transaction (`BEGIN; ... COMMIT;`).
+3. Inside the transaction, the role and tenant context are injected using `SET LOCAL`:
+   ```sql
+   SET LOCAL ROLE app_api;
+   SET LOCAL "app.current_org_id" = $1;
+   ```
+4. All queries within the callback use parameterized values.
+5. In the `finally` block, the client connection is released back to the pool. When the transaction finishes, PostgreSQL automatically resets all `SET LOCAL` variables to their initial state.
+6. If a subsequent query on the same connection omits `SET LOCAL "app.current_org_id"`, `current_app_org_id()` returns `NULL`, causing `org_id = NULL` to evaluate to falsy and returning **0 rows** (fail-closed behavior verified via `db/tests/connection-pool-reuse.test.ts` with `SELECT pg_backend_pid()`).
+
+### 4.2 Safe, Versioned Migration Design (`002_comprehensive_rls_hardening.sql`)
+Dynamic `DO $$ ... DROP POLICY ... LOOP` constructs were replaced with explicit, scoped, idempotent drops:
+```sql
+DROP POLICY IF EXISTS tenant_isolation_organizations ON organizations;
+DROP POLICY IF EXISTS tenant_isolation_students ON students;
+...
+```
+This ensures:
+1. Re-running migrations never drops policies created by other extensions or future migrations.
+2. Changes are auditable in git diffs.
+3. Zero silent policy deletions occur.
+
