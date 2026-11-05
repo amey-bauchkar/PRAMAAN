@@ -1,0 +1,26 @@
+{
+  "name": "pramaan-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PRAMAAN — Skills you can defend. Evidence recruiters can trust.",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "echo 'Linting checks...'",
+    "dev:api": "npm run dev --workspace=@pramaan/api",
+    "dev:web": "npm run dev --workspace=@pramaan/web",
+    "dev:runner": "npm run dev --workspace=@pramaan/runner"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
+

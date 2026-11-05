@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false
+  },
+  "include": ["packages/**/*", "apps/**/*", "db/**/*"],
+  "exclude": ["node_modules", "dist", ".next"]
+}
+

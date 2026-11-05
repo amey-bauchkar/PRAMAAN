@@ -1,0 +1,21 @@
+{
+  "name": "@pramaan/domain",
+  "version": "1.0.0",
+  "description": "Pure domain business logic, invariants, and calculators for PRAMAAN",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc -w",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@pramaan/contracts": "*",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
+
