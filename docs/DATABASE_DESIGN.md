@@ -403,13 +403,15 @@ CREATE POLICY tenant_isolation_policy ON students
 ```
 
 ### RLS Verification Rules Matrix
-- **RLS-01:** Every table containing `org_id` has RLS enabled and forced.
-- **RLS-02:** A student of College A receives 0 rows when attempting to query College B records.
-- **RLS-03:** A TPO of College A receives a permission denial on any mutation targeting College B.
-- **RLS-04:** Context isolation is maintained under concurrent connection pooling without bleed.
-- **RLS-05:** Application role (`app_api`) has `NOBYPASSRLS` and cannot issue `SET row_security = off`.
+- **RLS-01:** Every table containing `org_id` has RLS enabled and forced (All 42 tables verified via `scripts/audit-rls-inventory.mjs`).
+- **RLS-02:** A student/user of College A receives 0 rows when attempting to query College B records.
+- **RLS-03:** A user of College A receives a permission denial on cross-tenant INSERT, and 0 rows affected on UPDATE/DELETE targeting College B.
+- **RLS-04:** Context isolation is maintained under concurrent connection pooling without bleed (`SET LOCAL "app.current_org_id"` automatically resets on transaction commit/abort; queries fail-closed when context is absent).
+- **RLS-05:** Application roles (`app_api`, `ai_worker`, `fairness_job`) have `NOBYPASSRLS`.
 - **RLS-06:** University Admin can only access aggregate views; direct student row queries return 0 rows.
 - **RLS-09:** Students cannot query `eligibility_decisions` where `status = 'provisional'`.
-- **RLS-11:** AI worker role has `SELECT` only on authorized views and `INSERT` exclusively on `proposals`.
-- **RLS-12:** `audit_events` is strictly append-only; `UPDATE` and `DELETE` grants are omitted.
+- **RLS-11:** AI worker role has `SELECT` only on authorized views and `INSERT` exclusively on `proposals` and `agent_runs`.
+- **RLS-12:** `audit_events` is strictly append-only; `UPDATE` and `DELETE` grants are omitted at DCL level, and `trg_audit_events_immutable` denies UPDATE and DELETE.
+- **RLS-13:** Evidence grafting is prohibited at the database kernel level: `trg_check_skill_evidence_owner` rejects linking foreign student evidence to student skills.
+- **RLS-14:** Skill state promotion to `verified` requires qualifying accepted evidence and passing verification session via `trg_verify_skill_evidence`.
 

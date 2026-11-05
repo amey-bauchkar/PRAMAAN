@@ -8,6 +8,8 @@ import {
 
 export interface StateTransitionContext {
   studentSkillId: string;
+  studentId?: string;
+  skillId?: string;
   currentState: SkillState;
   targetState: SkillState;
   actorType: 'student' | 'mentor' | 'officer' | 'evaluator_service' | 'expiry_cron';
@@ -19,6 +21,7 @@ export interface StateTransitionContext {
     probeResult?: ProbeRunResult;
     attestation?: Attestation;
     verificationId: string;
+    outcome?: 'passed' | 'failed' | 'inconclusive_review_required';
   };
 }
 
@@ -90,6 +93,18 @@ export class SkillStateMachine {
           error: `All attached evidence items must have status 'accepted'.`
         };
       }
+
+      // Ownership check: evidence must belong to the same student
+      if (context.studentId) {
+        const foreignEvidence = acceptedEvidence.find(e => e.studentId !== context.studentId);
+        if (foreignEvidence) {
+          return {
+            success: false,
+            newState: currentState,
+            error: `Evidence ownership violation: Cannot link evidence belonging to another student (${foreignEvidence.studentId}).`
+          };
+        }
+      }
     }
 
     // 3. Invariant: Moving to 'verified' STRICTLY requires accepted evidence AND qualifying verification
@@ -104,12 +119,34 @@ export class SkillStateMachine {
       }
 
       // Check evidence requirement
-      if (!acceptedEvidence || acceptedEvidence.length === 0 || !acceptedEvidence.some(e => e.status === 'accepted')) {
+      if (!acceptedEvidence || acceptedEvidence.length === 0) {
         return {
           success: false,
           newState: currentState,
           error: `Cannot transition to 'verified' without at least one accepted evidence item linked to this skill.`
         };
+      }
+
+      // Disallow withdrawn, rejected or submitted evidence
+      const validAccepted = acceptedEvidence.filter(e => e.status === 'accepted');
+      if (validAccepted.length === 0) {
+        return {
+          success: false,
+          newState: currentState,
+          error: `Cannot transition to 'verified' using withdrawn or non-accepted evidence.`
+        };
+      }
+
+      // Ownership check: evidence must belong to the student
+      if (context.studentId) {
+        const foreign = acceptedEvidence.find(e => e.studentId !== context.studentId);
+        if (foreign) {
+          return {
+            success: false,
+            newState: currentState,
+            error: `Evidence ownership violation: Cannot verify using evidence belonging to a different student (${foreign.studentId}).`
+          };
+        }
       }
 
       // Check verification record requirement
@@ -118,6 +155,15 @@ export class SkillStateMachine {
           success: false,
           newState: currentState,
           error: `Cannot transition to 'verified' without an attached qualifying verification record.`
+        };
+      }
+
+      // Check overall outcome if provided
+      if (verificationResult.outcome && verificationResult.outcome !== 'passed') {
+        return {
+          success: false,
+          newState: currentState,
+          error: `Verification session outcome is '${verificationResult.outcome}'. Expected 'passed'.`
         };
       }
 

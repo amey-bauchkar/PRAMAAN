@@ -1,16 +1,18 @@
-import Fastify, { FastifyInstance } from 'fastify';
+import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import { TenantStore } from './services/tenant-store.js';
 import { AuditService } from './services/audit-service.js';
 import { ConsentService } from './services/consent-service.js';
+import { AuthService } from './services/auth-service.js';
 import { SessionContext } from '@pramaan/contracts';
 
 export interface AppOptions {
   tenantStore?: TenantStore;
   auditService?: AuditService;
   consentService?: ConsentService;
+  authService?: AuthService;
 }
 
 export function buildApp(opts: AppOptions = {}): FastifyInstance {
@@ -19,6 +21,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
   const tenantStore = opts.tenantStore ?? new TenantStore();
   const auditService = opts.auditService ?? new AuditService();
   const consentService = opts.consentService ?? new ConsentService(auditService);
+  const authService = opts.authService ?? new AuthService();
 
   app.register(cors, { origin: true });
 
@@ -36,7 +39,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
     routePrefix: '/docs'
   });
 
-  // Health endpoint
+  // Health endpoint (Public)
   app.get('/health', async () => {
     return {
       status: 'healthy',
@@ -45,12 +48,17 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
     };
   });
 
-  // Helper to extract session context from headers (simulating verified JWT middleware)
-  const extractContext = (req: any): SessionContext => {
-    const orgId = req.headers['x-org-id'] as string || '00000000-0000-0000-0000-000000000001';
-    const userId = req.headers['x-user-id'] as string || '20000000-0000-0000-0000-000000000001';
-    const role = (req.headers['x-user-role'] as any) || 'officer';
-    return { orgId, userId, role };
+  // Helper to extract session context strictly via AuthService
+  const resolveSessionContext = (req: FastifyRequest, reply: FastifyReply): SessionContext | null => {
+    const authHeader = (req.headers['authorization'] as string) || (req.headers['x-user-id'] as string);
+    const requestedOrgId = req.headers['x-org-id'] as string | undefined;
+
+    const authRes = authService.resolveContext(authHeader, requestedOrgId);
+    if (!authRes.authenticated || !authRes.context) {
+      reply.status(authRes.statusCode || 401).send({ error: authRes.error });
+      return null;
+    }
+    return authRes.context;
   };
 
   // Organizations / Tenants
@@ -59,14 +67,17 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
   });
 
   // Students under RLS
-  app.get('/api/students', async (req) => {
-    const context = extractContext(req);
+  app.get('/api/students', async (req, reply) => {
+    const context = resolveSessionContext(req, reply);
+    if (!context) return;
     return tenantStore.listStudents(context);
   });
 
   // Consent API
   app.post('/api/consent/grant', async (req, reply) => {
-    const context = extractContext(req);
+    const context = resolveSessionContext(req, reply);
+    if (!context) return;
+
     const body = req.body as any;
 
     if (!body?.studentId || !body?.purpose) {
@@ -85,7 +96,9 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
   });
 
   app.post('/api/consent/revoke', async (req, reply) => {
-    const context = extractContext(req);
+    const context = resolveSessionContext(req, reply);
+    if (!context) return;
+
     const body = req.body as any;
 
     if (!body?.grantId) {
@@ -101,8 +114,9 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
   });
 
   // Audit API
-  app.get('/api/audit', async (req) => {
-    const context = extractContext(req);
+  app.get('/api/audit', async (req, reply) => {
+    const context = resolveSessionContext(req, reply);
+    if (!context) return;
     return auditService.getEventsForTenant(context);
   });
 

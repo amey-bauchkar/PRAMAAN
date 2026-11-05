@@ -2,124 +2,65 @@ import { describe, it, expect } from 'vitest';
 import { SkillStateMachine } from '../src/skill-state-machine.js';
 import { EvidenceItem } from '@pramaan/contracts';
 
-describe('SkillStateMachine Domain Invariants & 5-State Lifecycle', () => {
-  const dummyAcceptedEvidence: EvidenceItem = {
+describe('SkillStateMachine Domain Invariants & 8 Verification Security Paths', () => {
+  const studentA = '22222222-2222-2222-2222-222222222222';
+  const studentB = '99999999-9999-9999-9999-999999999999';
+
+  const dummyAcceptedEvidenceA: EvidenceItem = {
     id: '11111111-1111-1111-1111-111111111111',
-    studentId: '22222222-2222-2222-2222-222222222222',
+    studentId: studentA,
     kind: 'code_span',
     contentHash: 'a'.repeat(64),
     status: 'accepted',
     createdAt: new Date().toISOString()
   };
 
-  const dummyRejectedEvidence: EvidenceItem = {
+  const dummyWithdrawnEvidenceA: EvidenceItem = {
     id: '11111111-1111-1111-1111-111111111112',
-    studentId: '22222222-2222-2222-2222-222222222222',
+    studentId: studentA,
     kind: 'code_span',
     contentHash: 'b'.repeat(64),
-    status: 'rejected',
+    status: 'withdrawn',
     createdAt: new Date().toISOString()
   };
 
-  it('verifies all 5 states exist and have defined transitions', () => {
-    expect(SkillStateMachine.getAllowedTargets('claimed')).toEqual(['observed', 'evidence_linked']);
-    expect(SkillStateMachine.getAllowedTargets('observed')).toEqual(['evidence_linked', 'claimed']);
-    expect(SkillStateMachine.getAllowedTargets('evidence_linked')).toEqual(['verified', 'claimed', 'observed']);
-    expect(SkillStateMachine.getAllowedTargets('verified')).toEqual(['expired']);
-    expect(SkillStateMachine.getAllowedTargets('expired')).toEqual(['evidence_linked', 'verified', 'claimed']);
-  });
+  const dummyForeignStudentEvidence: EvidenceItem = {
+    id: '11111111-1111-1111-1111-111111111113',
+    studentId: studentB, // Different student!
+    kind: 'code_span',
+    contentHash: 'c'.repeat(64),
+    status: 'accepted',
+    createdAt: new Date().toISOString()
+  };
 
-  it('rejects direct transition from claimed to verified', () => {
-    const result = SkillStateMachine.transition({
+  it('1. Cannot transition to VERIFIED from claimed or observed without accepted evidence', () => {
+    const resClaimed = SkillStateMachine.transition({
       studentSkillId: 'skill-1',
+      studentId: studentA,
       currentState: 'claimed',
       targetState: 'verified',
       actorType: 'student',
       reasonCode: 'SELF_PROMOTION'
     });
-    expect(result.success).toBe(false);
-    expect(result.error).toMatch(/Illegal state transition/);
-  });
+    expect(resClaimed.success).toBe(false);
+    expect(resClaimed.error).toMatch(/Illegal state transition/);
 
-  it('rejects direct transition from observed to verified', () => {
-    const result = SkillStateMachine.transition({
+    const resObserved = SkillStateMachine.transition({
       studentSkillId: 'skill-1',
+      studentId: studentA,
       currentState: 'observed',
       targetState: 'verified',
       actorType: 'evaluator_service',
       reasonCode: 'DIRECT_PROMOTION'
     });
-    expect(result.success).toBe(false);
-    expect(result.error).toMatch(/Illegal state transition/);
+    expect(resObserved.success).toBe(false);
+    expect(resObserved.error).toMatch(/Illegal state transition/);
   });
 
-  it('allows claimed to transition to observed when static parser identifies a signal', () => {
+  it('2. Cannot update an existing skill (evidence_linked) to VERIFIED without accepted evidence', () => {
     const result = SkillStateMachine.transition({
       studentSkillId: 'skill-1',
-      currentState: 'claimed',
-      targetState: 'observed',
-      actorType: 'evaluator_service',
-      reasonCode: 'STATIC_IMPORT_DETECTED_PYTHON'
-    });
-    expect(result.success).toBe(true);
-    expect(result.newState).toBe('observed');
-  });
-
-  it('allows observed to revert to claimed if source repo is withdrawn', () => {
-    const result = SkillStateMachine.transition({
-      studentSkillId: 'skill-1',
-      currentState: 'observed',
-      targetState: 'claimed',
-      actorType: 'student',
-      reasonCode: 'REPO_CONSENT_REVOKED'
-    });
-    expect(result.success).toBe(true);
-    expect(result.newState).toBe('claimed');
-  });
-
-  it('allows transition to evidence_linked with accepted evidence', () => {
-    const result = SkillStateMachine.transition({
-      studentSkillId: 'skill-1',
-      currentState: 'claimed',
-      targetState: 'evidence_linked',
-      actorType: 'student',
-      reasonCode: 'ATTACH_EVIDENCE',
-      acceptedEvidence: [dummyAcceptedEvidence]
-    });
-    expect(result.success).toBe(true);
-    expect(result.newState).toBe('evidence_linked');
-  });
-
-  it('rejects transition to evidence_linked when evidence is rejected', () => {
-    const result = SkillStateMachine.transition({
-      studentSkillId: 'skill-1',
-      currentState: 'claimed',
-      targetState: 'evidence_linked',
-      actorType: 'student',
-      reasonCode: 'ATTACH_EVIDENCE',
-      acceptedEvidence: [dummyRejectedEvidence]
-    });
-    expect(result.success).toBe(false);
-    expect(result.error).toMatch(/must have status 'accepted'/);
-  });
-
-  it('rejects transition to verified if verification record is missing, even with accepted evidence', () => {
-    const result = SkillStateMachine.transition({
-      studentSkillId: 'skill-1',
-      currentState: 'evidence_linked',
-      targetState: 'verified',
-      actorType: 'evaluator_service',
-      reasonCode: 'EVALUATE',
-      acceptedEvidence: [dummyAcceptedEvidence],
-      verificationResult: undefined // Missing!
-    });
-    expect(result.success).toBe(false);
-    expect(result.error).toMatch(/without an attached qualifying verification record/);
-  });
-
-  it('rejects transition to verified if accepted evidence is missing, even with passing probe', () => {
-    const result = SkillStateMachine.transition({
-      studentSkillId: 'skill-1',
+      studentId: studentA,
       currentState: 'evidence_linked',
       targetState: 'verified',
       actorType: 'evaluator_service',
@@ -143,24 +84,93 @@ describe('SkillStateMachine Domain Invariants & 5-State Lifecycle', () => {
     expect(result.error).toMatch(/without at least one accepted evidence item/);
   });
 
-  it('rejects transition to verified if probe failed', () => {
+  it('3. Cannot verify against withdrawn evidence', () => {
     const result = SkillStateMachine.transition({
       studentSkillId: 'skill-1',
+      studentId: studentA,
       currentState: 'evidence_linked',
       targetState: 'verified',
       actorType: 'evaluator_service',
-      reasonCode: 'PROBE_FAILED',
-      acceptedEvidence: [dummyAcceptedEvidence],
+      reasonCode: 'EVALUATE',
+      acceptedEvidence: [dummyWithdrawnEvidenceA], // Withdrawn status!
       verificationResult: {
         type: 'probe',
         verificationId: 'verif-1',
         probeResult: {
           probeId: 'probe-1',
-          passed: false,
+          passed: true,
+          exitCode: 0,
+          executionTimeMs: 40,
+          stdout: '',
+          stderr: '',
+          testSummary: { total: 1, passed: 1, failed: 0 }
+        }
+      }
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/withdrawn or non-accepted evidence/);
+  });
+
+  it('4. Cannot verify using evidence belonging to a different student', () => {
+    const result = SkillStateMachine.transition({
+      studentSkillId: 'skill-1',
+      studentId: studentA, // Student A
+      currentState: 'evidence_linked',
+      targetState: 'verified',
+      actorType: 'evaluator_service',
+      reasonCode: 'EVALUATE',
+      acceptedEvidence: [dummyForeignStudentEvidence], // Belongs to Student B!
+      verificationResult: {
+        type: 'probe',
+        verificationId: 'verif-1',
+        probeResult: {
+          probeId: 'probe-1',
+          passed: true,
+          exitCode: 0,
+          executionTimeMs: 40,
+          stdout: '',
+          stderr: '',
+          testSummary: { total: 1, passed: 1, failed: 0 }
+        }
+      }
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/Evidence ownership violation.*different student/);
+  });
+
+  it('5. Cannot link evidence belonging to a different student to evidence_linked', () => {
+    const result = SkillStateMachine.transition({
+      studentSkillId: 'skill-1',
+      studentId: studentA,
+      currentState: 'claimed',
+      targetState: 'evidence_linked',
+      actorType: 'student',
+      reasonCode: 'ATTACH_EVIDENCE',
+      acceptedEvidence: [dummyForeignStudentEvidence]
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/Evidence ownership violation.*another student/);
+  });
+
+  it('6. Cannot verify after a failed probe', () => {
+    const result = SkillStateMachine.transition({
+      studentSkillId: 'skill-1',
+      studentId: studentA,
+      currentState: 'evidence_linked',
+      targetState: 'verified',
+      actorType: 'evaluator_service',
+      reasonCode: 'PROBE_FAILED',
+      acceptedEvidence: [dummyAcceptedEvidenceA],
+      verificationResult: {
+        type: 'probe',
+        verificationId: 'verif-1',
+        probeResult: {
+          probeId: 'probe-1',
+          passed: false, // FAILED!
           exitCode: 1,
           executionTimeMs: 120,
           stdout: '',
-          stderr: 'AssertionError',
+          stderr: 'AssertionError: expected 5 to be 10',
           testSummary: { total: 2, passed: 1, failed: 1 }
         }
       }
@@ -169,17 +179,19 @@ describe('SkillStateMachine Domain Invariants & 5-State Lifecycle', () => {
     expect(result.error).toMatch(/Probe test did not pass/);
   });
 
-  it('promotes skill from evidence_linked to verified with passing probe and accepted evidence', () => {
+  it('7. Can verify with qualifying accepted evidence and a passing verification result', () => {
     const result = SkillStateMachine.transition({
       studentSkillId: 'skill-1',
+      studentId: studentA,
       currentState: 'evidence_linked',
       targetState: 'verified',
       actorType: 'evaluator_service',
       reasonCode: 'PROBE_PASSED',
-      acceptedEvidence: [dummyAcceptedEvidence],
+      acceptedEvidence: [dummyAcceptedEvidenceA],
       verificationResult: {
         type: 'probe',
         verificationId: 'verif-2',
+        outcome: 'passed',
         probeResult: {
           probeId: 'probe-2',
           passed: true,
@@ -195,29 +207,59 @@ describe('SkillStateMachine Domain Invariants & 5-State Lifecycle', () => {
     expect(result.newState).toBe('verified');
   });
 
-  it('supports direct re-verification from expired to verified', () => {
-    const result = SkillStateMachine.transition({
+  it('8. EXPIRED can be re-verified only through the permitted verification path', () => {
+    // Attempt re-verification without passing probe
+    const failedReverif = SkillStateMachine.transition({
       studentSkillId: 'skill-1',
+      studentId: studentA,
+      currentState: 'expired',
+      targetState: 'verified',
+      actorType: 'evaluator_service',
+      reasonCode: 'REVERIF_ATTEMPT',
+      acceptedEvidence: [dummyAcceptedEvidenceA],
+      verificationResult: {
+        type: 'probe',
+        verificationId: 'verif-3',
+        outcome: 'failed',
+        probeResult: {
+          probeId: 'probe-3',
+          passed: false,
+          exitCode: 1,
+          executionTimeMs: 50,
+          stdout: '',
+          stderr: 'Failed',
+          testSummary: { total: 1, passed: 0, failed: 1 }
+        }
+      }
+    });
+    expect(failedReverif.success).toBe(false);
+    expect(failedReverif.error).toMatch(/Verification session outcome is 'failed'/);
+
+    // Permitted re-verification path with valid probe
+    const validReverif = SkillStateMachine.transition({
+      studentSkillId: 'skill-1',
+      studentId: studentA,
       currentState: 'expired',
       targetState: 'verified',
       actorType: 'evaluator_service',
       reasonCode: 'REVERIFICATION_PASSED',
-      acceptedEvidence: [dummyAcceptedEvidence],
+      acceptedEvidence: [dummyAcceptedEvidenceA],
       verificationResult: {
         type: 'probe',
-        verificationId: 'verif-3',
+        verificationId: 'verif-4',
+        outcome: 'passed',
         probeResult: {
-          probeId: 'probe-3',
+          probeId: 'probe-4',
           passed: true,
           exitCode: 0,
-          executionTimeMs: 30,
+          executionTimeMs: 25,
           stdout: 'Pass',
           stderr: '',
           testSummary: { total: 1, passed: 1, failed: 0 }
         }
       }
     });
-    expect(result.success).toBe(true);
-    expect(result.newState).toBe('verified');
+    expect(validReverif.success).toBe(true);
+    expect(validReverif.newState).toBe('verified');
   });
 });

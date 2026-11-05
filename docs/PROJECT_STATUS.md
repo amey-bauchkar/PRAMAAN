@@ -13,11 +13,12 @@ PRAMAAN is an evidence-based placement intelligence platform built for colleges,
 $$\text{Evidence} \rightarrow \text{Observed Skill} \rightarrow \text{Verification} \rightarrow \text{Verified Skill} \rightarrow \text{Skill Passport} \rightarrow \text{Eligibility} \rightarrow \text{Placement Decision}$$
 
 Following the initial M0 and M1 build, an **independent engineering verification audit** was conducted against live PostgreSQL 17 on Supabase (`db.qshujrddrzoemlzmleru.supabase.co`).
-- Real database RLS isolation was proven at the database kernel level under `app_api` (`NOBYPASSRLS`).
-- Skill state database constraints and verification triggers were deployed and verified.
+- Real database RLS isolation was proven at the database kernel level under `app_api` (`NOBYPASSRLS`) across all 42 tables.
+- Skill state database constraints and verification triggers (`trg_check_skill_evidence_owner`, `trg_verify_skill_evidence`) were deployed and verified across all 8 verification paths.
 - The 5-state skill lifecycle was expanded to cover all authoritative transitions.
-- The consent revocation workflow was enhanced to handle derived artifact withdrawal and skill downgrades.
-- All 54 tests pass in CI across unit, mocked API, and genuine PostgreSQL integration layers.
+- The consent revocation workflow was enhanced to handle local token purge, derived artifact withdrawal, and skill downgrades.
+- The audit log was hardened with two-layer defense-in-depth (least privilege DCL + BEFORE trigger immutability) and SHA-256 hash chaining across 6 tampering scenarios.
+- All 68 tests pass in CI across unit, mocked API, and genuine PostgreSQL 17 integration layers.
 
 ---
 
@@ -25,11 +26,10 @@ Following the initial M0 and M1 build, an **independent engineering verification
 
 | Tier | Description | Files / Tests | Status |
 | :--- | :--- | :--- | :--- |
-| **Unit Tests** | Pure domain logic: state machine, anchor hashing, audit hash chaining, eligibility rules, 4/5ths fairness math. | 5 files, 29 tests | `UNIT_TESTED` (Passing in 30ms) |
-| **Mocked Store Tests** | In-memory simulation of tenant isolation, student visibility, and consent ledger. | 3 files, 11 tests | `UNIT_TESTED` (Passing in 25ms) |
-| **Mocked API Tests** | Fastify HTTP endpoints testing `/health`, `/api/tenants`, `/api/consent`, `/api/audit`. | 1 file, 3 tests | `INTEGRATION_TESTED` (Passing in 225ms) |
-| **Live Database Tests** | Real PostgreSQL 17 on Supabase: RLS isolation, cross-tenant mutation rejection, triggers, constraints. | 1 file, 11 tests | `SECURITY_VERIFIED` (Passing on live Supabase DB) |
-| **Total Suite** | Full monorepo test pack running under Vitest. | **10 files, 54 tests** | **100% Passing** |
+| **Pure Unit Tests** | Pure domain logic: state machine, anchor hashing, audit hash chaining, eligibility rules, 4/5ths fairness math. | 5 files, 29 tests | `UNIT_TESTED` (Passing in 30ms) |
+| **API & Membership Mock Tests** | Fastify HTTP endpoints, session derivation strictly from user memberships, tenant isolation, and consent ledger. | 5 files, 20 tests | `INTEGRATION_TESTED` (Passing in 290ms) |
+| **Live Database Tests** | Real PostgreSQL 17 on Supabase: RLS isolation, cross-tenant mutation rejection, triggers, constraints, DCL permissions. | 1 file, 19 tests | `SECURITY_VERIFIED` (Passing on live Supabase DB) |
+| **Total Suite** | Full monorepo test pack running under Vitest. | **11 files, 68 tests** | **100% Passing** |
 
 ---
 

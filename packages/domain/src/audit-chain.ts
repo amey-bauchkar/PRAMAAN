@@ -35,13 +35,21 @@ export class AuditChain {
     for (let i = 0; i < events.length; i++) {
       const current = events[i];
 
-      // Check sequence monotonicity
+      // Check sequence monotonicity and genesis anchor
       if (i === 0) {
-        if (current.prevHash !== this.GENESIS_HASH && current.seq !== 1) {
-          // If not starting from 1, ensure prevHash is non-empty
-          if (!current.prevHash) {
-            return { valid: false, brokenAtSeq: current.seq, error: 'Genesis or previous hash missing' };
-          }
+        if (current.seq === 1 && current.prevHash !== this.GENESIS_HASH) {
+          return {
+            valid: false,
+            brokenAtSeq: current.seq,
+            error: `Invalid genesis block hash at seq 1: expected ${this.GENESIS_HASH}, found ${current.prevHash}`
+          };
+        }
+        if (!current.prevHash || current.prevHash.length !== 64) {
+          return {
+            valid: false,
+            brokenAtSeq: current.seq,
+            error: `Invalid previous hash format at seq ${current.seq}`
+          };
         }
       } else {
         const previous = events[i - 1];
