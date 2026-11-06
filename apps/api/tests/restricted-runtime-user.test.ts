@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { getDbPool, withTenantTransaction } from '../src/db/pool.js';
 import { PgTenantRepository } from '../src/repositories/tenant-repository.js';
-import { runQuery } from '../../../scripts/supabase-runner.mjs';
+import { runQuery, assertSafeTestEnvironment, assertNotInstitutionalTenant } from '../../../scripts/supabase-runner.mjs';
 import pg from 'pg';
 
 describe('Production Security: Restricted Runtime Database Login Verification (P0-2, P0-3)', () => {
@@ -17,6 +17,15 @@ describe('Production Security: Restricted Runtime Database Login Verification (P
     try {
       process.loadEnvFile?.();
     } catch {}
+
+    // Security environment safety guard: prevent running against production
+    assertSafeTestEnvironment('Restricted runtime user integration tests');
+
+    // Tenant protection check: ensure fixtures do not collide with institutional records
+    const fixtureIds = [TENANT_A_ID, TENANT_B_ID, PARENT_UNI_ID, UNRELATED_UNI_ID, STANDALONE_COLLEGE_ID];
+    for (const id of fixtureIds) {
+      assertNotInstitutionalTenant(id, 'Fixture seeding');
+    }
 
     pool = getDbPool();
 

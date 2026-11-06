@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { runQuery } from '../../scripts/supabase-runner.mjs';
+import { runQuery, assertSafeTestEnvironment, assertNotInstitutionalTenant } from '../../scripts/supabase-runner.mjs';
 
 describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariants', () => {
-  // Deterministic Test Fixtures UUIDs
+  // Deterministic Test Fixtures UUIDs (Strictly distinct from institutional tenants)
   const COLLEGE_A = 'a0000000-0000-0000-0000-000000000001';
   const COLLEGE_B = 'b0000000-0000-0000-0000-000000000002';
+  const TEST_AUDIT_TENANT_ID = 'e0000000-0000-0000-0000-000000000099';
   const USER_A = 'a1000000-0000-0000-0000-000000000001';
   const USER_B = 'b1000000-0000-0000-0000-000000000002';
   const DEPT_A = 'a2000000-0000-0000-0000-000000000001';
@@ -33,21 +34,37 @@ describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariant
       DELETE FROM students WHERE id IN ('${STUDENT_A}', '${STUDENT_B}');
       DELETE FROM departments WHERE id IN ('${DEPT_A}', '${DEPT_B}');
       DELETE FROM users WHERE id IN ('${USER_A}', '${USER_B}');
-      DELETE FROM organizations WHERE id IN ('${COLLEGE_A}', '${COLLEGE_B}');
+      DELETE FROM organizations WHERE id IN ('${COLLEGE_A}', '${COLLEGE_B}', '${TEST_AUDIT_TENANT_ID}');
     `);
   };
 
   beforeAll(async () => {
-    // 1. Initial cleanup to prevent state collisions
+    // 1. Security environment safety guard: prevent running against production
+    assertSafeTestEnvironment('supabase-real-db test suite');
+
+    // 2. Assert fixtures do not collide with institutional production records
+    const fixtureOrgs = [COLLEGE_A, COLLEGE_B, TEST_AUDIT_TENANT_ID];
+    for (const org of fixtureOrgs) {
+      assertNotInstitutionalTenant(org, 'Test fixture seeding');
+    }
+
+    // 3. Pre-cleanup to clear any leftover test artifacts from aborted runs
+    try {
+      await runQuery(`ALTER TABLE audit_events DISABLE TRIGGER trg_audit_events_immutable;`);
+      await runQuery(`DELETE FROM audit_events WHERE org_id = '${TEST_AUDIT_TENANT_ID}' OR seq = 99991;`);
+    } finally {
+      await runQuery(`ALTER TABLE audit_events ENABLE TRIGGER trg_audit_events_immutable;`);
+    }
     await cleanupFixtures();
 
-    // 2. Deterministic Seeding as administrative role
+    // 4. Deterministic Seeding as administrative role
     await runQuery(`
       -- Seed Organizations
       INSERT INTO organizations (id, name, kind)
       VALUES 
         ('${COLLEGE_A}', 'Apex Engineering College Test', 'college'),
-        ('${COLLEGE_B}', 'Zenith Institute Test', 'college');
+        ('${COLLEGE_B}', 'Zenith Institute Test', 'college'),
+        ('${TEST_AUDIT_TENANT_ID}', 'Audit Immutability Dedicated Fixture Tenant', 'college');
 
       -- Seed Users
       INSERT INTO users (id, auth_subject, email, full_name)
@@ -99,7 +116,19 @@ describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariant
   });
 
   afterAll(async () => {
-    await cleanupFixtures();
+    // Unconditional cleanup: ensure audit test events are deleted and immutability trigger is safely re-enabled
+    try {
+      try {
+        await runQuery(`ALTER TABLE audit_events DISABLE TRIGGER trg_audit_events_immutable;`);
+        await runQuery(`DELETE FROM audit_events WHERE org_id = '${TEST_AUDIT_TENANT_ID}' OR seq = 99991;`);
+      } finally {
+        await runQuery(`ALTER TABLE audit_events ENABLE TRIGGER trg_audit_events_immutable;`);
+      }
+    } catch (cleanupErr) {
+      console.error('Audit cleanup notice in afterAll:', cleanupErr);
+    } finally {
+      await cleanupFixtures();
+    }
   });
 
   // ============================================================================
@@ -423,15 +452,15 @@ describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariant
   // ============================================================================
 
   it('17. Audit Immutability Layer 1: app_api role is denied UPDATE and DELETE privileges at DCL level', async () => {
-    // Insert an audit event under College A
+    // Insert an audit event under dedicated fixture tenant (TEST_AUDIT_TENANT_ID)
     await runQuery(`
       BEGIN;
       SET LOCAL ROLE app_api;
-      SET LOCAL "app.current_org_id" = '${COLLEGE_A}';
+      SET LOCAL "app.current_org_id" = '${TEST_AUDIT_TENANT_ID}';
       INSERT INTO audit_events (seq, org_id, actor_type, action, object_type, prev_hash, hash)
       VALUES (
         99991,
-        '${COLLEGE_A}',
+        '${TEST_AUDIT_TENANT_ID}',
         'service',
         'AUDIT_VERIFICATION_TEST',
         'test_record',
@@ -445,10 +474,10 @@ describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariant
     const updateSql = `
       BEGIN;
       SET LOCAL ROLE app_api;
-      SET LOCAL "app.current_org_id" = '${COLLEGE_A}';
+      SET LOCAL "app.current_org_id" = '${TEST_AUDIT_TENANT_ID}';
       UPDATE audit_events 
       SET action = 'MALICIOUS_TAMPER' 
-      WHERE seq = 99991;
+      WHERE seq = 99991 AND org_id = '${TEST_AUDIT_TENANT_ID}';
       COMMIT;
     `;
     await expect(runQuery(updateSql)).rejects.toThrow(/permission denied for table audit_events/);
@@ -457,8 +486,8 @@ describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariant
     const deleteSql = `
       BEGIN;
       SET LOCAL ROLE app_api;
-      SET LOCAL "app.current_org_id" = '${COLLEGE_A}';
-      DELETE FROM audit_events WHERE seq = 99991;
+      SET LOCAL "app.current_org_id" = '${TEST_AUDIT_TENANT_ID}';
+      DELETE FROM audit_events WHERE seq = 99991 AND org_id = '${TEST_AUDIT_TENANT_ID}';
       COMMIT;
     `;
     await expect(runQuery(deleteSql)).rejects.toThrow(/permission denied for table audit_events/);
@@ -469,7 +498,7 @@ describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariant
     const superuserUpdate = `
       UPDATE audit_events 
       SET action = 'TRIGGER_PROHIBIT_TEST' 
-      WHERE seq = 99991;
+      WHERE seq = 99991 AND org_id = '${TEST_AUDIT_TENANT_ID}';
     `;
 
     await expect(runQuery(superuserUpdate)).rejects.toThrow(/audit_events is append-only: UPDATE and DELETE operations are strictly prohibited/);
@@ -478,16 +507,9 @@ describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariant
   it('19. Audit Immutability Layer 2: Trigger trg_audit_events_immutable prohibits DELETE regardless of privileges', async () => {
     // Attempt DELETE as superuser
     const superuserDelete = `
-      DELETE FROM audit_events WHERE seq = 99991;
+      DELETE FROM audit_events WHERE seq = 99991 AND org_id = '${TEST_AUDIT_TENANT_ID}';
     `;
 
     await expect(runQuery(superuserDelete)).rejects.toThrow(/audit_events is append-only: UPDATE and DELETE operations are strictly prohibited/);
-
-    // Administrative cleanup of the test event using explicit DISABLE TRIGGER
-    await runQuery(`
-      ALTER TABLE audit_events DISABLE TRIGGER trg_audit_events_immutable;
-      DELETE FROM audit_events WHERE seq = 99991;
-      ALTER TABLE audit_events ENABLE TRIGGER trg_audit_events_immutable;
-    `);
   });
 });

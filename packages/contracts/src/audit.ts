@@ -25,14 +25,18 @@ export const AuditChainVerificationStatusSchema = z.enum([
 export type AuditChainVerificationStatus = z.infer<typeof AuditChainVerificationStatusSchema>;
 
 export const TrustedCheckpointSchema = z.object({
-  seq: z.number().int().nonnegative(),
-  hash: z.string().length(64),
+  orgId: z.string().uuid(),
+  seq: z.number().int().nonnegative().finite(),
+  hash: z.string().length(64).regex(/^[0-9a-fA-F]{64}$/),
+  signature: z.string().min(1),
+  signedAt: z.string().datetime(),
 });
 export type TrustedCheckpoint = z.infer<typeof TrustedCheckpointSchema>;
 
 export const AuditChainVerificationResultSchema = z.object({
   valid: z.boolean(),
   status: AuditChainVerificationStatusSchema,
+  isComplete: z.boolean(),
   brokenAtSeq: z.number().int().positive().optional(),
   error: z.string().optional(),
 });

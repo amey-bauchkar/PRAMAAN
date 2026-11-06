@@ -8,6 +8,31 @@ try {
 const SUPABASE_MANAGEMENT_TOKEN = process.env.SUPABASE_MANAGEMENT_TOKEN;
 const PROJECT_REF = process.env.SUPABASE_PROJECT_REF || 'qshujrddrzoemlzmleru';
 
+export const INSTITUTIONAL_ORG_IDS = Object.freeze([
+  '00000000-0000-0000-0000-000000000001',
+  '00000000-0000-0000-0000-000000000002',
+]);
+
+export function assertSafeTestEnvironment(operation = 'Database integration test / destructive operation') {
+  const nodeEnv = (process.env.NODE_ENV || '').toLowerCase();
+  const env = (process.env.ENVIRONMENT || '').toLowerCase();
+  const vercelEnv = (process.env.VERCEL_ENV || '').toLowerCase();
+
+  if (nodeEnv === 'production' || env === 'production' || vercelEnv === 'production') {
+    throw new Error(
+      `[SECURITY_GUARD] Operation blocked: "${operation}" cannot be executed in a production environment (NODE_ENV=${process.env.NODE_ENV}, ENVIRONMENT=${process.env.ENVIRONMENT}).`
+    );
+  }
+}
+
+export function assertNotInstitutionalTenant(orgId, operation = 'Destructive operation') {
+  if (INSTITUTIONAL_ORG_IDS.includes(orgId)) {
+    throw new Error(
+      `[SECURITY_GUARD] Institutional tenant protection: Cannot perform ${operation} on production institutional tenant ${orgId}. Use an isolated test fixture tenant instead.`
+    );
+  }
+}
+
 export async function runQuery(sql) {
   const adminUrl = process.env.DATABASE_URL_ADMIN;
   if (adminUrl) {
