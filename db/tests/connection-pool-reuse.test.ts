@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import pg from 'pg';
+// @ts-ignore
 import { runQuery } from '../../scripts/supabase-runner.mjs';
+// @ts-ignore
 import { resolveAdminSslConfig } from '../../scripts/admin-db-ssl.mjs';
 
 describe('Real PostgreSQL Connection Pooling: Physical Connection Reuse & Context Isolation', () => {
