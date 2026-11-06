@@ -259,6 +259,14 @@ describe('Database Test Safety Guard & Production Target Protection (Final Harde
     await expect(runQuery('INSERT INTO students (id) VALUES (1);')).rejects.toThrow(
       /Destructive or mutating database operations require direct DATABASE_URL_ADMIN PostgreSQL connectivity/
     );
+
+    await expect(runQuery('MERGE INTO students s USING n ON s.id = n.id WHEN MATCHED THEN UPDATE SET name = n.name;')).rejects.toThrow(
+      /Destructive or mutating database operations require direct DATABASE_URL_ADMIN PostgreSQL connectivity/
+    );
+
+    await expect(runQuery('SELECT * INTO student_backup FROM students;')).rejects.toThrow(
+      /Destructive or mutating database operations require direct DATABASE_URL_ADMIN PostgreSQL connectivity/
+    );
   });
 
   it('17. runQuery rejects Management API execution when project ref is unapproved or missing', async () => {
@@ -334,8 +342,56 @@ describe('Database Test Safety Guard & Production Target Protection (Final Harde
     }
   });
 
-  // --- 6. Institutional Tenant Protection ---
-  it('21. Protects institutional tenant records from destructive operations', () => {
+  // --- 6. PostgreSQL MERGE and SELECT INTO Detection ---
+  it('21. isDestructiveQuery and isMutationQuery detect PostgreSQL MERGE and SELECT INTO statements', () => {
+    const mergeAndSelectInto = [
+      'MERGE INTO students s USING new_data n ON s.id = n.id WHEN MATCHED THEN UPDATE SET name = n.name;',
+      'MERGE INTO target_table USING source_table ON 1=1;',
+      'SELECT * INTO student_backup FROM students;',
+      'SELECT id, name INTO TEMP temp_table FROM students;',
+      'SELECT a, b INTO TEMPORARY TABLE my_temp FROM t;',
+      'SELECT 1 INTO new_table;'
+    ];
+
+    for (const sql of mergeAndSelectInto) {
+      expect(isMutationQuery(sql)).toBe(true);
+      expect(isDestructiveQuery(sql)).toBe(true);
+    }
+  });
+
+  it('22. Comments and whitespace cannot hide MERGE or SELECT INTO statements', () => {
+    const hiddenQueries = [
+      '/* comment */ MERGE INTO students USING source ON 1=1;',
+      '-- line comment\nSELECT * INTO student_backup FROM students;',
+      'SELECT 1; MERGE INTO students USING source ON 1=1;',
+      'SELECT 1; SELECT * INTO backup FROM users;',
+      'SELECT 1;\n-- inline comment\nSELECT * INTO backup FROM users;'
+    ];
+
+    for (const sql of hiddenQueries) {
+      expect(isMutationQuery(sql)).toBe(true);
+      expect(isDestructiveQuery(sql)).toBe(true);
+    }
+  });
+
+  it('23. Preserves normal read-only SELECT queries when string literals or comments contain MERGE or INTO', () => {
+    const safeSelects = [
+      "SELECT 'MERGE' AS action, 'INTO' AS preposition FROM students;",
+      "SELECT 'SELECT * INTO backup FROM students' AS template;",
+      '/* comment mentioning MERGE and SELECT INTO */ SELECT 1;',
+      '-- comment about MERGE INTO\nSELECT 1;',
+      'SELECT "MERGE", "INTO" FROM test_table;',
+      "SELECT * FROM students WHERE notes LIKE '%into%';"
+    ];
+
+    for (const sql of safeSelects) {
+      expect(isMutationQuery(sql)).toBe(false);
+      expect(isDestructiveQuery(sql)).toBe(false);
+    }
+  });
+
+  // --- 7. Institutional Tenant Protection ---
+  it('24. Protects institutional tenant records from destructive operations', () => {
     for (const orgId of INSTITUTIONAL_ORG_IDS) {
       expect(() => assertNotInstitutionalTenant(orgId, 'DELETE')).toThrow(
         /Institutional tenant protection/
@@ -343,13 +399,13 @@ describe('Database Test Safety Guard & Production Target Protection (Final Harde
     }
   });
 
-  it('22. Allows fixture operations on non-institutional test UUIDs', () => {
+  it('25. Allows fixture operations on non-institutional test UUIDs', () => {
     const testFixtureId = 'e0000000-0000-0000-0000-000000000099';
     expect(() => assertNotInstitutionalTenant(testFixtureId, 'DELETE')).not.toThrow();
   });
 
-  // --- 7. safeCleanupTestAuditEvents Exact Identifier Requirements ---
-  it('23. safeCleanupTestAuditEvents requires all 5 exact identifiers and fails if any are omitted', async () => {
+  // --- 8. safeCleanupTestAuditEvents Exact Identifier Requirements ---
+  it('26. safeCleanupTestAuditEvents requires all 5 exact identifiers and fails if any are omitted', async () => {
     const validParams = {
       orgId: 'e0000000-0000-0000-0000-000000000099',
       seq: 99991,

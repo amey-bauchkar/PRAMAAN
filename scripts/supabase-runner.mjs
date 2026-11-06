@@ -253,7 +253,7 @@ export function isMutationQuery(sql) {
   const cleaned = cleanSqlForInspection(sql);
   if (!cleaned) return false;
 
-  const mutationKeywordsRegex = /\b(INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER|CREATE|GRANT|REVOKE|RENAME|DO|CALL|EXECUTE|VACUUM|REINDEX|COPY|LOCK)\b/i;
+  const mutationKeywordsRegex = /\b(INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER|CREATE|GRANT|REVOKE|RENAME|DO|CALL|EXECUTE|VACUUM|REINDEX|COPY|LOCK|MERGE|INTO|CLUSTER|REFRESH|CHECKPOINT|REASSIGN)\b/i;
   return mutationKeywordsRegex.test(cleaned);
 }
 

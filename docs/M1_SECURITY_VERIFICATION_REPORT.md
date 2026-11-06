@@ -4,7 +4,7 @@
 **Project:** PRAMAAN (QUASAR 5.0 — EdTech Domain)  
 **Database Target:** Real PostgreSQL 17.11 on Supabase (`db.qshujrddrzoemlzmleru.supabase.co`)  
 **Auditor / Engineer:** Principal Software Architect & Security Engineer (Antigravity Solo Partner)  
-**Verification Status:** **PASSED & SECURITY VERIFIED** (100% of 207 tests passing across 23 test suites)
+**Verification Status:** **PASSED & SECURITY VERIFIED** (100% of 210 tests passing across 23 test suites)
 
 ---
 
@@ -34,8 +34,8 @@ All claims in this report are backed by automated tests running against the **li
 Monorepo Test Suite Summary:
 ├── Pure Domain Unit Tests:          41 tests (Skill state machine, anchor resolver, fairness, eligibility, audit chain integrity, authenticated checkpoints, caller-key override rejection)
 ├── API, RBAC & Adversarial Tests:  112 tests (Fastify, positive RBAC matrix, email takeover, fail-closed, strict claims, consent adversarial, audit concurrency, restricted runtime user, genuine ES256 JWKS)
-└── DB, Migration & Safety Tests:    54 tests (Supabase real DB, RLS, triggers, pool socket reuse, strict URL/host/db safety guard, target allowlist, cross-tenant audit isolation regression, migration ledger, admin TLS)
-Total:                              207 tests, 100% passing (Execution time: 21.71s across 23 files)
+└── DB, Migration & Safety Tests:    57 tests (Supabase real DB, RLS, triggers, pool socket reuse, strict URL/host/db safety guard, target allowlist, MERGE and SELECT INTO mutation detection, cross-tenant audit isolation regression, migration ledger, admin TLS)
+Total:                              210 tests, 100% passing (Execution time: 22.41s across 23 files)
 ```
 
 ---
@@ -354,34 +354,34 @@ npx vitest run
 ```text
  RUN  v2.1.9 C:/Users/SEBIN/Desktop/PRAMAAN
 
- ✓ packages/domain/tests/skill-state-machine.test.ts (8 tests) 6ms
+ ✓ packages/domain/tests/skill-state-machine.test.ts (8 tests) 7ms
  ✓ packages/domain/tests/audit-chain.test.ts (19 tests) 17ms
- ✓ db/tests/test-safety-guard.test.ts (23 tests) 31ms
- ✓ apps/api/tests/auth-membership-tenant.test.ts (13 tests) 30ms
- ✓ apps/api/tests/m1-consent-ledger.test.ts (3 tests) 7ms
- ✓ packages/domain/tests/fairness-calculator.test.ts (5 tests) 4ms
- ✓ apps/api/tests/prod-fail-closed.test.ts (15 tests) 396ms
- ✓ apps/api/tests/api-endpoints.test.ts (7 tests) 457ms
- ✓ apps/api/tests/api-route-rbac.test.ts (18 tests) 560ms
- ✓ packages/domain/tests/eligibility-evaluator.test.ts (5 tests) 8ms
- ✓ db/tests/admin-tls-and-ledger.test.ts (6 tests) 760ms
- ✓ apps/api/tests/email-takeover-prevention.test.ts (4 tests) 14ms
- ✓ apps/api/tests/m1-tenancy-rls.test.ts (5 tests) 4ms
- ✓ apps/api/tests/m1-audit-chain.test.ts (3 tests) 6ms
- ✓ packages/domain/tests/anchor-resolver.test.ts (4 tests) 2ms
+ ✓ db/tests/test-safety-guard.test.ts (26 tests) 37ms
+ ✓ apps/api/tests/auth-membership-tenant.test.ts (13 tests) 25ms
+ ✓ apps/api/tests/m1-consent-ledger.test.ts (3 tests) 6ms
+ ✓ packages/domain/tests/fairness-calculator.test.ts (5 tests) 5ms
+ ✓ apps/api/tests/prod-fail-closed.test.ts (15 tests) 426ms
+ ✓ apps/api/tests/api-endpoints.test.ts (7 tests) 471ms
+ ✓ apps/api/tests/api-route-rbac.test.ts (18 tests) 573ms
+ ✓ packages/domain/tests/eligibility-evaluator.test.ts (5 tests) 5ms
+ ✓ db/tests/admin-tls-and-ledger.test.ts (6 tests) 721ms
+ ✓ apps/api/tests/email-takeover-prevention.test.ts (4 tests) 13ms
+ ✓ apps/api/tests/m1-tenancy-rls.test.ts (5 tests) 5ms
+ ✓ apps/api/tests/m1-audit-chain.test.ts (3 tests) 5ms
+ ✓ packages/domain/tests/anchor-resolver.test.ts (4 tests) 3ms
  ✓ db/tests/migration-runner.test.ts (4 tests) 1630ms
- ✓ apps/api/tests/pg-auth-integration.test.ts (2 tests) 1650ms
+ ✓ apps/api/tests/pg-auth-integration.test.ts (2 tests) 1477ms
  ✓ apps/api/tests/real-supabase-jwt.test.ts (21 tests) 5426ms
- ✓ db/tests/connection-pool-reuse.test.ts (1 test) 3080ms
- ✓ apps/api/tests/consent-adversarial.test.ts (7 tests) 3930ms
+ ✓ db/tests/connection-pool-reuse.test.ts (1 test) 2727ms
+ ✓ apps/api/tests/consent-adversarial.test.ts (7 tests) 2904ms
  ✓ apps/api/tests/restricted-runtime-user.test.ts (9 tests) 5606ms
- ✓ apps/api/tests/audit-concurrency-and-consent.test.ts (5 tests) 7300ms
- ✓ db/tests/supabase-real-db.test.ts (20 tests) 20979ms
+ ✓ apps/api/tests/audit-concurrency-and-consent.test.ts (5 tests) 7757ms
+ ✓ db/tests/supabase-real-db.test.ts (20 tests) 21639ms
 
  Test Files  23 passed (23)
-      Tests  207 passed (207)
-   Start at  17:52:19
-   Duration  21.71s (transform 841ms, setup 0ms, collect 5.29s, tests 51.02s, environment 5ms, prepare 3.60s)
+      Tests  210 passed (210)
+   Start at  18:07:32
+   Duration  22.41s (transform 1.09s, setup 0ms, collect 5.58s, tests 53.09s, environment 6ms, prepare 3.78s)
 ```
 
 ### 8.7 Test Environment Breakdown & Multi-Stage Execution Distinction (P1)
@@ -390,7 +390,7 @@ To ensure absolute reporting accuracy and maintain transparency across environme
 1. **Full Local Monorepo Vitest Run:**
    - **Environment:** Local workstation with configured development `.env` credentials (`DATABASE_URL`, `DATABASE_URL_ADMIN`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `ALLOW_DESTRUCTIVE_DB_TESTS=true`, `CHECKPOINT_SIGNING_KEY`).
    - **Scope:** All 23 test files (pure domain algorithms, Fastify API, administrative SSL/ledger, connection pool reuse, genuine JWKS, restricted runtime user, strict database test safety guards, and live Supabase PostgreSQL 17 database).
-   - **Result:** **207 passed (100%)**, 0 failed, 0 skipped.
+   - **Result:** **210 passed (100%)**, 0 failed, 0 skipped.
 
 2. **Isolated PostgreSQL 17 GitHub Actions Tests (CI Job 2):**
    - **Environment:** Clean `postgres:17-alpine` Docker service container inside GitHub Actions (`.github/workflows/ci.yml`).
@@ -482,11 +482,11 @@ To prevent integration test executions from causing unintended side-effects or d
    - **Environment Guard:** Fails closed if `NODE_ENV === 'production'`, `ENVIRONMENT === 'production'`, or `VERCEL_ENV === 'production'`.
 3. **Comprehensive Mutation & DDL Guarding:**
    - `isMutationQuery(sql)` / `isDestructiveQuery(sql)` inspects SQL queries after stripping block comments (`/* ... */`), line comments (`-- ...`), string literals (`'...'`), double-quoted identifiers (`"..."`), and dollar-quoted strings (`$$...$$`).
-   - Detects all mutation and DDL commands: `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `DROP`, `ALTER`, `CREATE`, `GRANT`, `REVOKE`, `RENAME`, `DO`, `CALL`, `EXECUTE`, `VACUUM`, `REINDEX`, `COPY`, `LOCK`.
+   - Detects all mutation and DDL commands: `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `DROP`, `ALTER`, `CREATE`, `GRANT`, `REVOKE`, `RENAME`, `DO`, `CALL`, `EXECUTE`, `VACUUM`, `REINDEX`, `COPY`, `LOCK`, PostgreSQL `MERGE` statements (`MERGE INTO ...`), `SELECT INTO` table creation statements (`SELECT ... INTO ...`), as well as `CLUSTER`, `REFRESH`, `CHECKPOINT`, and `REASSIGN`.
    - Blocks bypass attempts hidden behind leading whitespace, inline comments, or multi-statement batches (`SELECT 1; DROP TABLE`).
-   - Preserves normal read-only `SELECT` queries without false positives on string literals or column names (e.g. `deleted_at`).
+   - Preserves normal read-only `SELECT` queries without false positives on string literals or column names (e.g. `deleted_at`, or string literals containing `'MERGE'` or `'INTO'`).
    - Enforced automatically in `runQuery()` before query execution.
-   - Automated Verification: Verified by 23 regression tests in `db/tests/test-safety-guard.test.ts`.
+   - Automated Verification: Verified by 26 regression tests in `db/tests/test-safety-guard.test.ts`.
 4. **Dedicated Test Tenant Fixtures:** Tests no longer insert synthetic audit events into institutional tenant chains (`College A`). A dedicated test tenant (`TEST_AUDIT_TENANT_ID = 'e0000000-0000-0000-0000-000000000099'`) is used exclusively for immutability and DCL privilege testing.
 5. **Institutional Tenant Immutability Protection:** `assertNotInstitutionalTenant(orgId)` blocks destructive operations against production institutional tenants (`00000000-0000-0000-0000-000000000001` and `00000000-0000-0000-0000-000000000002`). Institutional records are never deleted or modified by tests.
 6. **Unconditional Trigger-Safe Cleanup:** Cleanup in `afterAll` runs within a `try ... finally` block, ensuring test audit events are cleaned up and the database immutability trigger `trg_audit_events_immutable` is unconditionally re-enabled even if assertions fail. Immutability triggers are never disabled outside tightly controlled test cleanup.
@@ -559,15 +559,15 @@ The repository administrator must enable branch protection in GitHub:
 ## 13. Conclusion & Readiness Gate for Milestone M2
 
 The comprehensive M1 closure audit confirms that all security, tenancy, authentication, ledger, pipeline, and audit-integrity invariants are fully implemented, verified, and locked:
-- **100% Passing Tests:** 207 automated tests across 23 test suites (0 failures, 0 regressions).
+- **100% Passing Tests:** 210 automated tests across 23 test suites (0 failures, 0 regressions).
 - **Authenticated Checkpoint Integrity:** `AuditChain.verifyChain()` strictly enforces genesis anchoring and cryptographic checkpoint authentication (orgId binding, finite non-negative integer seq, HMAC-SHA256 signature with backend-configured verification key). Caller-controlled signing keys are completely removed. Plain unauthenticated `{ seq, hash }` objects and the historical dummy `a*64` hash are strictly rejected as `INVALID`.
 - **Tenant College A Status:** College A historical chain in the development database starts at `seq = 100000` and remains strictly **`UNANCHORED`** (`valid: false, isComplete: false`). Internal suffix links being valid does not authenticate missing historical prefixes. Complete verification is not claimed without an authentic cryptographic anchor.
-- **Strict Database Target Guarding & Exact Audit Cleanup:** Eliminated substring-based allowlisting in favor of strict WHATWG URL parsing (PostgreSQL protocol, exact hostnames `localhost`, `127.0.0.1`, `::1`, `host.docker.internal`, `postgres`, separate database name validation, and exact project reference verification for Supabase). Missing target identity fails closed immediately. Management API execution is prohibited from executing mutations. All SQL mutations and DDL statements are guarded by comment-resilient parsing. `safeCleanupTestAuditEvents` requires all 5 exact identifiers (`orgId`, `seq`, `action`, `objectType`, `id`), prohibiting blanket tenant deletions. Institutional records are unconditionally protected.
+- **Strict Database Target Guarding & Exact Audit Cleanup:** Eliminated substring-based allowlisting in favor of strict WHATWG URL parsing (PostgreSQL protocol, exact hostnames `localhost`, `127.0.0.1`, `::1`, `host.docker.internal`, `postgres`, separate database name validation, and exact project reference verification for Supabase). Missing target identity fails closed immediately. Management API execution is prohibited from executing mutations. All SQL mutations, DDL statements, PostgreSQL `MERGE` statements, and `SELECT INTO` table creations are guarded by comment- and literal-resilient parsing. `safeCleanupTestAuditEvents` requires all 5 exact identifiers (`orgId`, `seq`, `action`, `objectType`, `id`), prohibiting blanket tenant deletions. Institutional records are unconditionally protected.
 - **Forensic Accuracy:** Commit attribution (`0bf87bdf` vs `454854e`) and Migration 009 deletion scope are accurately documented, with verified database facts distinguished from commit history inferences.
 - **Quality Gates:** ESLint (`npm run lint`), TypeScript strict typecheck (`npm run typecheck`), and monorepo production build (`npm run build`) all pass with 0 errors.
 - **CI / CD Pipeline:** Multi-stage GitHub Actions workflow with clean isolated PostgreSQL 17 container execution and credential-safe live Supabase verification gate (status SKIPPED in CI when secrets are absent).
 - **Credential & Tenancy Isolation:** Complete separation of administrative migration credentials (`DATABASE_URL_ADMIN`) from restricted runtime credentials (`DATABASE_URL`).
 - **Main Branch Protection:** Accurately reported as **NOT ENABLED** (`protected: false`) with exact manual configuration steps provided.
 
-**Milestone M1 is formally APPROVED, AUDITED, and SEALED.** All criteria have been independently audited. Development may proceed to Milestone M2.
+**Milestone M1 is formally FROZEN, AUDITED, and SEALED.** Main branch protection is explicitly disclosed as NOT ENABLED (`protected: false`), awaiting manual configuration by the repository administrator in GitHub Settings. Live Supabase CI execution is explicitly disclosed as dependent on repository secrets. All M1 security criteria are locked and verified. Development may proceed to Milestone M2.
 
