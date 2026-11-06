@@ -2,7 +2,6 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import pg from 'pg';
-import { runQuery as runSupabaseQuery } from './supabase-runner.mjs';
 import { resolveAdminSslConfig } from './admin-db-ssl.mjs';
 
 try {
@@ -20,27 +19,26 @@ async function seed() {
   }
   const sql = fs.readFileSync(seedPath, 'utf8');
 
-  const adminUrl = process.env.DATABASE_URL_ADMIN || process.env.DATABASE_URL;
-  if (adminUrl) {
-    console.log('[SEED] Executing seed via PostgreSQL connection...');
-    const ssl = resolveAdminSslConfig(adminUrl);
+  const adminUrl = process.env.DATABASE_URL_ADMIN;
+  if (!adminUrl) {
+    throw new Error(
+      'FATAL: DATABASE_URL_ADMIN is required exclusively for database seeding. Fallback to DATABASE_URL or Management API is strictly prohibited.'
+    );
+  }
 
-    const pool = new pg.Pool({ connectionString: adminUrl, ssl, max: 1 });
+  console.log('[SEED] Executing seed via administrative PostgreSQL connection (DATABASE_URL_ADMIN)...');
+  const ssl = resolveAdminSslConfig(adminUrl);
+
+  const pool = new pg.Pool({ connectionString: adminUrl, ssl, max: 1 });
+  try {
+    const client = await pool.connect();
     try {
-      const client = await pool.connect();
-      try {
-        await client.query(sql);
-      } finally {
-        client.release();
-      }
+      await client.query(sql);
     } finally {
-      await pool.end();
+      client.release();
     }
-  } else if (process.env.SUPABASE_MANAGEMENT_TOKEN) {
-    console.log('[SEED] Executing seed via Supabase Management API...');
-    await runSupabaseQuery(sql);
-  } else {
-    throw new Error('No database connection credentials available for seeding. Set DATABASE_URL_ADMIN or SUPABASE_MANAGEMENT_TOKEN.');
+  } finally {
+    await pool.end();
   }
 
   console.log('[SEED] Demo seed data applied successfully.');

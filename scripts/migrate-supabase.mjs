@@ -3,7 +3,6 @@ import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import pg from 'pg';
-import { runQuery as runSupabaseQuery } from './supabase-runner.mjs';
 import { resolveAdminSslConfig } from './admin-db-ssl.mjs';
 
 try {
@@ -19,109 +18,69 @@ const migrationsDir = path.join(rootDir, 'db', 'migrations');
 const MIGRATION_ADVISORY_LOCK_ID = 8429104820948123n;
 
 /**
- * Migration Executor that safely separates administrative credentials
- * from restricted application runtime credentials and enforces transaction atomicity.
+ * Migration Executor that strictly enforces administrative credentials (DATABASE_URL_ADMIN),
+ * session advisory locks, and transactional DDL atomicity.
+ * Stateless HTTP management API mode and runtime credentials (DATABASE_URL) are prohibited.
  */
 class MigrationExecutor {
   constructor() {
     this.pgPool = null;
     this.pgClient = null;
-    this.mode = 'none';
     this.hasAdvisoryLock = false;
   }
 
   async init() {
     const adminUrl = process.env.DATABASE_URL_ADMIN;
-    const managementToken = process.env.SUPABASE_MANAGEMENT_TOKEN;
-    const runtimeUrl = process.env.DATABASE_URL;
 
-    if (adminUrl) {
-      console.log('[MIGRATION] Using administrative PostgreSQL connection (DATABASE_URL_ADMIN)...');
-      const ssl = resolveAdminSslConfig(adminUrl);
-      this.pgPool = new pg.Pool({ connectionString: adminUrl, ssl, max: 2 });
-      this.mode = 'pg';
-      this.pgClient = await this.pgPool.connect();
-      
-      // Acquire PostgreSQL session advisory lock to prevent concurrent migration runs
-      await this.pgClient.query(`SELECT pg_advisory_lock(${MIGRATION_ADVISORY_LOCK_ID});`);
-      this.hasAdvisoryLock = true;
-    } else if (managementToken) {
-      console.log('[MIGRATION] Using Supabase Management API via SUPABASE_MANAGEMENT_TOKEN...');
-      this.mode = 'supabase_api';
-    } else if (runtimeUrl) {
-      // Check if user is attempting to run migrations with restricted runtime login
-      if (runtimeUrl.includes('pramaan_app_user')) {
-        throw new Error(
-          'FATAL: Migration execution rejected. DATABASE_URL is configured as restricted runtime user \'pramaan_app_user\' (NOBYPASSRLS, no DDL privileges). Provide administrative credentials via DATABASE_URL_ADMIN or SUPABASE_MANAGEMENT_TOKEN.'
-        );
-      }
-      console.warn('[MIGRATION WARNING] DATABASE_URL_ADMIN not set; falling back to DATABASE_URL with DDL check...');
-      const ssl = resolveAdminSslConfig(runtimeUrl);
-      this.pgPool = new pg.Pool({ connectionString: runtimeUrl, ssl, max: 2 });
-      this.mode = 'pg';
-      this.pgClient = await this.pgPool.connect();
-      
-      // Acquire PostgreSQL session advisory lock
-      await this.pgClient.query(`SELECT pg_advisory_lock(${MIGRATION_ADVISORY_LOCK_ID});`);
-      this.hasAdvisoryLock = true;
-    } else {
+    if (!adminUrl) {
       throw new Error(
-        'FATAL: No migration credentials available. Set DATABASE_URL_ADMIN (preferred for DDL) or SUPABASE_MANAGEMENT_TOKEN.'
+        'FATAL: DATABASE_URL_ADMIN is required for schema migrations. Management API mode is disabled due to lack of session advisory locking and transactional DDL, and fallback to application runtime credentials (DATABASE_URL) is strictly prohibited.'
       );
     }
+
+    console.log('[MIGRATION] Using administrative PostgreSQL connection (DATABASE_URL_ADMIN)...');
+    const ssl = resolveAdminSslConfig(adminUrl);
+    this.pgPool = new pg.Pool({ connectionString: adminUrl, ssl, max: 2 });
+    this.pgClient = await this.pgPool.connect();
+    
+    // Acquire PostgreSQL session advisory lock to prevent concurrent migration runs
+    await this.pgClient.query(`SELECT pg_advisory_lock(${MIGRATION_ADVISORY_LOCK_ID});`);
+    this.hasAdvisoryLock = true;
   }
 
   async execute(sql) {
-    if (this.mode === 'pg') {
-      return await this.pgClient.query(sql);
-    } else if (this.mode === 'supabase_api') {
-      return await runSupabaseQuery(sql);
-    } else {
+    if (!this.pgClient) {
       throw new Error('MigrationExecutor not initialized');
     }
+    return await this.pgClient.query(sql);
   }
 
   async query(sql, params = []) {
-    if (this.mode === 'pg') {
-      const result = await this.pgClient.query(sql, params);
-      return result.rows;
-    } else if (this.mode === 'supabase_api') {
-      // Supabase query API executes raw SQL without parameter binding; sanitize or format simple parameters
-      let formattedSql = sql;
-      if (params && params.length > 0) {
-        params.forEach((param, idx) => {
-          const placeholder = new RegExp(`\\$${idx + 1}\\b`, 'g');
-          const escaped = typeof param === 'string' ? `'${param.replace(/'/g, "''")}'` : String(param);
-          formattedSql = formattedSql.replace(placeholder, escaped);
-        });
-      }
-      const data = await runSupabaseQuery(formattedSql);
-      return Array.isArray(data) ? data : (data?.rows || []);
+    if (!this.pgClient) {
+      throw new Error('MigrationExecutor not initialized');
     }
+    const result = await this.pgClient.query(sql, params);
+    return result.rows;
   }
 
   /**
    * Applies a single migration script and its corresponding ledger entry atomically.
    */
   async applyMigrationTransactional(version, filename, sqlContent, checksum) {
-    if (this.mode === 'pg') {
-      await this.pgClient.query('BEGIN;');
-      try {
-        await this.pgClient.query(sqlContent);
-        await this.pgClient.query(
-          `INSERT INTO schema_migrations (version, name, applied_at, checksum) VALUES ($1, $2, CURRENT_TIMESTAMP, $3);`,
-          [version, filename, checksum]
-        );
-        await this.pgClient.query('COMMIT;');
-      } catch (err) {
-        await this.pgClient.query('ROLLBACK;');
-        throw err;
-      }
-    } else if (this.mode === 'supabase_api') {
-      // Supabase Management API executes via HTTPS. Execute script then insert ledger record.
-      await runSupabaseQuery(sqlContent);
-      const insertSql = `INSERT INTO schema_migrations (version, name, applied_at, checksum) VALUES ('${version.replace(/'/g, "''")}', '${filename.replace(/'/g, "''")}', CURRENT_TIMESTAMP, '${checksum}');`;
-      await runSupabaseQuery(insertSql);
+    if (!this.pgClient) {
+      throw new Error('MigrationExecutor not initialized');
+    }
+    await this.pgClient.query('BEGIN;');
+    try {
+      await this.pgClient.query(sqlContent);
+      await this.pgClient.query(
+        `INSERT INTO schema_migrations (version, name, applied_at, checksum) VALUES ($1, $2, CURRENT_TIMESTAMP, $3);`,
+        [version, filename, checksum]
+      );
+      await this.pgClient.query('COMMIT;');
+    } catch (err) {
+      await this.pgClient.query('ROLLBACK;');
+      throw err;
     }
   }
 
@@ -145,10 +104,11 @@ class MigrationExecutor {
 }
 
 /**
- * Computes deterministic SHA-256 hash of a file's content
+ * Computes deterministic SHA-256 hash of a file's content (normalizing line endings)
  */
 export function computeChecksum(content) {
-  return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+  const normalized = content.replace(/\r\n/g, '\n');
+  return crypto.createHash('sha256').update(normalized, 'utf8').digest('hex');
 }
 
 /**

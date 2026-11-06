@@ -157,15 +157,19 @@ jobs:
       - name: Check Environment Credentials
         id: check-secrets
         run: |
-          if [ -n "$SUPABASE_JWT_SECRET" ] && [ -n "$SUPABASE_URL" ]; then
+          if [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_ANON_KEY" ] && [ -n "$SUPABASE_SERVICE_ROLE_KEY" ] && [ -n "$DATABASE_URL" ] && [ -n "$DATABASE_URL_ADMIN" ]; then
             echo "has_secrets=true" >> "$GITHUB_OUTPUT"
+            echo "All live Supabase credentials present. Remote live verification enabled."
           else
             echo "has_secrets=false" >> "$GITHUB_OUTPUT"
-            echo "Live Supabase secrets not configured in this runner; skipping live remote verification."
+            echo "Live Supabase credentials not configured in this environment; skipping remote verification."
           fi
         env:
-          SUPABASE_JWT_SECRET: ${{ secrets.SUPABASE_JWT_SECRET }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_ADMIN: ${{ secrets.DATABASE_URL_ADMIN }}
 
       - name: Run Genuine Supabase JWT, ES256 & Auth Membership Tests
         if: steps.check-secrets.outputs.has_secrets == 'true'
@@ -175,5 +179,10 @@ jobs:
             apps/api/tests/pg-auth-integration.test.ts
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_JWT_SECRET: ${{ secrets.SUPABASE_JWT_SECRET }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_ADMIN: ${{ secrets.DATABASE_URL_ADMIN }}
+          DATABASE_CA_PATH: ${{ secrets.DATABASE_CA_PATH }}
+          DATABASE_CA_CERT: ${{ secrets.DATABASE_CA_CERT }}

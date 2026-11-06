@@ -41,12 +41,14 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       opts.tenantStore || 
       opts.auditService || 
       opts.consentService ||
-      (opts.tenantRepository && !(opts.tenantRepository instanceof PgTenantRepository)) ||
-      (opts.auditRepository && !(opts.auditRepository instanceof PgAuditRepository)) ||
-      (opts.consentRepository && !(opts.consentRepository instanceof PgConsentRepository)) ||
-      (opts.userRepository && !(opts.userRepository instanceof PgUserRepository))
+      opts.tenantRepository ||
+      opts.auditRepository ||
+      opts.consentRepository ||
+      opts.userRepository
     ) {
-      throw new Error('FATAL: Production mode prohibits in-memory repositories or mock stores.');
+      throw new Error(
+        'FATAL: Production mode prohibits injecting custom repositories or mock stores. All production repositories must be constructed internally using the restricted runtime pool.'
+      );
     }
     if (opts.authService) {
       throw new Error(
@@ -96,43 +98,52 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
   let consentRepo: IConsentRepository;
   let userRepo: IUserRepository;
 
-  if (opts.tenantRepository) {
-    tenantRepo = opts.tenantRepository;
-  } else if (opts.tenantStore) {
-    tenantRepo = new InMemoryTenantRepository(opts.tenantStore);
-  } else if (usePostgres) {
-    tenantRepo = new PgTenantRepository(getDbPool());
+  if (isProduction) {
+    // Production repositories are constructed strictly from restricted runtime pool
+    const runtimePool = getDbPool();
+    tenantRepo = new PgTenantRepository(runtimePool);
+    auditRepo = new PgAuditRepository(runtimePool);
+    consentRepo = new PgConsentRepository(runtimePool, auditRepo);
+    userRepo = new PgUserRepository(runtimePool);
   } else {
-    tenantRepo = new InMemoryTenantRepository(new TenantStore());
-  }
+    if (opts.tenantRepository) {
+      tenantRepo = opts.tenantRepository;
+    } else if (opts.tenantStore) {
+      tenantRepo = new InMemoryTenantRepository(opts.tenantStore);
+    } else if (usePostgres) {
+      tenantRepo = new PgTenantRepository(getDbPool());
+    } else {
+      tenantRepo = new InMemoryTenantRepository(new TenantStore());
+    }
 
-  if (opts.auditRepository) {
-    auditRepo = opts.auditRepository;
-  } else if (opts.auditService) {
-    auditRepo = new InMemoryAuditRepository(opts.auditService);
-  } else if (usePostgres) {
-    auditRepo = new PgAuditRepository(getDbPool());
-  } else {
-    auditRepo = new InMemoryAuditRepository(new AuditService());
-  }
+    if (opts.auditRepository) {
+      auditRepo = opts.auditRepository;
+    } else if (opts.auditService) {
+      auditRepo = new InMemoryAuditRepository(opts.auditService);
+    } else if (usePostgres) {
+      auditRepo = new PgAuditRepository(getDbPool());
+    } else {
+      auditRepo = new InMemoryAuditRepository(new AuditService());
+    }
 
-  if (opts.consentRepository) {
-    consentRepo = opts.consentRepository;
-  } else if (opts.consentService) {
-    consentRepo = new InMemoryConsentRepository(opts.consentService);
-  } else if (usePostgres) {
-    consentRepo = new PgConsentRepository(getDbPool(), auditRepo);
-  } else {
-    const rawAudit = opts.auditService ?? new AuditService();
-    consentRepo = new InMemoryConsentRepository(new ConsentService(rawAudit));
-  }
+    if (opts.consentRepository) {
+      consentRepo = opts.consentRepository;
+    } else if (opts.consentService) {
+      consentRepo = new InMemoryConsentRepository(opts.consentService);
+    } else if (usePostgres) {
+      consentRepo = new PgConsentRepository(getDbPool(), auditRepo);
+    } else {
+      const rawAudit = opts.auditService ?? new AuditService();
+      consentRepo = new InMemoryConsentRepository(new ConsentService(rawAudit));
+    }
 
-  if (opts.userRepository) {
-    userRepo = opts.userRepository;
-  } else if (usePostgres) {
-    userRepo = new PgUserRepository(getDbPool());
-  } else {
-    userRepo = new InMemoryUserRepository();
+    if (opts.userRepository) {
+      userRepo = opts.userRepository;
+    } else if (usePostgres) {
+      userRepo = new PgUserRepository(getDbPool());
+    } else {
+      userRepo = new InMemoryUserRepository();
+    }
   }
 
   const authService = isProduction

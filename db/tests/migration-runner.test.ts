@@ -2,21 +2,18 @@ import { describe, it, expect } from 'vitest';
 import pg from 'pg';
 import fs from 'fs';
 import path from 'path';
-import crypto from 'crypto';
 // @ts-ignore
-import { runMigrations } from '../../scripts/migrate-supabase.mjs';
+import { runMigrations, computeChecksum } from '../../scripts/migrate-supabase.mjs';
+// @ts-ignore
+import { resolveAdminSslConfig } from '../../scripts/admin-db-ssl.mjs';
 
 try {
   process.loadEnvFile?.();
 } catch {}
 
 describe('PRAMAAN Database Migration Reproducibility & Ledger Verification (Area 1 — P0)', () => {
-  const adminUrl = process.env.DATABASE_URL_ADMIN || process.env.DATABASE_URL;
-  const caPath = process.env.DATABASE_CA_PATH;
-  const isLocal = adminUrl && (adminUrl.includes('localhost') || adminUrl.includes('127.0.0.1'));
-  const ssl = caPath && fs.existsSync(caPath)
-    ? { ca: fs.readFileSync(caPath, 'utf8'), rejectUnauthorized: true }
-    : (isLocal ? false : { rejectUnauthorized: false });
+  const adminUrl = process.env.DATABASE_URL_ADMIN;
+  const ssl = adminUrl ? resolveAdminSslConfig(adminUrl) : false;
 
   it('1. Verifies schema_migrations ledger records all migrations with SHA-256 checksums', async () => {
     if (!adminUrl) {
@@ -61,7 +58,7 @@ describe('PRAMAAN Database Migration Reproducibility & Ledger Verification (Area
     expect(result.skipped).toBe(result.total);
   });
 
-  it('3. Security role separation: migration runner rejects execution under restricted runtime user', async () => {
+  it('3. Security role separation: migration runner strictly requires DATABASE_URL_ADMIN and rejects runtime fallback', async () => {
     const originalAdmin = process.env.DATABASE_URL_ADMIN;
     const originalToken = process.env.SUPABASE_MANAGEMENT_TOKEN;
     const originalDbUrl = process.env.DATABASE_URL;
@@ -72,7 +69,7 @@ describe('PRAMAAN Database Migration Reproducibility & Ledger Verification (Area
       process.env.DATABASE_URL = 'postgresql://pramaan_app_user:somepassword@localhost:5432/pramaan';
 
       await expect(runMigrations()).rejects.toThrow(
-        /DATABASE_URL is configured as restricted runtime user 'pramaan_app_user'/
+        /DATABASE_URL_ADMIN is required for schema migrations/
       );
     } finally {
       if (originalAdmin) process.env.DATABASE_URL_ADMIN = originalAdmin;
@@ -94,7 +91,7 @@ describe('PRAMAAN Database Migration Reproducibility & Ledger Verification (Area
 
       for (const file of files) {
         const content = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
-        const hash = crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+        const hash = computeChecksum(content);
         const recordedHash = recorded.get(file);
         expect(recordedHash).toBeDefined();
         expect(hash).toBe(recordedHash);

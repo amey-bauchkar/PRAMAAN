@@ -39,7 +39,7 @@ describe('Production Mode Fail-Closed Invariants (P1-7)', () => {
       buildApp({
         tenantRepository: new InMemoryTenantRepository(new TenantStore())
       });
-    }).toThrow(/FATAL: Production mode prohibits in-memory repositories/);
+    }).toThrow(/FATAL: Production mode prohibits (in-memory|injecting custom) repositories/);
 
     expect(() => {
       buildApp({
@@ -62,15 +62,15 @@ describe('Production Mode Fail-Closed Invariants (P1-7)', () => {
     const auditSvc = new AuditService();
     expect(() => {
       buildApp({ auditRepository: new InMemoryAuditRepository(auditSvc) });
-    }).toThrow(/FATAL: Production mode prohibits in-memory repositories/);
+    }).toThrow(/FATAL: Production mode prohibits (in-memory|injecting custom) repositories/);
 
     expect(() => {
       buildApp({ consentRepository: new InMemoryConsentRepository(new ConsentService(auditSvc)) });
-    }).toThrow(/FATAL: Production mode prohibits in-memory repositories/);
+    }).toThrow(/FATAL: Production mode prohibits (in-memory|injecting custom) repositories/);
 
     expect(() => {
       buildApp({ userRepository: new InMemoryUserRepository() });
-    }).toThrow(/FATAL: Production mode prohibits in-memory repositories/);
+    }).toThrow(/FATAL: Production mode prohibits (in-memory|injecting custom) repositories/);
   });
 
   it('2c. Fails startup when persistenceMode is postgres but DATABASE_URL is missing', () => {
@@ -94,6 +94,38 @@ describe('Production Mode Fail-Closed Invariants (P1-7)', () => {
       const pgRes = await pgApp.inject({ method: 'GET', url: '/health' });
       expect(pgRes.json().persistenceMode).toBe('postgres');
     }
+  });
+
+  it('2e. Fails startup in production when attempting to inject custom PostgreSQL repositories (P2)', async () => {
+    setEnv('NODE_ENV', 'production');
+    process.env.DATABASE_URL = 'postgresql://fake:password@localhost:5432/db';
+    process.env.SUPABASE_URL = 'https://qshujrddrzoemlzmleru.supabase.co';
+
+    const { PgTenantRepository } = await import('../src/repositories/tenant-repository.js');
+    const { PgAuditRepository } = await import('../src/repositories/audit-repository.js');
+    const { PgConsentRepository } = await import('../src/repositories/consent-repository.js');
+    const { PgUserRepository } = await import('../src/repositories/user-repository.js');
+    const pg = await import('pg');
+    const mockPool = new pg.default.Pool();
+
+    expect(() => {
+      buildApp({ tenantRepository: new PgTenantRepository(mockPool) });
+    }).toThrow(/FATAL: Production mode prohibits injecting custom repositories/);
+
+    const auditRepo = new PgAuditRepository(mockPool);
+    expect(() => {
+      buildApp({ auditRepository: auditRepo });
+    }).toThrow(/FATAL: Production mode prohibits injecting custom repositories/);
+
+    expect(() => {
+      buildApp({ consentRepository: new PgConsentRepository(mockPool, auditRepo) });
+    }).toThrow(/FATAL: Production mode prohibits injecting custom repositories/);
+
+    expect(() => {
+      buildApp({ userRepository: new PgUserRepository(mockPool) });
+    }).toThrow(/FATAL: Production mode prohibits injecting custom repositories/);
+
+    await mockPool.end();
   });
 
   it('3. Fails startup in production when Supabase JWT configuration is completely missing', () => {

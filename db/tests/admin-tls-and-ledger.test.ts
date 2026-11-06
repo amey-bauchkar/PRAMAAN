@@ -93,7 +93,7 @@ describe('Administrative Migration & Seed TLS Verification (P0-2) and Ledger Int
 
   // P1-3 Unit Test: Checksum drift
   it('6. Checksum drift detection terminates migration execution with non-zero exit code (P1-3)', async () => {
-    const adminUrl = process.env.DATABASE_URL_ADMIN || process.env.DATABASE_URL;
+    const adminUrl = process.env.DATABASE_URL_ADMIN;
     if (!adminUrl) return;
 
     // We can simulate checksum drift by temporarily tampering with an applied migration file in memory/test
