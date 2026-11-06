@@ -689,12 +689,14 @@ describe('Database Test Safety Guard & Production Target Protection (Final Harde
     );
   });
 
-  it('36. COMMIT, ROLLBACK, and SAVEPOINT statements cannot escape an automatic READ ONLY transaction', async () => {
+  it('36. COMMIT, ROLLBACK, SAVEPOINT, and SET TRANSACTION statements cannot escape an automatic READ ONLY transaction', async () => {
     const escapeStatements = [
       'COMMIT;',
       'ROLLBACK;',
       'SAVEPOINT my_savepoint;',
       'RELEASE SAVEPOINT my_savepoint;',
+      'PREPARE TRANSACTION "tx1";',
+      'SET TRANSACTION READ WRITE;',
       'SELECT 1; COMMIT; INSERT INTO users VALUES (1);',
       'SELECT 1; ROLLBACK; DELETE FROM users;'
     ];
@@ -715,7 +717,184 @@ describe('Database Test Safety Guard & Production Target Protection (Final Harde
     );
   });
 
-  it('37. Unrecognized user-defined mutating function is strictly blocked at the PostgreSQL engine level in the read-only path', async () => {
+  it('37. PostgreSQL transaction alias END (and compound forms) is strictly classified as privileged transaction control', () => {
+    const endStatements = [
+      'END;',
+      'END',
+      'END WORK;',
+      'END TRANSACTION;',
+      'END AND CHAIN;',
+      'END AND NO CHAIN;',
+      'END WORK AND CHAIN;',
+      'END TRANSACTION AND NO CHAIN;',
+      'SELECT 1; END; SELECT 2;',
+      'SELECT 1; END',
+      'SELECT 1;\nEND;\nSELECT mutate();',
+      'SELECT 1; END WORK; SELECT mutate();',
+      'SELECT 1; END TRANSACTION; SELECT mutate();'
+    ];
+
+    for (const sql of endStatements) {
+      expect(hasTransactionControl(sql)).toBe(true);
+      expect(isDestructiveQuery(sql)).toBe(true);
+      expect(isSafeReadOnlyQuery(sql)).toBe(false);
+    }
+
+    // Verify CASE ... END expressions do NOT trigger false positives
+    const caseExpressions = [
+      'SELECT CASE WHEN 1=1 THEN 1 ELSE 0 END FROM table;',
+      'SELECT CASE WHEN active THEN "yes" ELSE "no" END AS status;',
+      'SELECT (CASE WHEN true THEN 1 END);',
+      'SELECT id, CASE WHEN flag THEN "a" ELSE "b" END, name FROM students;'
+    ];
+
+    for (const sql of caseExpressions) {
+      expect(hasTransactionControl(sql)).toBe(false);
+      expect(isDestructiveQuery(sql)).toBe(false);
+      expect(isSafeReadOnlyQuery(sql)).toBe(true);
+    }
+  });
+
+  it('38. PostgreSQL transaction alias ABORT (and compound forms) is strictly classified as privileged transaction control', () => {
+    const abortStatements = [
+      'ABORT;',
+      'ABORT',
+      'ABORT WORK;',
+      'ABORT TRANSACTION;',
+      'ABORT AND CHAIN;',
+      'ABORT AND NO CHAIN;',
+      'ABORT WORK AND CHAIN;',
+      'ABORT TRANSACTION AND NO CHAIN;',
+      'SELECT 1; ABORT; SELECT 2;',
+      'SELECT 1; ABORT WORK; SELECT 2;'
+    ];
+
+    for (const sql of abortStatements) {
+      expect(hasTransactionControl(sql)).toBe(true);
+      expect(isDestructiveQuery(sql)).toBe(true);
+      expect(isSafeReadOnlyQuery(sql)).toBe(false);
+    }
+  });
+
+  it('39. END cannot terminate an automatic READ ONLY transaction and allow a subsequent mutation', async () => {
+    const attemptQuery = 'SELECT 1; END; SELECT pramaan_test_unrecognized_mutator();';
+    expect(hasTransactionControl(attemptQuery)).toBe(true);
+    expect(isDestructiveQuery(attemptQuery)).toBe(true);
+    expect(isSafeReadOnlyQuery(attemptQuery)).toBe(false);
+
+    // 1. Blocked when destructive testing opt-in is disabled
+    delete process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    await expect(runQuery(attemptQuery)).rejects.toThrow(
+      /requires explicit opt-in via ALLOW_DESTRUCTIVE_DB_TESTS=true/
+    );
+
+    // 2. Blocked on Management API fallback
+    delete process.env.DATABASE_URL_ADMIN;
+    delete process.env.DATABASE_URL;
+    process.env.SUPABASE_MANAGEMENT_TOKEN = 'test-token';
+    process.env.SUPABASE_PROJECT_REF = 'qshujrddrzoemlzmleru';
+    await expect(runQuery(attemptQuery)).rejects.toThrow(
+      /Destructive or mutating database operations require direct DATABASE_URL_ADMIN PostgreSQL connectivity/
+    );
+
+    // 3. Database integration: even if attempted on direct connection, zero rows are persisted
+    process.env.DATABASE_URL_ADMIN = originalAdminUrl;
+    process.env.ALLOW_DESTRUCTIVE_DB_TESTS = 'true';
+    if (process.env.DATABASE_URL_ADMIN && isApprovedTestDatabase(process.env.DATABASE_URL_ADMIN)) {
+      const ssl = resolveAdminSslConfig(process.env.DATABASE_URL_ADMIN);
+      const adminClient = new pg.Client({ connectionString: process.env.DATABASE_URL_ADMIN, ssl });
+      await adminClient.connect();
+
+      const testOrgName = 'End Escape Bypass Test ' + Date.now();
+      const funcName = 'pramaan_test_end_escape_mutator';
+      try {
+        await adminClient.query(`
+          CREATE OR REPLACE FUNCTION ${funcName}() RETURNS void AS $$
+          BEGIN
+            INSERT INTO organizations (name, kind) VALUES ('${testOrgName}', 'college');
+          END;
+          $$ LANGUAGE plpgsql;
+        `);
+
+        // Executed with opt-in disabled to prove safety guard prevents execution
+        delete process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+        await expect(runQuery(`SELECT 1; END; SELECT ${funcName}();`)).rejects.toThrow(
+          /requires explicit opt-in via ALLOW_DESTRUCTIVE_DB_TESTS=true/
+        );
+
+        // Verify zero rows were inserted
+        const checkRes = await adminClient.query(
+          `SELECT count(*)::int AS cnt FROM organizations WHERE name = '${testOrgName}';`
+        );
+        expect(checkRes.rows[0].cnt).toBe(0);
+      } finally {
+        await adminClient.query(`DROP FUNCTION IF EXISTS ${funcName}();`).catch(() => {});
+        await adminClient.query(`DELETE FROM organizations WHERE name = '${testOrgName}';`).catch(() => {});
+        await adminClient.end();
+      }
+    }
+  });
+
+  it('40. ABORT cannot escape the read-only transaction boundary to permit subsequent mutation', async () => {
+    const attemptQuery = 'SELECT 1; ABORT; SELECT pramaan_test_unrecognized_mutator();';
+    expect(hasTransactionControl(attemptQuery)).toBe(true);
+    expect(isDestructiveQuery(attemptQuery)).toBe(true);
+    expect(isSafeReadOnlyQuery(attemptQuery)).toBe(false);
+
+    // 1. Blocked when destructive testing opt-in is disabled
+    delete process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    await expect(runQuery(attemptQuery)).rejects.toThrow(
+      /requires explicit opt-in via ALLOW_DESTRUCTIVE_DB_TESTS=true/
+    );
+
+    // 2. Blocked on Management API fallback
+    delete process.env.DATABASE_URL_ADMIN;
+    delete process.env.DATABASE_URL;
+    process.env.SUPABASE_MANAGEMENT_TOKEN = 'test-token';
+    process.env.SUPABASE_PROJECT_REF = 'qshujrddrzoemlzmleru';
+    await expect(runQuery(attemptQuery)).rejects.toThrow(
+      /Destructive or mutating database operations require direct DATABASE_URL_ADMIN PostgreSQL connectivity/
+    );
+
+    // 3. Database integration: zero rows persisted
+    process.env.DATABASE_URL_ADMIN = originalAdminUrl;
+    process.env.ALLOW_DESTRUCTIVE_DB_TESTS = 'true';
+    if (process.env.DATABASE_URL_ADMIN && isApprovedTestDatabase(process.env.DATABASE_URL_ADMIN)) {
+      const ssl = resolveAdminSslConfig(process.env.DATABASE_URL_ADMIN);
+      const adminClient = new pg.Client({ connectionString: process.env.DATABASE_URL_ADMIN, ssl });
+      await adminClient.connect();
+
+      const testOrgName = 'Abort Escape Bypass Test ' + Date.now();
+      const funcName = 'pramaan_test_abort_escape_mutator';
+      try {
+        await adminClient.query(`
+          CREATE OR REPLACE FUNCTION ${funcName}() RETURNS void AS $$
+          BEGIN
+            INSERT INTO organizations (name, kind) VALUES ('${testOrgName}', 'college');
+          END;
+          $$ LANGUAGE plpgsql;
+        `);
+
+        // Executed with opt-in disabled to prove safety guard prevents execution
+        delete process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+        await expect(runQuery(`SELECT 1; ABORT; SELECT ${funcName}();`)).rejects.toThrow(
+          /requires explicit opt-in via ALLOW_DESTRUCTIVE_DB_TESTS=true/
+        );
+
+        // Verify zero rows were inserted
+        const checkRes = await adminClient.query(
+          `SELECT count(*)::int AS cnt FROM organizations WHERE name = '${testOrgName}';`
+        );
+        expect(checkRes.rows[0].cnt).toBe(0);
+      } finally {
+        await adminClient.query(`DROP FUNCTION IF EXISTS ${funcName}();`).catch(() => {});
+        await adminClient.query(`DELETE FROM organizations WHERE name = '${testOrgName}';`).catch(() => {});
+        await adminClient.end();
+      }
+    }
+  });
+
+  it('41. Unrecognized user-defined mutating function is strictly blocked at the PostgreSQL engine level in the read-only path', async () => {
     process.env.DATABASE_URL_ADMIN = originalAdminUrl;
     if (process.env.DATABASE_URL_ADMIN && isApprovedTestDatabase(process.env.DATABASE_URL_ADMIN)) {
       const ssl = resolveAdminSslConfig(process.env.DATABASE_URL_ADMIN);
@@ -759,7 +938,7 @@ describe('Database Test Safety Guard & Production Target Protection (Final Harde
     }
   });
 
-  it('38. Authorized RLS test transactions execute successfully via runQuery and runTestTransaction', async () => {
+  it('42. Authorized RLS test transactions execute successfully via runQuery and runTestTransaction', async () => {
     process.env.DATABASE_URL_ADMIN = originalAdminUrl;
     if (process.env.DATABASE_URL_ADMIN && isApprovedTestDatabase(process.env.DATABASE_URL_ADMIN)) {
       // 1. Authorized multi-statement transaction via runQuery
@@ -787,7 +966,7 @@ describe('Database Test Safety Guard & Production Target Protection (Final Harde
     }
   });
 
-  it('39. Management API fallback strictly rejects user-defined function calls and transaction control', async () => {
+  it('43. Management API fallback strictly rejects qualified and unqualified user-defined function calls and transaction control', async () => {
     delete process.env.DATABASE_URL_ADMIN;
     delete process.env.DATABASE_URL;
     process.env.SUPABASE_MANAGEMENT_TOKEN = 'test-token';
@@ -795,6 +974,14 @@ describe('Database Test Safety Guard & Production Target Protection (Final Harde
 
     // Transaction control is rejected
     await expect(runQuery('BEGIN; SELECT 1; COMMIT;')).rejects.toThrow(
+      /Destructive or mutating database operations require direct DATABASE_URL_ADMIN PostgreSQL connectivity/
+    );
+
+    await expect(runQuery('SELECT 1; END;')).rejects.toThrow(
+      /Destructive or mutating database operations require direct DATABASE_URL_ADMIN PostgreSQL connectivity/
+    );
+
+    await expect(runQuery('SELECT 1; ABORT;')).rejects.toThrow(
       /Destructive or mutating database operations require direct DATABASE_URL_ADMIN PostgreSQL connectivity/
     );
 
@@ -806,5 +993,22 @@ describe('Database Test Safety Guard & Production Target Protection (Final Harde
     await expect(runQuery('SELECT custom_schema.calculate_risk(1);')).rejects.toThrow(
       /Read-only execution cannot be safely guaranteed for this query/
     );
+
+    // Unqualified user-defined mutating function is rejected by isSafeReadOnlyQuery
+    await expect(runQuery('SELECT my_unrecognized_mutator();')).rejects.toThrow(
+      /Read-only execution cannot be safely guaranteed for this query/
+    );
+
+    await expect(runQuery('SELECT pramaan_test_unrecognized_mutator();')).rejects.toThrow(
+      /Read-only execution cannot be safely guaranteed for this query/
+    );
+
+    expect(isSafeReadOnlyQuery('SELECT my_unrecognized_mutator();')).toBe(false);
+    expect(isSafeReadOnlyQuery('SELECT pramaan_test_unrecognized_mutator();')).toBe(false);
+
+    // In contrast, safe standard read-only functions are allowed
+    expect(isSafeReadOnlyQuery('SELECT count(*) FROM organizations;')).toBe(true);
+    expect(isSafeReadOnlyQuery('SELECT coalesce(null, 1);')).toBe(true);
+    expect(isSafeReadOnlyQuery("SELECT upper('hello');")).toBe(true);
   });
 });

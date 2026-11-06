@@ -296,8 +296,23 @@ export function hasTransactionControl(sql) {
   const cleaned = cleanSqlForInspection(sql);
   if (!cleaned) return false;
 
-  const txKeywordsRegex = /\b(BEGIN|START\s+TRANSACTION|COMMIT|ROLLBACK|SAVEPOINT|RELEASE\s+SAVEPOINT)\b/i;
-  return txKeywordsRegex.test(cleaned);
+  // Primary PostgreSQL transaction-control commands and terminators
+  // Includes: BEGIN, START TRANSACTION, START WORK, COMMIT, ROLLBACK, ABORT,
+  // SAVEPOINT, RELEASE [SAVEPOINT], PREPARE TRANSACTION, SET TRANSACTION
+  const txKeywordsRegex = /\b(BEGIN|START\s+TRANSACTION|START\s+WORK|COMMIT|ROLLBACK|ABORT|SAVEPOINT|RELEASE(?:\s+SAVEPOINT)?|PREPARE\s+TRANSACTION|SET\s+(?:SESSION\s+CHARACTERISTICS\s+AS\s+)?TRANSACTION)\b/i;
+  if (txKeywordsRegex.test(cleaned)) return true;
+
+  // PostgreSQL transaction alias: END [ WORK | TRANSACTION ] [ AND [ NO ] CHAIN ]
+  // Must match statement-level END (at start of query or after a semicolon) to avoid
+  // false positives on SQL CASE expressions (CASE ... END).
+  const endStatementRegex = /(?:^|;)\s*END(?:\s+(?:WORK|TRANSACTION))?(?:\s+AND\s+(?:NO\s+)?CHAIN)?\s*(?:;|$)/i;
+  if (endStatementRegex.test(cleaned)) return true;
+
+  // Unambiguous compound forms of END
+  const endCompoundRegex = /\bEND\s+(?:WORK|TRANSACTION|AND\s+(?:NO\s+)?CHAIN)\b/i;
+  if (endCompoundRegex.test(cleaned)) return true;
+
+  return false;
 }
 
 export function isMutationQuery(sql) {
@@ -318,6 +333,57 @@ export function isDestructiveQuery(sql) {
   return isMutationQuery(sql) || hasTransactionControl(sql);
 }
 
+// Allowlist of safe built-in SQL and PostgreSQL functions & syntax keywords that may precede '(' in read-only queries
+const SAFE_READ_ONLY_BUILTIN_FUNCTIONS_AND_KEYWORDS = new Set([
+  // SQL Syntax / Clause Keywords that can precede parentheses in valid read-only queries
+  'select', 'from', 'where', 'and', 'or', 'not', 'in', 'on', 'as', 'with', 'values',
+  'join', 'using', 'case', 'when', 'then', 'else', 'over', 'partition', 'order', 'by',
+  'group', 'having', 'limit', 'offset', 'distinct', 'cast', 'extract', 'position',
+  'substring', 'trim', 'between', 'exists', 'row', 'array', 'table', 'left', 'right',
+  'cross', 'inner', 'outer', 'natural', 'full', 'filter', 'within', 'like', 'ilike',
+  'similar', 'nullif', 'coalesce', 'greatest', 'least', 'all', 'any', 'some',
+
+  // Standard read-only aggregate functions
+  'count', 'sum', 'avg', 'min', 'max', 'string_agg', 'array_agg', 'json_agg', 'jsonb_agg',
+  'bool_and', 'bool_or', 'every', 'bit_and', 'bit_or', 'xmlagg',
+
+  // Standard read-only string / text functions
+  'lower', 'upper', 'btrim', 'ltrim', 'rtrim', 'length', 'char_length', 'character_length',
+  'octet_length', 'bit_length', 'replace', 'concat', 'concat_ws', 'split_part',
+  'repeat', 'reverse', 'lpad', 'rpad', 'format', 'initcap', 'strpos', 'translate',
+  'ascii', 'chr', 'md5', 'encode', 'decode', 'to_hex', 'quote_ident', 'quote_literal',
+
+  // Standard mathematical functions
+  'abs', 'ceil', 'ceiling', 'floor', 'round', 'trunc', 'power', 'sqrt', 'cbrt',
+  'degrees', 'radians', 'exp', 'ln', 'log', 'mod', 'sign', 'random', 'width_bucket',
+
+  // Standard date and time functions
+  'now', 'current_timestamp', 'current_time', 'current_date', 'localtime', 'localtimestamp',
+  'timeofday', 'clock_timestamp', 'statement_timestamp', 'transaction_timestamp',
+  'date_trunc', 'date_part', 'age', 'to_char', 'to_date', 'to_timestamp', 'to_number',
+  'isfinite', 'justify_days', 'justify_hours', 'justify_interval',
+
+  // JSON and JSONB read-only functions
+  'json_build_object', 'jsonb_build_object', 'json_build_array', 'jsonb_build_array',
+  'json_extract_path', 'jsonb_extract_path', 'json_extract_path_text', 'jsonb_extract_path_text',
+  'json_array_length', 'jsonb_array_length', 'row_to_json', 'to_json', 'to_jsonb',
+  'json_typeof', 'jsonb_typeof', 'json_strip_nulls', 'jsonb_strip_nulls',
+  'json_object_keys', 'jsonb_object_keys',
+
+  // Cryptographic & UUID read-only functions
+  'gen_random_uuid', 'uuid_generate_v4', 'uuid_generate_v1', 'hashtext', 'digest',
+
+  // System, connection & metadata introspection functions
+  'version', 'current_user', 'session_user', 'user', 'current_database', 'current_schema',
+  'current_setting', 'inet_server_port', 'inet_server_addr', 'inet_client_port', 'inet_client_addr',
+  'pg_typeof', 'pg_backend_pid', 'cardinality', 'array_length', 'array_ndims', 'array_dims',
+  'array_lower', 'array_upper', 'array_to_string', 'string_to_array', 'unnest',
+
+  // Built-in PostgreSQL pseudo-type cast constructors
+  'int', 'int2', 'int4', 'int8', 'float4', 'float8', 'numeric', 'text', 'varchar',
+  'bool', 'boolean', 'date', 'time', 'timestamp', 'timestamptz', 'interval', 'uuid'
+]);
+
 export function isSafeReadOnlyQuery(sql) {
   if (typeof sql !== 'string') return false;
   const cleaned = cleanSqlForInspection(sql);
@@ -327,7 +393,7 @@ export function isSafeReadOnlyQuery(sql) {
   if (isDestructiveQuery(sql)) return false;
 
   // 2. Prohibit transaction commands or session alteration in safe read-only
-  const unsafeCommandsRegex = /\b(BEGIN|COMMIT|ROLLBACK|START|SET|RESET|DISCARD|LISTEN|UNLISTEN|NOTIFY|LOAD|LOCK)\b/i;
+  const unsafeCommandsRegex = /\b(BEGIN|COMMIT|ROLLBACK|ABORT|START|SET|RESET|DISCARD|LISTEN|UNLISTEN|NOTIFY|LOAD|LOCK|PREPARE)\b/i;
   if (unsafeCommandsRegex.test(cleaned)) return false;
 
   // 3. Must begin with recognized read-only query verbs (SELECT, WITH, SHOW, EXPLAIN, VALUES)
@@ -337,6 +403,17 @@ export function isSafeReadOnlyQuery(sql) {
   // 4. Prohibit arbitrary or user-defined schema-qualified functions on unauthenticated channels (e.g. public.fn())
   const schemaQualifiedFunctionRegex = /\b[a-zA-Z0-9_]+\s*\.\s*[a-zA-Z0-9_]+\s*\(/;
   if (schemaQualifiedFunctionRegex.test(cleaned)) return false;
+
+  // 5. Prohibit unqualified user-defined or unrecognized functions.
+  // Any function call not in the verified safe built-in functions allowlist is rejected.
+  const functionCallRegex = /\b([a-zA-Z0-9_]+)\s*\(/g;
+  let match;
+  while ((match = functionCallRegex.exec(cleaned)) !== null) {
+    const fnName = match[1].toLowerCase();
+    if (!SAFE_READ_ONLY_BUILTIN_FUNCTIONS_AND_KEYWORDS.has(fnName)) {
+      return false;
+    }
+  }
 
   return true;
 }
