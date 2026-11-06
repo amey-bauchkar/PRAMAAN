@@ -4,7 +4,7 @@
 **Project:** PRAMAAN (QUASAR 5.0 — EdTech Domain)  
 **Database Target:** Real PostgreSQL 17.11 on Supabase (`db.qshujrddrzoemlzmleru.supabase.co`)  
 **Auditor / Engineer:** Principal Software Architect & Security Engineer (Antigravity Solo Partner)  
-**Verification Status:** **PASSED & SECURITY VERIFIED** (100% of 195 tests passing across 23 test suites)
+**Verification Status:** **PASSED & SECURITY VERIFIED** (100% of 207 tests passing across 23 test suites)
 
 ---
 
@@ -34,8 +34,8 @@ All claims in this report are backed by automated tests running against the **li
 Monorepo Test Suite Summary:
 ├── Pure Domain Unit Tests:          41 tests (Skill state machine, anchor resolver, fairness, eligibility, audit chain integrity, authenticated checkpoints, caller-key override rejection)
 ├── API, RBAC & Adversarial Tests:  112 tests (Fastify, positive RBAC matrix, email takeover, fail-closed, strict claims, consent adversarial, audit concurrency, restricted runtime user, genuine ES256 JWKS)
-└── DB, Migration & Safety Tests:    42 tests (Supabase real DB, RLS, triggers, pool socket reuse, database safety guard, target allowlist, cross-tenant audit isolation regression, migration ledger, admin TLS)
-Total:                              195 tests, 100% passing (Execution time: 21.32s across 23 files)
+└── DB, Migration & Safety Tests:    54 tests (Supabase real DB, RLS, triggers, pool socket reuse, strict URL/host/db safety guard, target allowlist, cross-tenant audit isolation regression, migration ledger, admin TLS)
+Total:                              207 tests, 100% passing (Execution time: 21.71s across 23 files)
 ```
 
 ---
@@ -354,20 +354,20 @@ npx vitest run
 ```text
  RUN  v2.1.9 C:/Users/SEBIN/Desktop/PRAMAAN
 
- ✓ packages/domain/tests/skill-state-machine.test.ts (8 tests) 7ms
+ ✓ packages/domain/tests/skill-state-machine.test.ts (8 tests) 6ms
  ✓ packages/domain/tests/audit-chain.test.ts (19 tests) 17ms
- ✓ apps/api/tests/auth-membership-tenant.test.ts (13 tests) 23ms
- ✓ db/tests/test-safety-guard.test.ts (11 tests) 10ms
- ✓ apps/api/tests/m1-consent-ledger.test.ts (3 tests) 5ms
- ✓ apps/api/tests/prod-fail-closed.test.ts (15 tests) 389ms
- ✓ apps/api/tests/api-endpoints.test.ts (7 tests) 451ms
- ✓ apps/api/tests/api-route-rbac.test.ts (18 tests) 546ms
+ ✓ db/tests/test-safety-guard.test.ts (23 tests) 31ms
+ ✓ apps/api/tests/auth-membership-tenant.test.ts (13 tests) 30ms
+ ✓ apps/api/tests/m1-consent-ledger.test.ts (3 tests) 7ms
  ✓ packages/domain/tests/fairness-calculator.test.ts (5 tests) 4ms
- ✓ packages/domain/tests/eligibility-evaluator.test.ts (5 tests) 5ms
- ✓ db/tests/admin-tls-and-ledger.test.ts (6 tests) 759ms
- ✓ apps/api/tests/email-takeover-prevention.test.ts (4 tests) 12ms
+ ✓ apps/api/tests/prod-fail-closed.test.ts (15 tests) 396ms
+ ✓ apps/api/tests/api-endpoints.test.ts (7 tests) 457ms
+ ✓ apps/api/tests/api-route-rbac.test.ts (18 tests) 560ms
+ ✓ packages/domain/tests/eligibility-evaluator.test.ts (5 tests) 8ms
+ ✓ db/tests/admin-tls-and-ledger.test.ts (6 tests) 760ms
+ ✓ apps/api/tests/email-takeover-prevention.test.ts (4 tests) 14ms
  ✓ apps/api/tests/m1-tenancy-rls.test.ts (5 tests) 4ms
- ✓ apps/api/tests/m1-audit-chain.test.ts (3 tests) 4ms
+ ✓ apps/api/tests/m1-audit-chain.test.ts (3 tests) 6ms
  ✓ packages/domain/tests/anchor-resolver.test.ts (4 tests) 2ms
  ✓ db/tests/migration-runner.test.ts (4 tests) 1630ms
  ✓ apps/api/tests/pg-auth-integration.test.ts (2 tests) 1650ms
@@ -375,13 +375,13 @@ npx vitest run
  ✓ db/tests/connection-pool-reuse.test.ts (1 test) 3080ms
  ✓ apps/api/tests/consent-adversarial.test.ts (7 tests) 3930ms
  ✓ apps/api/tests/restricted-runtime-user.test.ts (9 tests) 5606ms
- ✓ apps/api/tests/audit-concurrency-and-consent.test.ts (5 tests) 7422ms
- ✓ db/tests/supabase-real-db.test.ts (20 tests) 20806ms
+ ✓ apps/api/tests/audit-concurrency-and-consent.test.ts (5 tests) 7300ms
+ ✓ db/tests/supabase-real-db.test.ts (20 tests) 20979ms
 
  Test Files  23 passed (23)
-      Tests  195 passed (195)
-   Start at  17:26:50
-   Duration  21.50s (transform 809ms, setup 0ms, collect 4.90s, tests 50.07s, environment 5ms, prepare 3.40s)
+      Tests  207 passed (207)
+   Start at  17:52:19
+   Duration  21.71s (transform 841ms, setup 0ms, collect 5.29s, tests 51.02s, environment 5ms, prepare 3.60s)
 ```
 
 ### 8.7 Test Environment Breakdown & Multi-Stage Execution Distinction (P1)
@@ -389,8 +389,8 @@ To ensure absolute reporting accuracy and maintain transparency across environme
 
 1. **Full Local Monorepo Vitest Run:**
    - **Environment:** Local workstation with configured development `.env` credentials (`DATABASE_URL`, `DATABASE_URL_ADMIN`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `ALLOW_DESTRUCTIVE_DB_TESTS=true`, `CHECKPOINT_SIGNING_KEY`).
-   - **Scope:** All 23 test files (pure domain algorithms, Fastify API, administrative SSL/ledger, connection pool reuse, genuine JWKS, restricted runtime user, database test safety guards, and live Supabase PostgreSQL 17 database).
-   - **Result:** **195 passed (100%)**, 0 failed, 0 skipped.
+   - **Scope:** All 23 test files (pure domain algorithms, Fastify API, administrative SSL/ledger, connection pool reuse, genuine JWKS, restricted runtime user, strict database test safety guards, and live Supabase PostgreSQL 17 database).
+   - **Result:** **207 passed (100%)**, 0 failed, 0 skipped.
 
 2. **Isolated PostgreSQL 17 GitHub Actions Tests (CI Job 2):**
    - **Environment:** Clean `postgres:17-alpine` Docker service container inside GitHub Actions (`.github/workflows/ci.yml`).
@@ -462,23 +462,34 @@ An independent vulnerability review identified that `VerifyChainOptions.trustedC
 
 ### 9.5 Live Database Test Safety Guards, Cross-Tenant Cleanup Fix & Target Allowlist (P0 / P1)
 To prevent integration test executions from causing unintended side-effects or deleting institutional data:
-1. **Fix Cross-Tenant Audit Deletion (P0-1):** In `db/tests/supabase-real-db.test.ts`, previous test teardown executed `DELETE FROM audit_events WHERE org_id = '...' OR seq = 99991`. The unconstrained `OR seq = 99991` clause was globally scoped and risked deleting audit events from other organizations sharing sequence 99991. Remediations:
+1. **Fix Cross-Tenant Audit Deletion & Mandatory Exact Identifiers (P0-1):** In `db/tests/supabase-real-db.test.ts`, previous test teardown executed `DELETE FROM audit_events WHERE org_id = '...' OR seq = 99991`. The unconstrained `OR seq = 99991` clause was globally scoped and risked deleting audit events from other organizations sharing sequence 99991. Remediations:
    - Completely removed the unconstrained `OR seq = 99991` clause.
    - Every audit cleanup query is strictly scoped to `TEST_AUDIT_TENANT_ID = 'e0000000-0000-0000-0000-000000000099'`.
    - Matches exact `action = 'AUDIT_VERIFICATION_TEST'`, `object_type = 'student_skill'`, and unique event ID `TEST_AUDIT_EVENT_ID = 'e9999999-0000-0000-0000-000000000001'`.
+   - `safeCleanupTestAuditEvents` requires all 5 exact identifiers: `orgId`, `seq`, `action`, `objectType`, `id`. Calling with only `orgId` or omitting any identifier throws an immediate fatal error and executes no SQL.
    - Executed via `safeCleanupTestAuditEvents`: trigger disable, exact tenant-scoped deletion, and trigger re-enable occur inside a single database transaction on one dedicated client. Transaction rollback restores trigger state if any step fails.
    - Both pre-test (`beforeAll`) and teardown (`afterAll`) use identical safe tenant-scoped predicates.
    - Added Regression Test 20 to `db/tests/supabase-real-db.test.ts`, proving that cleanup of `TEST_AUDIT_TENANT_ID` with sequence 99991 cannot delete another organization's audit event sharing sequence 99991.
-2. **Database Target Identity Protection & Opt-In Guard (P1-3):**
-   - **Explicit Opt-In Required:** `assertSafeTestEnvironment(operation, targetUrl)` in `scripts/supabase-runner.mjs` halts execution immediately unless `ALLOW_DESTRUCTIVE_DB_TESTS=true` is set.
+2. **Database Target Identity Protection & Strict URL Parser Allowlisting (P1-3):**
+   - **Replaced Substring Allowlisting with URL Parsing:** Substring matching (`urlLower.includes(...)`) was permanently replaced with WHATWG URL parsing (`new URL(dbUrl)`). Protocol is validated strictly as `postgresql:` or `postgres:`.
+   - **Exact Hostname Allowlist:** Local approved hosts must match exact normalized hostnames (`localhost`, `127.0.0.1`, `::1`, `host.docker.internal`, `postgres`). Subdomain spoofing (e.g. `localhost.attacker.example`) and path-based spoofing (e.g. `attacker.example/pramaan_test`) are strictly rejected.
+   - **Separate Database Name Validation:** Database name is parsed and validated separately against `DEFAULT_APPROVED_DB_NAMES` (`pramaan_test`, `postgres`, `test`, `pramaan_dev`, `template1`). Production database names (e.g. `production`, `pramaan_production`) on local hosts are rejected.
+   - **Remote Supabase Target Authentication:** Remote targets must match exact approved project references (`qshujrddrzoemlzmleru`) within recognized host formats (`db.<ref>.supabase.co` direct, or `<region>.pooler.supabase.com` with `<user>.<ref>`). Project references appearing in passwords, query parameters, or paths on unrelated hosts (e.g. `attacker.example/qshujrddrzoemlzmleru`) are strictly rejected.
+   - **Fail Closed on Missing Target Identity:** Missing `DATABASE_URL_ADMIN` and missing `targetUrl` in `assertSafeTestEnvironment()` fails closed immediately (`Database target identity is missing`).
+   - **Prohibition of Management API Fallback for Mutations:** `runQuery()` prohibits Management API execution for destructive or mutating queries. Destructive operations strictly require direct `DATABASE_URL_ADMIN` PostgreSQL connectivity.
+   - **Approved Project Reference Required for Management API:** Management API queries require `SUPABASE_PROJECT_REF` to be explicitly set and validated against `isApprovedSupabaseProjectRef()`. Silent default fallback is prohibited.
+   - **Explicit Opt-In Required:** `assertSafeTestEnvironment(operation, targetUrl)` halts execution immediately unless `ALLOW_DESTRUCTIVE_DB_TESTS=true` is set.
    - **Environment Guard:** Fails closed if `NODE_ENV === 'production'`, `ENVIRONMENT === 'production'`, or `VERCEL_ENV === 'production'`.
-   - **Production Target Rejection:** `isProductionDatabaseTarget(url)` inspects connection URLs and strictly blocks connections targeting known production Supabase project refs (`qshujrddrzoemlzmleru`), production hostnames, port 5432 direct connections, and URLs matching production regex patterns (`\/prod[_\-/]/i`).
-   - **Test Target Allowlist:** `isApprovedTestDatabase(url)` validates that target URLs match approved test patterns (localhost, 127.0.0.1, Docker host `postgres`, `.local`, or staging project refs).
-   - **Destructive Query Auto-Detection:** `runQuery()` automatically parses queries for destructive SQL (`DELETE FROM`, `TRUNCATE TABLE`, `DROP TABLE`, `ALTER TABLE ... DISABLE TRIGGER`) and runs `assertSafeTestEnvironment()` automatically.
-   - **Automated Verification:** Verified by 11 regression tests in `db/tests/test-safety-guard.test.ts`.
-3. **Dedicated Test Tenant Fixtures:** Tests no longer insert synthetic audit events into institutional tenant chains (`College A`). A dedicated test tenant (`TEST_AUDIT_TENANT_ID = 'e0000000-0000-0000-0000-000000000099'`) is used exclusively for immutability and DCL privilege testing.
-4. **Institutional Tenant Immutability Protection:** `assertNotInstitutionalTenant(orgId)` blocks destructive operations against production institutional tenants (`00000000-0000-0000-0000-000000000001` and `00000000-0000-0000-0000-000000000002`). Institutional records are never deleted or modified by tests.
-5. **Unconditional Trigger-Safe Cleanup:** Cleanup in `afterAll` runs within a `try ... finally` block, ensuring test audit events are cleaned up and the database immutability trigger `trg_audit_events_immutable` is unconditionally re-enabled even if assertions fail. Immutability triggers are never disabled outside tightly controlled test cleanup.
+3. **Comprehensive Mutation & DDL Guarding:**
+   - `isMutationQuery(sql)` / `isDestructiveQuery(sql)` inspects SQL queries after stripping block comments (`/* ... */`), line comments (`-- ...`), string literals (`'...'`), double-quoted identifiers (`"..."`), and dollar-quoted strings (`$$...$$`).
+   - Detects all mutation and DDL commands: `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `DROP`, `ALTER`, `CREATE`, `GRANT`, `REVOKE`, `RENAME`, `DO`, `CALL`, `EXECUTE`, `VACUUM`, `REINDEX`, `COPY`, `LOCK`.
+   - Blocks bypass attempts hidden behind leading whitespace, inline comments, or multi-statement batches (`SELECT 1; DROP TABLE`).
+   - Preserves normal read-only `SELECT` queries without false positives on string literals or column names (e.g. `deleted_at`).
+   - Enforced automatically in `runQuery()` before query execution.
+   - Automated Verification: Verified by 23 regression tests in `db/tests/test-safety-guard.test.ts`.
+4. **Dedicated Test Tenant Fixtures:** Tests no longer insert synthetic audit events into institutional tenant chains (`College A`). A dedicated test tenant (`TEST_AUDIT_TENANT_ID = 'e0000000-0000-0000-0000-000000000099'`) is used exclusively for immutability and DCL privilege testing.
+5. **Institutional Tenant Immutability Protection:** `assertNotInstitutionalTenant(orgId)` blocks destructive operations against production institutional tenants (`00000000-0000-0000-0000-000000000001` and `00000000-0000-0000-0000-000000000002`). Institutional records are never deleted or modified by tests.
+6. **Unconditional Trigger-Safe Cleanup:** Cleanup in `afterAll` runs within a `try ... finally` block, ensuring test audit events are cleaned up and the database immutability trigger `trg_audit_events_immutable` is unconditionally re-enabled even if assertions fail. Immutability triggers are never disabled outside tightly controlled test cleanup.
 
 ---
 
@@ -548,10 +559,10 @@ The repository administrator must enable branch protection in GitHub:
 ## 13. Conclusion & Readiness Gate for Milestone M2
 
 The comprehensive M1 closure audit confirms that all security, tenancy, authentication, ledger, pipeline, and audit-integrity invariants are fully implemented, verified, and locked:
-- **100% Passing Tests:** 195 automated tests across 23 test suites (0 failures, 0 regressions).
+- **100% Passing Tests:** 207 automated tests across 23 test suites (0 failures, 0 regressions).
 - **Authenticated Checkpoint Integrity:** `AuditChain.verifyChain()` strictly enforces genesis anchoring and cryptographic checkpoint authentication (orgId binding, finite non-negative integer seq, HMAC-SHA256 signature with backend-configured verification key). Caller-controlled signing keys are completely removed. Plain unauthenticated `{ seq, hash }` objects and the historical dummy `a*64` hash are strictly rejected as `INVALID`.
 - **Tenant College A Status:** College A historical chain in the development database starts at `seq = 100000` and remains strictly **`UNANCHORED`** (`valid: false, isComplete: false`). Internal suffix links being valid does not authenticate missing historical prefixes. Complete verification is not claimed without an authentic cryptographic anchor.
-- **Cross-Tenant Audit Deletion Fix & Target Safety:** Eliminated unconstrained `OR seq = 99991` delete. All audit test cleanup is strictly tenant-scoped to `TEST_AUDIT_TENANT_ID`, matching exact event ID, action, and object type within transactional client execution. Integration tests execute with `assertSafeTestEnvironment()`, requiring `ALLOW_DESTRUCTIVE_DB_TESTS=true`, blocking production database URLs, validating target allowlists, and guaranteeing zero mutation of institutional records.
+- **Strict Database Target Guarding & Exact Audit Cleanup:** Eliminated substring-based allowlisting in favor of strict WHATWG URL parsing (PostgreSQL protocol, exact hostnames `localhost`, `127.0.0.1`, `::1`, `host.docker.internal`, `postgres`, separate database name validation, and exact project reference verification for Supabase). Missing target identity fails closed immediately. Management API execution is prohibited from executing mutations. All SQL mutations and DDL statements are guarded by comment-resilient parsing. `safeCleanupTestAuditEvents` requires all 5 exact identifiers (`orgId`, `seq`, `action`, `objectType`, `id`), prohibiting blanket tenant deletions. Institutional records are unconditionally protected.
 - **Forensic Accuracy:** Commit attribution (`0bf87bdf` vs `454854e`) and Migration 009 deletion scope are accurately documented, with verified database facts distinguished from commit history inferences.
 - **Quality Gates:** ESLint (`npm run lint`), TypeScript strict typecheck (`npm run typecheck`), and monorepo production build (`npm run build`) all pass with 0 errors.
 - **CI / CD Pipeline:** Multi-stage GitHub Actions workflow with clean isolated PostgreSQL 17 container execution and credential-safe live Supabase verification gate (status SKIPPED in CI when secrets are absent).
