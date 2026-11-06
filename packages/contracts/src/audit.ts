@@ -16,6 +16,28 @@ export const AuditEventSchema = z.object({
 });
 export type AuditEvent = z.infer<typeof AuditEventSchema>;
 
+export const AuditChainVerificationStatusSchema = z.enum([
+  'COMPLETE_AND_VALID',
+  'PARTIAL_BUT_LINKS_VALID',
+  'INVALID',
+  'UNANCHORED'
+]);
+export type AuditChainVerificationStatus = z.infer<typeof AuditChainVerificationStatusSchema>;
+
+export const TrustedCheckpointSchema = z.object({
+  seq: z.number().int().nonnegative(),
+  hash: z.string().length(64),
+});
+export type TrustedCheckpoint = z.infer<typeof TrustedCheckpointSchema>;
+
+export const AuditChainVerificationResultSchema = z.object({
+  valid: z.boolean(),
+  status: AuditChainVerificationStatusSchema,
+  brokenAtSeq: z.number().int().positive().optional(),
+  error: z.string().optional(),
+});
+export type AuditChainVerificationResult = z.infer<typeof AuditChainVerificationResultSchema>;
+
 export const ProposalKindSchema = z.enum([
   'slot_allocation',
   'jd_skills',

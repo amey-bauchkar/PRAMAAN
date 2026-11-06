@@ -63,6 +63,7 @@ describe('PRAMAAN Audit Chain Concurrency (P1-4) & Tenant-Scoped Consent (P1-5)'
     // Verify cryptographic integrity of the entire chain
     const verification = AuditChain.verifyChain(allEvents);
     expect(verification.valid).toBe(true);
+    expect(verification.status).toBe('COMPLETE_AND_VALID');
     expect(verification.brokenAtSeq).toBeUndefined();
     expect(verification.error).toBeUndefined();
   });

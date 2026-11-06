@@ -35,6 +35,7 @@ describe('M1: Cryptographic Audit Chain (P0-02)', () => {
 
     const integrity = auditService.verifyIntegrity();
     expect(integrity.valid).toBe(true);
+    expect(integrity.status).toBe('COMPLETE_AND_VALID');
   });
 
   it('RLS-12: Tenant context filters audit events strictly to own organization', () => {
@@ -60,6 +61,7 @@ describe('M1: Cryptographic Audit Chain (P0-02)', () => {
 
     const integrity = auditService.verifyIntegrity();
     expect(integrity.valid).toBe(false);
+    expect(integrity.status).toBe('INVALID');
     expect(integrity.brokenAtSeq).toBe(2);
     expect(integrity.error).toMatch(/Tampered event payload/);
   });

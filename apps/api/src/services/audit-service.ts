@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import { AuditEvent, SessionContext } from '@pramaan/contracts';
-import { AuditChain } from '@pramaan/domain';
+import { AuditChain, AuditChainVerificationResult, VerifyChainOptions } from '@pramaan/domain';
 
 export class AuditService {
   private events: AuditEvent[] = [];
@@ -53,8 +53,8 @@ export class AuditService {
   /**
    * Verifies the cryptographic chain across all recorded events.
    */
-  public verifyIntegrity(): { valid: boolean; brokenAtSeq?: number; error?: string } {
-    return AuditChain.verifyChain(this.events);
+  public verifyIntegrity(options?: VerifyChainOptions): AuditChainVerificationResult {
+    return AuditChain.verifyChain(this.events, options);
   }
 
   /**

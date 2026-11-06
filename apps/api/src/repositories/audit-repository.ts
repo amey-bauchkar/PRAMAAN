@@ -1,7 +1,7 @@
 import pg from 'pg';
 import { randomUUID } from 'crypto';
 import { AuditEvent, SessionContext } from '@pramaan/contracts';
-import { AuditChain } from '@pramaan/domain';
+import { AuditChain, AuditChainVerificationResult, VerifyChainOptions } from '@pramaan/domain';
 import { withTenantTransaction, getDbPool } from '../db/pool.js';
 import { AuditService } from '../services/audit-service.js';
 
@@ -22,7 +22,7 @@ export interface IAuditRepository {
     metadata?: Record<string, unknown>
   ): Promise<AuditEvent>;
   getEventsForTenant(context: SessionContext): Promise<AuditEvent[]>;
-  verifyIntegrity(context: SessionContext): Promise<{ valid: boolean; brokenAtSeq?: number; error?: string }>;
+  verifyIntegrity(context: SessionContext, options?: VerifyChainOptions): Promise<AuditChainVerificationResult>;
 }
 
 export class InMemoryAuditRepository implements IAuditRepository {
@@ -53,8 +53,8 @@ export class InMemoryAuditRepository implements IAuditRepository {
     return this.service.getEventsForTenant(context);
   }
 
-  public async verifyIntegrity(): Promise<{ valid: boolean; brokenAtSeq?: number; error?: string }> {
-    return this.service.verifyIntegrity();
+  public async verifyIntegrity(_context?: SessionContext, options?: VerifyChainOptions): Promise<AuditChainVerificationResult> {
+    return this.service.verifyIntegrity(options);
   }
 
   public getService(): AuditService {
@@ -181,8 +181,8 @@ export class PgAuditRepository implements IAuditRepository {
     }, this.pool);
   }
 
-  public async verifyIntegrity(context: SessionContext): Promise<{ valid: boolean; brokenAtSeq?: number; error?: string }> {
+  public async verifyIntegrity(context: SessionContext, options?: VerifyChainOptions): Promise<AuditChainVerificationResult> {
     const events = await this.getEventsForTenant(context);
-    return AuditChain.verifyChain(events);
+    return AuditChain.verifyChain(events, options);
   }
 }
