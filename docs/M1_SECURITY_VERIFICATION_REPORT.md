@@ -4,7 +4,7 @@
 **Project:** PRAMAAN (QUASAR 5.0 — EdTech Domain)  
 **Database Target:** Real PostgreSQL 17.11 on Supabase (`db.qshujrddrzoemlzmleru.supabase.co`)  
 **Auditor / Engineer:** Principal Software Architect & Security Engineer (Antigravity Solo Partner)  
-**Verification Status:** **PASSED & SECURITY VERIFIED** (100% of 187 tests passing across 23 test suites)
+**Verification Status:** **PASSED & SECURITY VERIFIED** (100% of 195 tests passing across 23 test suites)
 
 ---
 
@@ -19,21 +19,23 @@ The audit remediated all defects identified across eight core security areas:
 4. **Migration Reproducibility & Ledger Engine (P1-3):** Engineered a fully idempotent, version-controlled migration engine (`scripts/migrate-supabase.mjs`) tracked via an explicit `schema_migrations` ledger with SHA-256 checksums and session advisory lock (`8429104820948123n`). Migrations execute atomically in transactions with rollback on failure. Checksum drift causes immediate non-zero termination.
 5. **Audit-Chain Concurrency & Transactional Integrity (P1-4):** Added unique constraint `uq_audit_events_org_seq UNIQUE (org_id, seq)` via migration 009. Concurrent tenant audit writes serialize via `pg_advisory_xact_lock(hashtext('audit_chain'), hashtext(org_id))`. Added `logInTransaction(client, ...)` to eliminate nested client checkouts in `PgConsentRepository`. Enforced RFC 8785 canonical key sorting in `AuditChain.calculateHash` to eliminate PostgreSQL JSONB key-reordering hash verification failures.
 6. **Tenant-Scoped Consent Checking (P1-5):** Added `context: SessionContext` to `hasActiveConsent()`, executing under `withTenantTransaction(context, ...)` to switch to `app_api` and enforce tenant RLS boundaries at the database engine level.
-7. **CI / CD Quality Gates & Multi-Stage Verification Pipeline (P2):** Configured ESLint (`eslint.config.mjs`) for `npm run lint` and separated strict TypeScript compilation check to `npm run typecheck` (`tsc --noEmit`). Created 3-stage GitHub Actions workflow: `build-and-unit-tests`, `isolated-postgres-integration`, and `live-supabase-verification`.
-8. **Cryptographic Checkpoint Authenticity & Database Test Safety Guards (P0):**
-   - **Authenticated Checkpoint Verification:** Plain unauthenticated `{ seq, hash }` objects and the historical dummy `a*64` hash are strictly rejected as `INVALID`. Checkpoints require strict cryptographic authentication: tenant UUID `orgId` binding, finite non-negative integer `seq`, SHA-256 `hash`, ISO `signedAt`, and HMAC-SHA256 `signature` verified using an out-of-band secret key (`checkpointSigningKey`).
+7. **CI / CD Quality Gates & Multi-Stage Verification Pipeline (P2):** Configured ESLint (`eslint.config.mjs`) for `npm run lint` and separated strict TypeScript compilation check to `npm run typecheck` (`tsc --noEmit`). Added `db/tests/test-safety-guard.test.ts` to CI quality gates. Created 3-stage GitHub Actions workflow: `build-and-unit-tests`, `isolated-postgres-integration`, and `live-supabase-verification`.
+8. **Cryptographic Checkpoint Trust, Audit Isolation & Database Target Safety (P0 / P1):**
+   - **Backend-Only Checkpoint Verification Key:** Removed caller-controlled `checkpointSigningKey` from `VerifyChainOptions`. Verification strictly uses backend-configured `CHECKPOINT_SIGNING_KEY`. Callers cannot supply or override verification keys.
+   - **Authenticated Checkpoint Verification:** Plain unauthenticated `{ seq, hash }` objects and the historical dummy `a*64` hash are strictly rejected as `INVALID`. Checkpoints require strict cryptographic authentication: tenant UUID `orgId` binding, finite non-negative integer `seq`, SHA-256 `hash`, ISO `signedAt`, and HMAC-SHA256 `signature` verified using the backend key.
    - **Complete Chain vs Suffix Link Distinction:** Complete verification (`COMPLETE_AND_VALID`) strictly requires `seq = 1` and `GENESIS_HASH` (`isComplete: true`). Authenticated checkpoints return `PARTIAL_BUT_LINKS_VALID` (`valid: true, isComplete: false`). Suffixes without authenticated checkpoints evaluate to `UNANCHORED` (`valid: false, isComplete: false`). `AuditChain.verifySuffixLinks()` verifies internal cryptographic linkages without validating or asserting anchor authenticity.
    - **Tenant College A Status:** College A's historical chain in the shared development database starts at `seq = 100000` and remains strictly **`UNANCHORED`** (`valid: false, isComplete: false`) unless an authentic signed checkpoint is established.
-   - **Database Test Safety Guards:** Added `assertSafeTestEnvironment()` to fail closed if executed against production (`NODE_ENV === 'production'`). Test suites execute against isolated disposable fixtures (`TEST_AUDIT_TENANT_ID = 'e0000000-0000-0000-0000-000000000099'`), enforce unconditional cleanup with trigger safety in `afterAll`, and strictly protect institutional production records (`00000000-0000-0000-0000-000000000001` and `00000000-0000-0000-0000-000000000002`).
+   - **Tenant-Scoped Transactional Audit Cleanup:** Eliminated unscoped `OR seq = 99991` deletion. All audit test cleanup is strictly scoped to `TEST_AUDIT_TENANT_ID`, matching exact action, object type, and event ID. Executed via `safeCleanupTestAuditEvents` inside a single PostgreSQL client transaction where trigger disable, deletion, and trigger re-enable occur atomically, with rollback restoring trigger state on failure. Verified via regression test 20 that test tenant cleanup cannot delete another tenant's audit event sharing the same sequence number.
+   - **Database Target Identity Protection:** `assertSafeTestEnvironment()` fails closed if `NODE_ENV === 'production'`, requires explicit opt-in via `ALLOW_DESTRUCTIVE_DB_TESTS=true`, rejects known production database URLs, and verifies the database against an approved test allowlist. Destructive queries in `runQuery` trigger this guard automatically. Institutional production records (`00000000-0000-0000-0000-000000000001` and `00000000-0000-0000-0000-000000000002`) are strictly protected from mutation.
 
 All claims in this report are backed by automated tests running against the **live Supabase PostgreSQL 17 instance** and pure TypeScript domain suites.
 
 ```
 Monorepo Test Suite Summary:
-├── Pure Domain Unit Tests:          39 tests (Deterministic, zero DB dependency: skill machine, anchor resolver, fairness, eligibility, audit chain integrity, authenticated checkpoints)
+├── Pure Domain Unit Tests:          41 tests (Skill state machine, anchor resolver, fairness, eligibility, audit chain integrity, authenticated checkpoints, caller-key override rejection)
 ├── API, RBAC & Adversarial Tests:  112 tests (Fastify, positive RBAC matrix, email takeover, fail-closed, strict claims, consent adversarial, audit concurrency, restricted runtime user, genuine ES256 JWKS)
-└── DB, Migration & Safety Tests:    36 tests (Supabase real DB, RLS, triggers, pool socket reuse, test safety guard, migration ledger, admin TLS)
-Total:                              187 tests, 100% passing (Execution time: 18.15s across 23 files)
+└── DB, Migration & Safety Tests:    42 tests (Supabase real DB, RLS, triggers, pool socket reuse, database safety guard, target allowlist, cross-tenant audit isolation regression, migration ledger, admin TLS)
+Total:                              195 tests, 100% passing (Execution time: 21.32s across 23 files)
 ```
 
 ---
@@ -353,42 +355,42 @@ npx vitest run
  RUN  v2.1.9 C:/Users/SEBIN/Desktop/PRAMAAN
 
  ✓ packages/domain/tests/skill-state-machine.test.ts (8 tests) 7ms
- ✓ packages/domain/tests/audit-chain.test.ts (17 tests) 16ms
- ✓ apps/api/tests/auth-membership-tenant.test.ts (13 tests) 22ms
+ ✓ packages/domain/tests/audit-chain.test.ts (19 tests) 17ms
+ ✓ apps/api/tests/auth-membership-tenant.test.ts (13 tests) 23ms
+ ✓ db/tests/test-safety-guard.test.ts (11 tests) 10ms
  ✓ apps/api/tests/m1-consent-ledger.test.ts (3 tests) 5ms
+ ✓ apps/api/tests/prod-fail-closed.test.ts (15 tests) 389ms
+ ✓ apps/api/tests/api-endpoints.test.ts (7 tests) 451ms
+ ✓ apps/api/tests/api-route-rbac.test.ts (18 tests) 546ms
  ✓ packages/domain/tests/fairness-calculator.test.ts (5 tests) 4ms
- ✓ apps/api/tests/prod-fail-closed.test.ts (15 tests) 373ms
- ✓ apps/api/tests/api-endpoints.test.ts (7 tests) 441ms
- ✓ apps/api/tests/api-route-rbac.test.ts (18 tests) 535ms
- ✓ packages/domain/tests/eligibility-evaluator.test.ts (5 tests) 6ms
- ✓ db/tests/admin-tls-and-ledger.test.ts (6 tests) 782ms
+ ✓ packages/domain/tests/eligibility-evaluator.test.ts (5 tests) 5ms
+ ✓ db/tests/admin-tls-and-ledger.test.ts (6 tests) 759ms
  ✓ apps/api/tests/email-takeover-prevention.test.ts (4 tests) 12ms
- ✓ apps/api/tests/m1-tenancy-rls.test.ts (5 tests) 5ms
- ✓ packages/domain/tests/anchor-resolver.test.ts (4 tests) 2ms
+ ✓ apps/api/tests/m1-tenancy-rls.test.ts (5 tests) 4ms
  ✓ apps/api/tests/m1-audit-chain.test.ts (3 tests) 4ms
- ✓ db/tests/test-safety-guard.test.ts (6 tests) 4ms
+ ✓ packages/domain/tests/anchor-resolver.test.ts (4 tests) 2ms
  ✓ db/tests/migration-runner.test.ts (4 tests) 1630ms
  ✓ apps/api/tests/pg-auth-integration.test.ts (2 tests) 1650ms
  ✓ apps/api/tests/real-supabase-jwt.test.ts (21 tests) 5426ms
  ✓ db/tests/connection-pool-reuse.test.ts (1 test) 3080ms
  ✓ apps/api/tests/consent-adversarial.test.ts (7 tests) 3930ms
  ✓ apps/api/tests/restricted-runtime-user.test.ts (9 tests) 5606ms
- ✓ apps/api/tests/audit-concurrency-and-consent.test.ts (5 tests) 7359ms
- ✓ db/tests/supabase-real-db.test.ts (19 tests) 17465ms
+ ✓ apps/api/tests/audit-concurrency-and-consent.test.ts (5 tests) 7422ms
+ ✓ db/tests/supabase-real-db.test.ts (20 tests) 20806ms
 
  Test Files  23 passed (23)
-      Tests  187 passed (187)
-   Start at  17:01:40
-   Duration  18.15s (transform 836ms, setup 0ms, collect 4.60s, tests 47.47s, environment 5ms, prepare 3.29s)
+      Tests  195 passed (195)
+   Start at  17:26:50
+   Duration  21.50s (transform 809ms, setup 0ms, collect 4.90s, tests 50.07s, environment 5ms, prepare 3.40s)
 ```
 
 ### 8.7 Test Environment Breakdown & Multi-Stage Execution Distinction (P1)
 To ensure absolute reporting accuracy and maintain transparency across environments, test executions are strictly partitioned into three distinct evidence categories:
 
 1. **Full Local Monorepo Vitest Run:**
-   - **Environment:** Local workstation with configured development `.env` credentials (`DATABASE_URL`, `DATABASE_URL_ADMIN`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`).
+   - **Environment:** Local workstation with configured development `.env` credentials (`DATABASE_URL`, `DATABASE_URL_ADMIN`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `ALLOW_DESTRUCTIVE_DB_TESTS=true`, `CHECKPOINT_SIGNING_KEY`).
    - **Scope:** All 23 test files (pure domain algorithms, Fastify API, administrative SSL/ledger, connection pool reuse, genuine JWKS, restricted runtime user, database test safety guards, and live Supabase PostgreSQL 17 database).
-   - **Result:** **187 passed (100%)**, 0 failed, 0 skipped.
+   - **Result:** **195 passed (100%)**, 0 failed, 0 skipped.
 
 2. **Isolated PostgreSQL 17 GitHub Actions Tests (CI Job 2):**
    - **Environment:** Clean `postgres:17-alpine` Docker service container inside GitHub Actions (`.github/workflows/ci.yml`).
@@ -437,31 +439,46 @@ To maintain strict evidentiary integrity, verified facts are distinguished from 
   3. Because execution log counts do not exist, absolute zero real-data impact cannot be claimed without reservation; the evidence confirms only that no real business events matching those specific test parameters existed in platform code or schema contracts.
 
 ### 9.4 Cryptographic Checkpoint Authenticity & Audit-Chain Integrity Correction (P0 Remediation)
-An independent vulnerability review identified that `VerifyChainOptions.trustedCheckpoint` previously accepted any plain `{ seq, hash }` object and verified its linkage without authenticating the checkpoint itself. Furthermore, College A's historical predecessor `{ seq: 99999, hash: repeat('a', 64) }` originated from a synthetic test artifact in commit `0bf87bdf` and was not an independently authenticated cryptographic checkpoint.
+An independent vulnerability review identified that `VerifyChainOptions.trustedCheckpoint` previously accepted any plain `{ seq, hash }` object and verified its linkage without authenticating the checkpoint itself. Furthermore, College A's historical predecessor `{ seq: 99999, hash: repeat('a', 64) }` originated from a synthetic test artifact in commit `0bf87bdf` and was not an independently authenticated cryptographic checkpoint. Additionally, an earlier iteration allowed callers to supply their own `checkpointSigningKey` in `VerifyChainOptions`, which could allow callers to forge arbitrary checkpoints.
 
 **Remediations Applied in `@pramaan/domain` and `@pramaan/contracts`:**
 1. **Complete Chain Rule:** A complete chain must start at `seq = 1` and reference `AuditChain.GENESIS_HASH` (`COMPLETE_AND_VALID`, `isComplete: true`).
 2. **Rejection of Plain/Unauthenticated Checkpoints:** Plain `{ seq, hash }` objects, unauthenticated hashes, and the historical dummy `repeat('a', 64)` hash without an authentic signature are strictly rejected as `INVALID` (`valid: false`, `isComplete: false`).
-3. **Cryptographic Checkpoint Authentication Protocol:**
+3. **Backend-Only Checkpoint Verification Key (P1-2):** Removed `checkpointSigningKey` from caller-controlled `VerifyChainOptions`. `AuditChain.verifyChain()` strictly resolves the trusted verification key from backend environment configuration (`process.env.CHECKPOINT_SIGNING_KEY`). Never accept verification keys from an HTTP request, query parameter, body, student input, or arbitrary repository caller. If no backend signing key is configured, checkpoint verification fails closed as `INVALID`. Callers cannot supply or override verification keys.
+4. **Cryptographic Checkpoint Authentication Protocol:**
    - **Organization Binding:** Checkpoint must explicitly bind to the tenant's UUID `orgId`. A checkpoint signed for one tenant cannot be applied to another tenant's chain.
    - **Sequence & Hash Binding:** `seq` must be a finite, non-negative integer (`seq >= 0`), and `hash` must be a valid 64-character hexadecimal SHA-256 string.
-   - **Cryptographic Signature Verification:** Checkpoints must be signed using HMAC-SHA256 over canonical payload `${orgId}:${seq}:${hash.toLowerCase()}:${signedAt}` using an out-of-band secret key (`checkpointSigningKey` / `CHECKPOINT_SIGNING_KEY`). Signatures are verified in constant time (`timingSafeEqual`) to prevent timing side-channel attacks.
+   - **Cryptographic Signature Verification:** Checkpoints must be signed using HMAC-SHA256 over canonical payload `${orgId}:${seq}:${hash.toLowerCase()}:${signedAt}` using `process.env.CHECKPOINT_SIGNING_KEY`. Signatures are verified in constant time (`timingSafeEqual`) to prevent timing side-channel attacks.
    - **No Checkpoint Acceptance via Untrusted HTTP Requests:** The public/officer API `/api/audit/verify` accepts no checkpoint overrides from client HTTP query parameters or request bodies. It executes verification strictly against the persistent database ledger.
-4. **Distinct Verification States:**
+   - **HMAC Architecture & Future Direction:** HMAC-SHA256 verification relies on the confidentiality of the backend shared secret. Asymmetric Ed25519 signing (where public keys verify signatures without exposing signing authority) is identified as a candidate future enhancement for multi-party distributed audits, while HMAC satisfies M1 integrity requirements without introducing external key infrastructure.
+5. **Distinct Verification States:**
    - **`COMPLETE_AND_VALID` (`valid: true, isComplete: true`):** Chain starts at `seq = 1` with `GENESIS_HASH`, sequence is contiguous, all payload hashes match, and all cryptographic links are valid.
    - **`PARTIAL_BUT_LINKS_VALID` (`valid: true, isComplete: false`):** Chain suffix starts at `seq > 1` matching an authenticated, cryptographically signed `trustedCheckpoint`. Contiguous, internally unbroken. Clients cannot interpret this state as proof of complete genesis integrity.
    - **`UNANCHORED` (`valid: false, isComplete: false`):** Chain suffix starts at `seq > 1` without an authenticated checkpoint, or does not match the supplied checkpoint.
-   - **`INVALID` (`valid: false, isComplete: false`):** Cryptographic tampering, broken hash link, sequence discontinuity, invalid genesis hash, unauthenticated checkpoint, forged signature, or malformed hash format detected.
-5. **Separate Suffix Link Verification (`verifySuffixLinks`):** Internal cryptographic linkage and payload integrity can be verified independently via `AuditChain.verifySuffixLinks(events)`. This explicitly confirms internal consistency without validating or asserting anchor authenticity or whole-chain provenance.
-6. **Tenant College A Status:** In the shared development database, College A's historical chain starts at `seq = 100000` with `prev_hash = repeat('a', 64)`. Because no cryptographically signed checkpoint exists for this historical boundary, College A remains strictly **`UNANCHORED`** (`valid: false`, `isComplete: false`). Internal suffix links being valid (`verifySuffixLinks() === true`) does **not** authenticate the missing historical prefix (`seq = 1` to `99999`). Complete cryptographic verification cannot be claimed for an unanchored chain. Deleted audit events are not invented or artificially reconstructed.
-7. **Migration Immutability Preserved:** Migration 009 has NOT been modified on disk, preserving its exact SHA-256 checksum in `schema_migrations`.
+   - **`INVALID` (`valid: false, isComplete: false`):** Cryptographic tampering, broken hash link, sequence discontinuity, invalid genesis hash, unauthenticated checkpoint, forged signature, caller key injection attempt, or malformed hash format detected.
+6. **Separate Suffix Link Verification (`verifySuffixLinks`):** Internal cryptographic linkage and payload integrity can be verified independently via `AuditChain.verifySuffixLinks(events)`. This explicitly confirms internal consistency without validating or asserting anchor authenticity or whole-chain provenance.
+7. **Tenant College A Status:** In the shared development database, College A's historical chain starts at `seq = 100000` with `prev_hash = repeat('a', 64)`. Because no cryptographically signed checkpoint exists for this historical boundary, College A remains strictly **`UNANCHORED`** (`valid: false`, `isComplete: false`). Internal suffix links being valid (`verifySuffixLinks() === true`) does **not** authenticate the missing historical prefix (`seq = 1` to `99999`). Complete cryptographic verification cannot be claimed for an unanchored chain. Deleted audit events are not invented or artificially reconstructed.
+8. **Migration Immutability Preserved:** Migration 009 has NOT been modified on disk, preserving its exact SHA-256 checksum in `schema_migrations`.
 
-### 9.5 Live Database Test Safety Guards & Tenant Isolation (P0 / P1)
+### 9.5 Live Database Test Safety Guards, Cross-Tenant Cleanup Fix & Target Allowlist (P0 / P1)
 To prevent integration test executions from causing unintended side-effects or deleting institutional data:
-1. **Explicit Environment Safety Guard:** `assertSafeTestEnvironment(operation)` in `scripts/supabase-runner.mjs` fails closed and blocks execution immediately if `NODE_ENV === 'production'`, `ENVIRONMENT === 'production'`, or `VERCEL_ENV === 'production'`.
-2. **Dedicated Test Tenant Fixtures:** Tests no longer insert synthetic audit events into institutional tenant chains (`College A`). A dedicated test tenant (`TEST_AUDIT_TENANT_ID = 'e0000000-0000-0000-0000-000000000099'`) is used exclusively for immutability and DCL privilege testing.
-3. **Institutional Tenant Immutability Protection:** `assertNotInstitutionalTenant(orgId)` blocks destructive operations against production institutional tenants (`00000000-0000-0000-0000-000000000001` and `00000000-0000-0000-0000-000000000002`). Institutional records are never deleted or modified by tests.
-4. **Unconditional Trigger-Safe Cleanup:** Cleanup in `afterAll` runs within a `try ... finally` block, ensuring test audit events are cleaned up and the database immutability trigger `trg_audit_events_immutable` is unconditionally re-enabled even if assertions fail. Immutability triggers are never disabled outside tightly controlled test cleanup.
+1. **Fix Cross-Tenant Audit Deletion (P0-1):** In `db/tests/supabase-real-db.test.ts`, previous test teardown executed `DELETE FROM audit_events WHERE org_id = '...' OR seq = 99991`. The unconstrained `OR seq = 99991` clause was globally scoped and risked deleting audit events from other organizations sharing sequence 99991. Remediations:
+   - Completely removed the unconstrained `OR seq = 99991` clause.
+   - Every audit cleanup query is strictly scoped to `TEST_AUDIT_TENANT_ID = 'e0000000-0000-0000-0000-000000000099'`.
+   - Matches exact `action = 'AUDIT_VERIFICATION_TEST'`, `object_type = 'student_skill'`, and unique event ID `TEST_AUDIT_EVENT_ID = 'e9999999-0000-0000-0000-000000000001'`.
+   - Executed via `safeCleanupTestAuditEvents`: trigger disable, exact tenant-scoped deletion, and trigger re-enable occur inside a single database transaction on one dedicated client. Transaction rollback restores trigger state if any step fails.
+   - Both pre-test (`beforeAll`) and teardown (`afterAll`) use identical safe tenant-scoped predicates.
+   - Added Regression Test 20 to `db/tests/supabase-real-db.test.ts`, proving that cleanup of `TEST_AUDIT_TENANT_ID` with sequence 99991 cannot delete another organization's audit event sharing sequence 99991.
+2. **Database Target Identity Protection & Opt-In Guard (P1-3):**
+   - **Explicit Opt-In Required:** `assertSafeTestEnvironment(operation, targetUrl)` in `scripts/supabase-runner.mjs` halts execution immediately unless `ALLOW_DESTRUCTIVE_DB_TESTS=true` is set.
+   - **Environment Guard:** Fails closed if `NODE_ENV === 'production'`, `ENVIRONMENT === 'production'`, or `VERCEL_ENV === 'production'`.
+   - **Production Target Rejection:** `isProductionDatabaseTarget(url)` inspects connection URLs and strictly blocks connections targeting known production Supabase project refs (`qshujrddrzoemlzmleru`), production hostnames, port 5432 direct connections, and URLs matching production regex patterns (`\/prod[_\-/]/i`).
+   - **Test Target Allowlist:** `isApprovedTestDatabase(url)` validates that target URLs match approved test patterns (localhost, 127.0.0.1, Docker host `postgres`, `.local`, or staging project refs).
+   - **Destructive Query Auto-Detection:** `runQuery()` automatically parses queries for destructive SQL (`DELETE FROM`, `TRUNCATE TABLE`, `DROP TABLE`, `ALTER TABLE ... DISABLE TRIGGER`) and runs `assertSafeTestEnvironment()` automatically.
+   - **Automated Verification:** Verified by 11 regression tests in `db/tests/test-safety-guard.test.ts`.
+3. **Dedicated Test Tenant Fixtures:** Tests no longer insert synthetic audit events into institutional tenant chains (`College A`). A dedicated test tenant (`TEST_AUDIT_TENANT_ID = 'e0000000-0000-0000-0000-000000000099'`) is used exclusively for immutability and DCL privilege testing.
+4. **Institutional Tenant Immutability Protection:** `assertNotInstitutionalTenant(orgId)` blocks destructive operations against production institutional tenants (`00000000-0000-0000-0000-000000000001` and `00000000-0000-0000-0000-000000000002`). Institutional records are never deleted or modified by tests.
+5. **Unconditional Trigger-Safe Cleanup:** Cleanup in `afterAll` runs within a `try ... finally` block, ensuring test audit events are cleaned up and the database immutability trigger `trg_audit_events_immutable` is unconditionally re-enabled even if assertions fail. Immutability triggers are never disabled outside tightly controlled test cleanup.
 
 ---
 
@@ -531,10 +548,10 @@ The repository administrator must enable branch protection in GitHub:
 ## 13. Conclusion & Readiness Gate for Milestone M2
 
 The comprehensive M1 closure audit confirms that all security, tenancy, authentication, ledger, pipeline, and audit-integrity invariants are fully implemented, verified, and locked:
-- **100% Passing Tests:** 187 automated tests across 23 test suites (0 failures, 0 regressions).
-- **Authenticated Checkpoint Integrity:** `AuditChain.verifyChain()` strictly enforces genesis anchoring and cryptographic checkpoint authentication (orgId binding, finite non-negative integer seq, HMAC-SHA256 signature with out-of-band key). Plain unauthenticated `{ seq, hash }` objects and the historical dummy `a*64` hash are strictly rejected as `INVALID`.
+- **100% Passing Tests:** 195 automated tests across 23 test suites (0 failures, 0 regressions).
+- **Authenticated Checkpoint Integrity:** `AuditChain.verifyChain()` strictly enforces genesis anchoring and cryptographic checkpoint authentication (orgId binding, finite non-negative integer seq, HMAC-SHA256 signature with backend-configured verification key). Caller-controlled signing keys are completely removed. Plain unauthenticated `{ seq, hash }` objects and the historical dummy `a*64` hash are strictly rejected as `INVALID`.
 - **Tenant College A Status:** College A historical chain in the development database starts at `seq = 100000` and remains strictly **`UNANCHORED`** (`valid: false, isComplete: false`). Internal suffix links being valid does not authenticate missing historical prefixes. Complete verification is not claimed without an authentic cryptographic anchor.
-- **Database Test Safety Guards:** Integration tests execute with `assertSafeTestEnvironment()`, isolated test tenant fixtures (`TEST_AUDIT_TENANT_ID`), unconditional trigger safety in `afterAll`, and zero mutation of institutional records.
+- **Cross-Tenant Audit Deletion Fix & Target Safety:** Eliminated unconstrained `OR seq = 99991` delete. All audit test cleanup is strictly tenant-scoped to `TEST_AUDIT_TENANT_ID`, matching exact event ID, action, and object type within transactional client execution. Integration tests execute with `assertSafeTestEnvironment()`, requiring `ALLOW_DESTRUCTIVE_DB_TESTS=true`, blocking production database URLs, validating target allowlists, and guaranteeing zero mutation of institutional records.
 - **Forensic Accuracy:** Commit attribution (`0bf87bdf` vs `454854e`) and Migration 009 deletion scope are accurately documented, with verified database facts distinguished from commit history inferences.
 - **Quality Gates:** ESLint (`npm run lint`), TypeScript strict typecheck (`npm run typecheck`), and monorepo production build (`npm run build`) all pass with 0 errors.
 - **CI / CD Pipeline:** Multi-stage GitHub Actions workflow with clean isolated PostgreSQL 17 container execution and credential-safe live Supabase verification gate (status SKIPPED in CI when secrets are absent).

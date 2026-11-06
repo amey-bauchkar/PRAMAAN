@@ -1,10 +1,23 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { AuditChain } from '../src/audit-chain.js';
 import { AuditEvent, TrustedCheckpoint } from '@pramaan/contracts';
 
 describe('AuditChain Cryptographic Integrity & Authenticated Checkpoint Scenarios', () => {
   const orgId = '11111111-1111-1111-1111-111111111111';
   const testSigningKey = 'secure_audit_checkpoint_key_9876543210';
+  const originalSigningKey = process.env.CHECKPOINT_SIGNING_KEY;
+
+  beforeEach(() => {
+    process.env.CHECKPOINT_SIGNING_KEY = testSigningKey;
+  });
+
+  afterEach(() => {
+    if (originalSigningKey !== undefined) {
+      process.env.CHECKPOINT_SIGNING_KEY = originalSigningKey;
+    } else {
+      delete process.env.CHECKPOINT_SIGNING_KEY;
+    }
+  });
 
   // Helper to construct a valid 3-event chain starting from genesis (seq 1)
   function buildValidChain(): AuditEvent[] {
@@ -130,8 +143,7 @@ describe('AuditChain Cryptographic Integrity & Authenticated Checkpoint Scenario
     }, testSigningKey);
 
     const res = AuditChain.verifyChain(suffix, {
-      trustedCheckpoint: checkpoint,
-      checkpointSigningKey: testSigningKey
+      trustedCheckpoint: checkpoint
     });
     expect(res.valid).toBe(true);
     expect(res.status).toBe('PARTIAL_BUT_LINKS_VALID');
@@ -149,8 +161,7 @@ describe('AuditChain Cryptographic Integrity & Authenticated Checkpoint Scenario
     } as any;
 
     const res = AuditChain.verifyChain(suffix, {
-      trustedCheckpoint: unauthenticatedCp,
-      checkpointSigningKey: testSigningKey
+      trustedCheckpoint: unauthenticatedCp
     });
     expect(res.valid).toBe(false);
     expect(res.status).toBe('INVALID');
@@ -170,8 +181,7 @@ describe('AuditChain Cryptographic Integrity & Authenticated Checkpoint Scenario
     };
 
     const res = AuditChain.verifyChain(suffix, {
-      trustedCheckpoint: forgedCp,
-      checkpointSigningKey: testSigningKey
+      trustedCheckpoint: forgedCp
     });
     expect(res.valid).toBe(false);
     expect(res.status).toBe('INVALID');
@@ -212,8 +222,7 @@ describe('AuditChain Cryptographic Integrity & Authenticated Checkpoint Scenario
     }, testSigningKey);
 
     const res = AuditChain.verifyChain(suffix, {
-      trustedCheckpoint: checkpoint,
-      checkpointSigningKey: testSigningKey
+      trustedCheckpoint: checkpoint
     });
     expect(res.valid).toBe(false);
     expect(res.status).toBe('INVALID');
@@ -234,8 +243,7 @@ describe('AuditChain Cryptographic Integrity & Authenticated Checkpoint Scenario
     } as any;
 
     const res = AuditChain.verifyChain(suffix, {
-      trustedCheckpoint: invalidSeqCp,
-      checkpointSigningKey: testSigningKey
+      trustedCheckpoint: invalidSeqCp
     });
     expect(res.valid).toBe(false);
     expect(res.status).toBe('INVALID');
@@ -271,8 +279,7 @@ describe('AuditChain Cryptographic Integrity & Authenticated Checkpoint Scenario
     }, testSigningKey);
 
     const res = AuditChain.verifyChain(suffix, {
-      trustedCheckpoint: checkpoint,
-      checkpointSigningKey: testSigningKey
+      trustedCheckpoint: checkpoint
     });
     expect(res.valid).toBe(false);
     expect(res.status).toBe('INVALID');
@@ -301,8 +308,7 @@ describe('AuditChain Cryptographic Integrity & Authenticated Checkpoint Scenario
     }, testSigningKey);
 
     const res = AuditChain.verifyChain(suffix, {
-      trustedCheckpoint: checkpoint,
-      checkpointSigningKey: testSigningKey
+      trustedCheckpoint: checkpoint
     });
     expect(res.valid).toBe(false);
     expect(res.status).toBe('INVALID');
@@ -324,8 +330,7 @@ describe('AuditChain Cryptographic Integrity & Authenticated Checkpoint Scenario
     }, testSigningKey);
 
     const res = AuditChain.verifyChain(suffix, {
-      trustedCheckpoint: checkpoint,
-      checkpointSigningKey: testSigningKey
+      trustedCheckpoint: checkpoint
     });
     expect(res.valid).toBe(false);
     expect(res.status).toBe('INVALID');
@@ -388,8 +393,7 @@ describe('AuditChain Cryptographic Integrity & Authenticated Checkpoint Scenario
     }, testSigningKey);
 
     const res = AuditChain.verifyChain(suffix, {
-      trustedCheckpoint: checkpoint,
-      checkpointSigningKey: testSigningKey
+      trustedCheckpoint: checkpoint
     });
     expect(res.valid).toBe(false);
     expect(res.status).toBe('UNANCHORED');
@@ -403,5 +407,47 @@ describe('AuditChain Cryptographic Integrity & Authenticated Checkpoint Scenario
     expect(res.valid).toBe(true);
     expect(res.status).toBe('COMPLETE_AND_VALID');
     expect(res.isComplete).toBe(true);
+  });
+
+  // 18. Caller cannot override trusted verification key (Regression test P1-2)
+  it('18. Caller cannot override trusted verification key: ignores caller key and rejects mismatched checkpoint as INVALID', () => {
+    process.env.CHECKPOINT_SIGNING_KEY = testSigningKey;
+    const suffix = buildSuffixChain(100000, 'a'.repeat(64));
+
+    const rogueKey = 'attacker_controlled_rogue_secret_key_99999';
+    const rogueCheckpoint = AuditChain.signCheckpoint({
+      orgId,
+      seq: 99999,
+      hash: 'a'.repeat(64),
+      signedAt: '2026-11-06T00:00:00.000Z'
+    }, rogueKey);
+
+    // Attacker passes their rogueKey in caller options
+    const res = AuditChain.verifyChain(suffix, {
+      trustedCheckpoint: rogueCheckpoint,
+      checkpointSigningKey: rogueKey
+    } as any);
+
+    expect(res.valid).toBe(false);
+    expect(res.status).toBe('INVALID');
+    expect(res.isComplete).toBe(false);
+    expect(res.error).toMatch(/Checkpoint signature verification failed/);
+  });
+
+  // 19. Missing backend CHECKPOINT_SIGNING_KEY fails closed
+  it('19. Fails closed as INVALID when backend CHECKPOINT_SIGNING_KEY is not configured', () => {
+    delete process.env.CHECKPOINT_SIGNING_KEY;
+    const suffix = buildSuffixChain(100000, 'a'.repeat(64));
+    const checkpoint = AuditChain.signCheckpoint({
+      orgId,
+      seq: 99999,
+      hash: 'a'.repeat(64),
+      signedAt: '2026-11-06T00:00:00.000Z'
+    }, testSigningKey);
+
+    const res = AuditChain.verifyChain(suffix, { trustedCheckpoint: checkpoint });
+    expect(res.valid).toBe(false);
+    expect(res.status).toBe('INVALID');
+    expect(res.error).toMatch(/Checkpoint verification failed: signing key is required/);
   });
 });

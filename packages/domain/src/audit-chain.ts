@@ -14,7 +14,6 @@ export type {
 
 export interface VerifyChainOptions {
   trustedCheckpoint?: TrustedCheckpoint;
-  checkpointSigningKey?: string;
 }
 
 export class AuditChain {
@@ -70,6 +69,11 @@ export class AuditChain {
 
   /**
    * Generates a cryptographic HMAC-SHA256 signature for a checkpoint using an out-of-band secret key.
+   *
+   * Architectural Note on Checkpoint Cryptography:
+   * HMAC-SHA256 verification relies on strict protection of the backend-configured shared secret
+   * (CHECKPOINT_SIGNING_KEY). In future production milestones, asymmetric digital signatures (e.g., Ed25519)
+   * can be introduced to allow public/auditor verification without distributing private signing material.
    */
   public static signCheckpoint(
     checkpoint: Omit<TrustedCheckpoint, 'signature'>,
@@ -254,8 +258,9 @@ export class AuditChain {
         };
       }
 
-      // 5. Signature verification using out-of-band key
-      const signingKey = options.checkpointSigningKey || process.env.CHECKPOINT_SIGNING_KEY;
+      // 5. Signature verification using backend-configured verification key ONLY.
+      // Caller-supplied verification keys are strictly rejected to prevent verification hijacking.
+      const signingKey = process.env.CHECKPOINT_SIGNING_KEY;
       if (!signingKey) {
         return {
           valid: false,

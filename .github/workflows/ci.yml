@@ -44,14 +44,18 @@ jobs:
             apps/api/tests/m1-consent-ledger.test.ts \
             apps/api/tests/m1-tenancy-rls.test.ts \
             apps/api/tests/prod-fail-closed.test.ts \
-            db/tests/admin-tls-and-ledger.test.ts
+            db/tests/admin-tls-and-ledger.test.ts \
+            db/tests/test-safety-guard.test.ts
         env:
           NODE_ENV: test
           SUPABASE_URL: https://qshujrddrzoemlzmleru.supabase.co
+          CHECKPOINT_SIGNING_KEY: ci_audit_checkpoint_secret_key_32bytes!
 
   isolated-postgres-integration:
     name: Isolated PostgreSQL 17 RLS & Integration Verification
     runs-on: ubuntu-latest
+    env:
+      ALLOW_DESTRUCTIVE_DB_TESTS: "true"
     services:
       postgres:
         image: postgres:17-alpine
