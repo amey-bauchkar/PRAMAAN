@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import pg from 'pg';
 import { resolveAdminSslConfig } from '../../scripts/admin-db-ssl.mjs';
 import {
@@ -966,7 +966,7 @@ describe('Database Test Safety Guard & Production Target Protection (Final Harde
     }
   });
 
-  it('43. Management API fallback strictly rejects qualified and unqualified user-defined function calls and transaction control', async () => {
+  it('43. Management API fallback strictly rejects unquoted user-defined function calls and transaction control', async () => {
     delete process.env.DATABASE_URL_ADMIN;
     delete process.env.DATABASE_URL;
     process.env.SUPABASE_MANAGEMENT_TOKEN = 'test-token';
@@ -1005,10 +1005,142 @@ describe('Database Test Safety Guard & Production Target Protection (Final Harde
 
     expect(isSafeReadOnlyQuery('SELECT my_unrecognized_mutator();')).toBe(false);
     expect(isSafeReadOnlyQuery('SELECT pramaan_test_unrecognized_mutator();')).toBe(false);
+  });
 
-    // In contrast, safe standard read-only functions are allowed
-    expect(isSafeReadOnlyQuery('SELECT count(*) FROM organizations;')).toBe(true);
-    expect(isSafeReadOnlyQuery('SELECT coalesce(null, 1);')).toBe(true);
-    expect(isSafeReadOnlyQuery("SELECT upper('hello');")).toBe(true);
+  it('44. Quoted unqualified and quoted schema-qualified mutating function calls are strictly rejected', async () => {
+    delete process.env.DATABASE_URL_ADMIN;
+    delete process.env.DATABASE_URL;
+    process.env.SUPABASE_MANAGEMENT_TOKEN = 'test-token';
+    process.env.SUPABASE_PROJECT_REF = 'qshujrddrzoemlzmleru';
+
+    const quotedBypassAttempts = [
+      'SELECT "my_unrecognized_mutator"();',
+      'SELECT "pramaan_test_unrecognized_mutator"();',
+      'SELECT "public"."my_mutating_function"();',
+      'SELECT public."my_mutating_function"();',
+      'SELECT "public".my_mutating_function();',
+      'SELECT "custom_schema"."calculate_risk"(1);',
+      'SELECT "where"();',
+      'SELECT ""();',
+      'SELECT "my unrecognized mutator"();'
+    ];
+
+    for (const sql of quotedBypassAttempts) {
+      expect(isSafeReadOnlyQuery(sql)).toBe(false);
+      await expect(runQuery(sql)).rejects.toThrow(
+        /Read-only execution cannot be safely guaranteed for this query/
+      );
+    }
+  });
+
+  it('45. Quoted side-effecting functions are detected by hasSideEffectingFunction and blocked from Management API', async () => {
+    delete process.env.DATABASE_URL_ADMIN;
+    delete process.env.DATABASE_URL;
+    process.env.SUPABASE_MANAGEMENT_TOKEN = 'test-token';
+    process.env.SUPABASE_PROJECT_REF = 'qshujrddrzoemlzmleru';
+
+    const quotedSideEffects = [
+      "SELECT \"nextval\"('student_id_seq');",
+      "SELECT \"setval\"('student_id_seq', 5000);",
+      "SELECT \"pg_terminate_backend\"(1234);",
+      "SELECT \"lo_unlink\"(100);"
+    ];
+
+    for (const sql of quotedSideEffects) {
+      expect(hasSideEffectingFunction(sql)).toBe(true);
+      expect(isMutationQuery(sql)).toBe(true);
+      expect(isDestructiveQuery(sql)).toBe(true);
+      expect(isSafeReadOnlyQuery(sql)).toBe(false);
+      await expect(runQuery(sql)).rejects.toThrow(
+        /Destructive or mutating database operations require direct DATABASE_URL_ADMIN PostgreSQL connectivity/
+      );
+    }
+  });
+
+  it('46. Legitimate allowlisted read-only functions (unquoted, quoted, and schema-qualified entities) are preserved', () => {
+    const legitimateReadOnlyQueries = [
+      'SELECT count(*) FROM organizations;',
+      'SELECT "count"(*) FROM organizations;',
+      'SELECT count(*) FROM public.organizations;',
+      'SELECT "count"(*) FROM public.organizations;',
+      'SELECT "count"(*) FROM "public"."organizations";',
+      'SELECT coalesce(null, 1);',
+      'SELECT "coalesce"(null, 1);',
+      "SELECT upper('hello');",
+      "SELECT \"upper\"('hello');",
+      'SELECT "DELETE FROM users" AS description FROM organizations;',
+      'SELECT 1 FROM (SELECT 2);',
+      'SELECT id, name FROM students WHERE id = "00000000-0000-0000-0000-000000000001";'
+    ];
+
+    for (const sql of legitimateReadOnlyQueries) {
+      expect(isMutationQuery(sql)).toBe(false);
+      expect(isDestructiveQuery(sql)).toBe(false);
+      expect(isSafeReadOnlyQuery(sql)).toBe(true);
+    }
+  });
+
+  it('47. Management API requests use the dedicated read-only endpoint and never silently use the general write endpoint', async () => {
+    delete process.env.DATABASE_URL_ADMIN;
+    delete process.env.DATABASE_URL;
+    process.env.SUPABASE_MANAGEMENT_TOKEN = 'test-token';
+    process.env.SUPABASE_PROJECT_REF = 'qshujrddrzoemlzmleru';
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, _init) => {
+      const urlStr = url.toString();
+      if (urlStr.includes('/database/query/read-only')) {
+        return new Response(JSON.stringify([{ count: 2 }]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      if (urlStr.endsWith('/database/query')) {
+        throw new Error('Forbidden: Write-enabled endpoint was called when read-only was expected!');
+      }
+      return new Response('Not Found', { status: 404 });
+    });
+
+    try {
+      const readOnlySql = 'SELECT count(*) FROM public.organizations;';
+      const result = await runQuery(readOnlySql);
+
+      expect(result).toEqual([{ count: 2 }]);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+      // Verify the dedicated read-only endpoint was called
+      const [calledUrl, calledInit] = fetchSpy.mock.calls[0];
+      expect(calledUrl).toBe(
+        'https://api.supabase.com/v1/projects/qshujrddrzoemlzmleru/database/query/read-only'
+      );
+      expect(calledInit?.method).toBe('POST');
+      expect(calledInit?.headers).toEqual({
+        'Authorization': 'Bearer test-token',
+        'Content-Type': 'application/json'
+      });
+      // Verify payload is clean query without manual transaction wrapper
+      expect(calledInit?.body).toBe(JSON.stringify({ query: readOnlySql }));
+
+      // Verify that write-enabled endpoint was NEVER called
+      const writeCalls = fetchSpy.mock.calls.filter(([url]) =>
+        url.toString() === 'https://api.supabase.com/v1/projects/qshujrddrzoemlzmleru/database/query'
+      );
+      expect(writeCalls.length).toBe(0);
+
+      // Verify fail-closed behavior: when read-only endpoint returns an error, runQuery throws and NEVER falls back to write endpoint
+      fetchSpy.mockImplementationOnce(async () => {
+        return new Response('Internal Server Error', { status: 500 });
+      });
+
+      await expect(runQuery('SELECT count(*) FROM public.organizations;')).rejects.toThrow(
+        /HTTP 500: Internal Server Error/
+      );
+
+      const writeCallsAfterError = fetchSpy.mock.calls.filter(([url]) =>
+        url.toString() === 'https://api.supabase.com/v1/projects/qshujrddrzoemlzmleru/database/query'
+      );
+      expect(writeCallsAfterError.length).toBe(0);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 });

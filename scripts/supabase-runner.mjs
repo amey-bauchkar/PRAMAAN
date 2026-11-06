@@ -273,10 +273,21 @@ export function cleanSqlForInspection(sql) {
   cleaned = cleaned.replace(/--.*$/gm, ' ');
   // 3. Strip single-quoted string literals: '...'
   cleaned = cleaned.replace(/'(?:''|[^'])*'/g, "''");
-  // 4. Strip double-quoted strings / identifiers: "..."
-  cleaned = cleaned.replace(/"(?:""|[^"])*"/g, '""');
-  // 5. Strip dollar-quoted string literals: $$...$$ or $tag$...$tag$
+  // 4. Strip dollar-quoted string literals: $$...$$ or $tag$...$tag$
   cleaned = cleaned.replace(/\$[a-zA-Z0-9_]*\$[\s\S]*?\$[a-zA-Z0-9_]*\$/g, "''");
+
+  // 5. Preserve function identifiers before '(' so function name validation and side-effect detection can inspect them:
+  // 5a. Schema-qualified function calls with quotes: "schema"."func"( or "schema".func( or schema."func"(
+  cleaned = cleaned.replace(/"((?:""|[^"])*)"\s*\.\s*"((?:""|[^"])*)"\s*\(/g, '$1.$2(');
+  cleaned = cleaned.replace(/"((?:""|[^"])*)"\s*\.\s*([a-zA-Z0-9_]+)\s*\(/g, '$1.$2(');
+  cleaned = cleaned.replace(/([a-zA-Z0-9_]+)\s*\.\s*"((?:""|[^"])*)"\s*\(/g, '$1.$2(');
+
+  // 5b. Unqualified function calls with quotes: "func"(
+  cleaned = cleaned.replace(/"((?:""|[^"])*)"\s*\(/g, '$1(');
+
+  // 6. Strip remaining double-quoted identifiers / strings (e.g. column aliases or table names not part of a function call)
+  cleaned = cleaned.replace(/"(?:""|[^"])*"/g, '""');
+
   return cleaned.trim();
 }
 
@@ -333,16 +344,8 @@ export function isDestructiveQuery(sql) {
   return isMutationQuery(sql) || hasTransactionControl(sql);
 }
 
-// Allowlist of safe built-in SQL and PostgreSQL functions & syntax keywords that may precede '(' in read-only queries
-const SAFE_READ_ONLY_BUILTIN_FUNCTIONS_AND_KEYWORDS = new Set([
-  // SQL Syntax / Clause Keywords that can precede parentheses in valid read-only queries
-  'select', 'from', 'where', 'and', 'or', 'not', 'in', 'on', 'as', 'with', 'values',
-  'join', 'using', 'case', 'when', 'then', 'else', 'over', 'partition', 'order', 'by',
-  'group', 'having', 'limit', 'offset', 'distinct', 'cast', 'extract', 'position',
-  'substring', 'trim', 'between', 'exists', 'row', 'array', 'table', 'left', 'right',
-  'cross', 'inner', 'outer', 'natural', 'full', 'filter', 'within', 'like', 'ilike',
-  'similar', 'nullif', 'coalesce', 'greatest', 'least', 'all', 'any', 'some',
-
+// Allowlist of genuine standard read-only functions in SQL and PostgreSQL
+export const SAFE_READ_ONLY_FUNCTIONS = new Set([
   // Standard read-only aggregate functions
   'count', 'sum', 'avg', 'min', 'max', 'string_agg', 'array_agg', 'json_agg', 'jsonb_agg',
   'bool_and', 'bool_or', 'every', 'bit_and', 'bit_or', 'xmlagg',
@@ -379,32 +382,66 @@ const SAFE_READ_ONLY_BUILTIN_FUNCTIONS_AND_KEYWORDS = new Set([
   'pg_typeof', 'pg_backend_pid', 'cardinality', 'array_length', 'array_ndims', 'array_dims',
   'array_lower', 'array_upper', 'array_to_string', 'string_to_array', 'unnest',
 
-  // Built-in PostgreSQL pseudo-type cast constructors
+  // Built-in PostgreSQL pseudo-type cast constructors & null-handling
   'int', 'int2', 'int4', 'int8', 'float4', 'float8', 'numeric', 'text', 'varchar',
-  'bool', 'boolean', 'date', 'time', 'timestamp', 'timestamptz', 'interval', 'uuid'
+  'bool', 'boolean', 'date', 'time', 'timestamp', 'timestamptz', 'interval', 'uuid',
+  'coalesce', 'nullif', 'greatest', 'least'
+]);
+
+// SQL syntax clause keywords that legitimately precede '(' in read-only queries (subqueries, CTEs, expressions)
+export const SAFE_READ_ONLY_SYNTAX_KEYWORDS = new Set([
+  'select', 'from', 'where', 'and', 'or', 'not', 'in', 'on', 'as', 'with', 'values',
+  'join', 'using', 'case', 'when', 'then', 'else', 'over', 'partition', 'order', 'by',
+  'group', 'having', 'limit', 'offset', 'distinct', 'cast', 'extract', 'position',
+  'substring', 'trim', 'between', 'exists', 'row', 'array', 'table', 'left', 'right',
+  'cross', 'inner', 'outer', 'natural', 'full', 'filter', 'within', 'like', 'ilike',
+  'similar', 'all', 'any', 'some'
+]);
+
+// Combined allowlist of safe built-in SQL and PostgreSQL functions & syntax keywords that may precede '(' in read-only queries
+export const SAFE_READ_ONLY_BUILTIN_FUNCTIONS_AND_KEYWORDS = new Set([
+  ...SAFE_READ_ONLY_FUNCTIONS,
+  ...SAFE_READ_ONLY_SYNTAX_KEYWORDS
 ]);
 
 export function isSafeReadOnlyQuery(sql) {
   if (typeof sql !== 'string') return false;
+
+  // Pre-clean to remove comments and string literals for direct identifier inspection
+  let preCleaned = sql.replace(/\/\*[\s\S]*?\*\//g, ' ');
+  preCleaned = preCleaned.replace(/--.*$/gm, ' ');
+  preCleaned = preCleaned.replace(/'(?:''|[^'])*'/g, "''");
+  preCleaned = preCleaned.replace(/\$[a-zA-Z0-9_]*\$[\s\S]*?\$[a-zA-Z0-9_]*\$/g, "''");
+
+  // 1. Prohibit arbitrary or user-defined schema-qualified functions (quoted or unquoted, e.g. public.fn(), "public"."fn"())
+  const schemaQualifiedFunctionRegex = /(?:[a-zA-Z0-9_]+|"(?:""|[^"])*")\s*\.\s*(?:[a-zA-Z0-9_]+|"(?:""|[^"])*")\s*\(/;
+  if (schemaQualifiedFunctionRegex.test(preCleaned)) return false;
+
+  // 2. Prohibit any quoted function call whose unquoted identifier is not in SAFE_READ_ONLY_FUNCTIONS
+  const quotedFnRegex = /"((?:""|[^"])*)"\s*\(/g;
+  let qMatch;
+  while ((qMatch = quotedFnRegex.exec(preCleaned)) !== null) {
+    const fnName = qMatch[1].toLowerCase();
+    if (!SAFE_READ_ONLY_FUNCTIONS.has(fnName)) {
+      return false;
+    }
+  }
+
   const cleaned = cleanSqlForInspection(sql);
   if (!cleaned) return false;
 
-  // 1. If it's a mutation, has side-effects, or controls transactions, it is never safe read-only
+  // 3. If it's a mutation, has side-effects, or controls transactions, it is never safe read-only
   if (isDestructiveQuery(sql)) return false;
 
-  // 2. Prohibit transaction commands or session alteration in safe read-only
+  // 4. Prohibit transaction commands or session alteration in safe read-only
   const unsafeCommandsRegex = /\b(BEGIN|COMMIT|ROLLBACK|ABORT|START|SET|RESET|DISCARD|LISTEN|UNLISTEN|NOTIFY|LOAD|LOCK|PREPARE)\b/i;
   if (unsafeCommandsRegex.test(cleaned)) return false;
 
-  // 3. Must begin with recognized read-only query verbs (SELECT, WITH, SHOW, EXPLAIN, VALUES)
+  // 5. Must begin with recognized read-only query verbs (SELECT, WITH, SHOW, EXPLAIN, VALUES)
   const readOnlyVerbRegex = /^(?:EXPLAIN\s+)?(?:SELECT|WITH|SHOW|VALUES)\b/i;
   if (!readOnlyVerbRegex.test(cleaned)) return false;
 
-  // 4. Prohibit arbitrary or user-defined schema-qualified functions on unauthenticated channels (e.g. public.fn())
-  const schemaQualifiedFunctionRegex = /\b[a-zA-Z0-9_]+\s*\.\s*[a-zA-Z0-9_]+\s*\(/;
-  if (schemaQualifiedFunctionRegex.test(cleaned)) return false;
-
-  // 5. Prohibit unqualified user-defined or unrecognized functions.
+  // 6. Prohibit unqualified user-defined or unrecognized functions.
   // Any function call not in the verified safe built-in functions allowlist is rejected.
   const functionCallRegex = /\b([a-zA-Z0-9_]+)\s*\(/g;
   let match;
@@ -565,16 +602,17 @@ export async function runQuery(sql) {
       );
     }
 
-    const url = `https://api.supabase.com/v1/projects/${projectRef}/database/query`;
-    // Enforce PostgreSQL READ ONLY transaction wrapper at payload level
-    const safePayload = `BEGIN READ ONLY; ${sql}; COMMIT;`;
+    // Adopt Supabase dedicated read-only endpoint: POST /v1/projects/{ref}/database/query/read-only
+    // Executes as supabase_read_only_user inside a native PostgreSQL read-only transaction.
+    // Silent fallback to the general write-enabled endpoint (/database/query) is strictly prohibited.
+    const url = `https://api.supabase.com/v1/projects/${projectRef}/database/query/read-only`;
     const res = await fetch(url, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.SUPABASE_MANAGEMENT_TOKEN}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ query: safePayload })
+      body: JSON.stringify({ query: sql })
     });
 
     if (!res.ok) {
