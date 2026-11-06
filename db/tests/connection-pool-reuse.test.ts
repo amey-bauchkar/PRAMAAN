@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import pg from 'pg';
 import { runQuery } from '../../scripts/supabase-runner.mjs';
+import { resolveAdminSslConfig } from '../../scripts/admin-db-ssl.mjs';
 
 describe('Real PostgreSQL Connection Pooling: Physical Connection Reuse & Context Isolation', () => {
   let pool: pg.Pool;
@@ -26,9 +27,10 @@ describe('Real PostgreSQL Connection Pooling: Physical Connection Reuse & Contex
     }
 
     // Configure a dedicated pool with max: 1 to guarantee physical socket/connection reuse
+    const ssl = resolveAdminSslConfig(connectionString);
     pool = new pg.Pool({
       connectionString,
-      ssl: { rejectUnauthorized: false },
+      ssl,
       max: 1, // Single connection enforces exact socket reuse
       connectionTimeoutMillis: 10000
     });
