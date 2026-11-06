@@ -12,6 +12,7 @@ export declare function assertSafeTestEnvironment(operation?: string, targetUrl?
 export declare function assertNotInstitutionalTenant(orgId: string, operation?: string): void;
 export declare function cleanSqlForInspection(sql: string): string;
 export declare function hasSideEffectingFunction(sql: string): boolean;
+export declare function hasTransactionControl(sql: string): boolean;
 export declare function isMutationQuery(sql: string): boolean;
 export declare function isDestructiveQuery(sql: string): boolean;
 export declare function isSafeReadOnlyQuery(sql: string): boolean;
@@ -26,3 +27,4 @@ export interface SafeCleanupTestAuditParams {
 
 export declare function safeCleanupTestAuditEvents(params: SafeCleanupTestAuditParams): Promise<number>;
 export declare function runQuery<T = any>(sql: string): Promise<T>;
+export declare function runTestTransaction<T = any>(sql: string): Promise<T>;

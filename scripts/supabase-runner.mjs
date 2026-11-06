@@ -291,6 +291,15 @@ export function hasSideEffectingFunction(sql) {
   return sideEffectFunctionsRegex.test(cleaned);
 }
 
+export function hasTransactionControl(sql) {
+  if (typeof sql !== 'string') return false;
+  const cleaned = cleanSqlForInspection(sql);
+  if (!cleaned) return false;
+
+  const txKeywordsRegex = /\b(BEGIN|START\s+TRANSACTION|COMMIT|ROLLBACK|SAVEPOINT|RELEASE\s+SAVEPOINT)\b/i;
+  return txKeywordsRegex.test(cleaned);
+}
+
 export function isMutationQuery(sql) {
   if (typeof sql !== 'string') return false;
   const cleaned = cleanSqlForInspection(sql);
@@ -305,7 +314,8 @@ export function isMutationQuery(sql) {
 }
 
 export function isDestructiveQuery(sql) {
-  return isMutationQuery(sql);
+  // A query is destructive/privileged if it mutates data/schema OR controls transactions
+  return isMutationQuery(sql) || hasTransactionControl(sql);
 }
 
 export function isSafeReadOnlyQuery(sql) {
@@ -313,8 +323,8 @@ export function isSafeReadOnlyQuery(sql) {
   const cleaned = cleanSqlForInspection(sql);
   if (!cleaned) return false;
 
-  // 1. If it's a mutation or has side-effects, it is never safe read-only
-  if (isMutationQuery(sql)) return false;
+  // 1. If it's a mutation, has side-effects, or controls transactions, it is never safe read-only
+  if (isDestructiveQuery(sql)) return false;
 
   // 2. Prohibit transaction commands or session alteration in safe read-only
   const unsafeCommandsRegex = /\b(BEGIN|COMMIT|ROLLBACK|START|SET|RESET|DISCARD|LISTEN|UNLISTEN|NOTIFY|LOAD|LOCK)\b/i;
@@ -323,6 +333,10 @@ export function isSafeReadOnlyQuery(sql) {
   // 3. Must begin with recognized read-only query verbs (SELECT, WITH, SHOW, EXPLAIN, VALUES)
   const readOnlyVerbRegex = /^(?:EXPLAIN\s+)?(?:SELECT|WITH|SHOW|VALUES)\b/i;
   if (!readOnlyVerbRegex.test(cleaned)) return false;
+
+  // 4. Prohibit arbitrary or user-defined schema-qualified functions on unauthenticated channels (e.g. public.fn())
+  const schemaQualifiedFunctionRegex = /\b[a-zA-Z0-9_]+\s*\.\s*[a-zA-Z0-9_]+\s*\(/;
+  if (schemaQualifiedFunctionRegex.test(cleaned)) return false;
 
   return true;
 }
@@ -386,6 +400,7 @@ export async function safeCleanupTestAuditEvents(params) {
 
 export async function runQuery(sql) {
   const isDestructive = isDestructiveQuery(sql);
+  const hasTxControl = hasTransactionControl(sql);
   const adminUrl = process.env.DATABASE_URL_ADMIN;
 
   if (isDestructive) {
@@ -394,7 +409,10 @@ export async function runQuery(sql) {
         '[SECURITY_GUARD] Destructive or mutating database operations require direct DATABASE_URL_ADMIN PostgreSQL connectivity. Management API execution is prohibited.'
       );
     }
-    assertSafeTestEnvironment('Destructive SQL execution via runQuery', adminUrl);
+    assertSafeTestEnvironment(
+      hasTxControl ? 'Privileged transaction execution via runQuery' : 'Destructive SQL execution via runQuery',
+      adminUrl
+    );
   } else if (adminUrl) {
     // Validate target identity even for non-destructive / read-only queries
     assertApprovedDatabaseTarget(adminUrl, 'Direct admin SQL execution via runQuery');
@@ -406,12 +424,11 @@ export async function runQuery(sql) {
     try {
       const client = await pool.connect();
       try {
-        const cleaned = cleanSqlForInspection(sql);
-        const hasExplicitTransaction = /\b(BEGIN|START\s+TRANSACTION)\b/i.test(cleaned);
-
         let res;
-        // Where feasible, execute genuinely read-only queries inside a PostgreSQL READ ONLY transaction
-        if (!isDestructive && !hasExplicitTransaction) {
+        // General read-only query path: unconditionally execute inside a PostgreSQL READ ONLY transaction.
+        // Because isDestructive is false, sql contains zero transaction control (no BEGIN, COMMIT, or ROLLBACK),
+        // guaranteeing that multi-statement queries cannot terminate or escape the READ ONLY transaction.
+        if (!isDestructive) {
           await client.query('BEGIN READ ONLY;');
           try {
             res = await client.query(sql);
@@ -421,6 +438,7 @@ export async function runQuery(sql) {
             throw txErr;
           }
         } else {
+          // Explicitly authorized destructive or privileged transaction path
           res = await client.query(sql);
         }
 
@@ -443,7 +461,7 @@ export async function runQuery(sql) {
     }
   }
 
-  // Fallback to Supabase Management API only for non-destructive, verified read-only queries
+  // Fallback to Supabase Management API only for non-destructive, verified safe read-only queries
   if (process.env.SUPABASE_MANAGEMENT_TOKEN) {
     if (isDestructive) {
       throw new Error(
@@ -471,13 +489,15 @@ export async function runQuery(sql) {
     }
 
     const url = `https://api.supabase.com/v1/projects/${projectRef}/database/query`;
+    // Enforce PostgreSQL READ ONLY transaction wrapper at payload level
+    const safePayload = `BEGIN READ ONLY; ${sql}; COMMIT;`;
     const res = await fetch(url, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.SUPABASE_MANAGEMENT_TOKEN}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ query: sql })
+      body: JSON.stringify({ query: safePayload })
     });
 
     if (!res.ok) {
@@ -489,6 +509,36 @@ export async function runQuery(sql) {
   }
 
   throw new Error('No database administration channel available: set DATABASE_URL_ADMIN or SUPABASE_MANAGEMENT_TOKEN.');
+}
+
+export async function runTestTransaction(sql) {
+  const adminUrl = process.env.DATABASE_URL_ADMIN;
+  if (!adminUrl) {
+    throw new Error('DATABASE_URL_ADMIN is required for test transaction execution.');
+  }
+  assertSafeTestEnvironment('Dedicated test transaction execution via runTestTransaction', adminUrl);
+
+  const ssl = resolveAdminSslConfig(adminUrl);
+  const pool = new pg.Pool({ connectionString: adminUrl, ssl, max: 1 });
+  try {
+    const client = await pool.connect();
+    try {
+      const res = await client.query(sql);
+      if (Array.isArray(res)) {
+        const selectResult = res.slice().reverse().find(r => r.command === 'SELECT');
+        if (selectResult) {
+          return selectResult.rows;
+        }
+        const last = res[res.length - 1];
+        return last?.rows || [];
+      }
+      return res?.rows || [];
+    } finally {
+      client.release();
+    }
+  } finally {
+    await pool.end();
+  }
 }
 
 // If executed directly, run query from argv
