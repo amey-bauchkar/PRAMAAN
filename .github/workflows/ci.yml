@@ -140,7 +140,6 @@ jobs:
   live-supabase-verification:
     name: Remote Live Supabase Verification (Environment-Dependent Gate)
     runs-on: ubuntu-latest
-    if: ${{ secrets.SUPABASE_MANAGEMENT_TOKEN != '' && secrets.SUPABASE_JWT_SECRET != '' }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -154,7 +153,21 @@ jobs:
       - name: Install Dependencies (Frozen Lockfile)
         run: npm ci
 
+      - name: Check Environment Credentials
+        id: check-secrets
+        run: |
+          if [ -n "$SUPABASE_JWT_SECRET" ] && [ -n "$SUPABASE_URL" ]; then
+            echo "has_secrets=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_secrets=false" >> "$GITHUB_OUTPUT"
+            echo "Live Supabase secrets not configured in this runner; skipping live remote verification."
+          fi
+        env:
+          SUPABASE_JWT_SECRET: ${{ secrets.SUPABASE_JWT_SECRET }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+
       - name: Run Genuine Supabase JWT, ES256 & Auth Membership Tests
+        if: steps.check-secrets.outputs.has_secrets == 'true'
         run: |
           npx vitest run \
             apps/api/tests/real-supabase-jwt.test.ts \
