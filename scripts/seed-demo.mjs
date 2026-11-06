@@ -1,7 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { runQuery } from './supabase-runner.mjs';
+import pg from 'pg';
+import { runQuery as runSupabaseQuery } from './supabase-runner.mjs';
 
 try {
   process.loadEnvFile?.();
@@ -17,7 +18,32 @@ async function seed() {
     throw new Error(`Seed file not found: ${seedPath}`);
   }
   const sql = fs.readFileSync(seedPath, 'utf8');
-  await runQuery(sql);
+
+  const adminUrl = process.env.DATABASE_URL_ADMIN || process.env.DATABASE_URL;
+  if (adminUrl) {
+    console.log('[SEED] Executing seed via PostgreSQL connection...');
+    const ssl = process.env.DATABASE_CA_PATH && fs.existsSync(process.env.DATABASE_CA_PATH)
+      ? { ca: fs.readFileSync(process.env.DATABASE_CA_PATH, 'utf8'), rejectUnauthorized: true }
+      : (adminUrl.includes('localhost') || adminUrl.includes('127.0.0.1')) ? false : { rejectUnauthorized: false };
+
+    const pool = new pg.Pool({ connectionString: adminUrl, ssl, max: 1 });
+    try {
+      const client = await pool.connect();
+      try {
+        await client.query(sql);
+      } finally {
+        client.release();
+      }
+    } finally {
+      await pool.end();
+    }
+  } else if (process.env.SUPABASE_MANAGEMENT_TOKEN) {
+    console.log('[SEED] Executing seed via Supabase Management API...');
+    await runSupabaseQuery(sql);
+  } else {
+    throw new Error('No database connection credentials available for seeding. Set DATABASE_URL_ADMIN or SUPABASE_MANAGEMENT_TOKEN.');
+  }
+
   console.log('[SEED] Demo seed data applied successfully.');
 }
 

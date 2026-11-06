@@ -170,6 +170,33 @@ DROP POLICY IF EXISTS tenant_insert_audit_events ON audit_events;
 DROP POLICY IF EXISTS tenant_isolation_fairness_reviews ON fairness_reviews;
 DROP POLICY IF EXISTS tenant_isolation_fairness_simulations ON fairness_simulations;
 
+-- 2B. Foundational Tenant Context Helper Functions (STABLE)
+CREATE OR REPLACE FUNCTION current_app_org_id() RETURNS UUID AS $$
+BEGIN
+    RETURN NULLIF(current_setting('app.current_org_id', true), '')::UUID;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+CREATE OR REPLACE FUNCTION current_app_user_id() RETURNS UUID AS $$
+BEGIN
+    RETURN NULLIF(current_setting('app.current_user_id', true), '')::UUID;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+CREATE OR REPLACE FUNCTION current_app_user_role() RETURNS VARCHAR AS $$
+BEGIN
+    RETURN NULLIF(current_setting('app.current_user_role', true), '');
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+REVOKE ALL ON FUNCTION current_app_org_id() FROM PUBLIC;
+REVOKE ALL ON FUNCTION current_app_user_id() FROM PUBLIC;
+REVOKE ALL ON FUNCTION current_app_user_role() FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION current_app_org_id() TO app_api, ai_worker, fairness_job;
+GRANT EXECUTE ON FUNCTION current_app_user_id() TO app_api, ai_worker, fairness_job;
+GRANT EXECUTE ON FUNCTION current_app_user_role() TO app_api, ai_worker, fairness_job;
+
 -- 3. Define Clean, Scoped Tenant Policies with Explicit USING and WITH CHECK clauses
 
 -- Organizations

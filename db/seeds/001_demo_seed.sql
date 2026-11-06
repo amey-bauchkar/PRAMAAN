@@ -40,9 +40,13 @@ INSERT INTO students (id, org_id, user_id, department_id, enrollment_no, graduat
 ON CONFLICT (id) DO NOTHING;
 
 -- 6. Academic Records
-INSERT INTO academic_records (student_id, cgpa, active_backlogs) VALUES
-    ('40000000-0000-0000-0000-000000000001', 8.65, 0),
-    ('40000000-0000-0000-0000-000000000002', 7.90, 0);
+INSERT INTO academic_records (student_id, cgpa, active_backlogs)
+SELECT '40000000-0000-0000-0000-000000000001', 8.65, 0
+WHERE NOT EXISTS (SELECT 1 FROM academic_records WHERE student_id = '40000000-0000-0000-0000-000000000001');
+
+INSERT INTO academic_records (student_id, cgpa, active_backlogs)
+SELECT '40000000-0000-0000-0000-000000000002', 7.90, 0
+WHERE NOT EXISTS (SELECT 1 FROM academic_records WHERE student_id = '40000000-0000-0000-0000-000000000002');
 
 -- 7. Skills Master Catalog
 INSERT INTO skills (id, canonical_name, category, description) VALUES

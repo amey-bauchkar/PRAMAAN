@@ -13,9 +13,10 @@ try {
 describe('PRAMAAN Database Migration Reproducibility & Ledger Verification (Area 1 — P0)', () => {
   const adminUrl = process.env.DATABASE_URL_ADMIN || process.env.DATABASE_URL;
   const caPath = process.env.DATABASE_CA_PATH;
+  const isLocal = adminUrl && (adminUrl.includes('localhost') || adminUrl.includes('127.0.0.1'));
   const ssl = caPath && fs.existsSync(caPath)
     ? { ca: fs.readFileSync(caPath, 'utf8'), rejectUnauthorized: true }
-    : { rejectUnauthorized: false };
+    : (isLocal ? false : { rejectUnauthorized: false });
 
   it('1. Verifies schema_migrations ledger records all migrations with SHA-256 checksums', async () => {
     if (!adminUrl) {
