@@ -30,7 +30,7 @@ describe('PRAMAAN Database Migration Reproducibility & Ledger Verification (Area
         'SELECT version, name, applied_at, checksum FROM schema_migrations ORDER BY version ASC;'
       );
 
-      expect(res.rows.length).toBeGreaterThanOrEqual(10);
+      expect(res.rows.length).toBeGreaterThanOrEqual(11);
       const versions = res.rows.map(r => r.version);
       expect(versions).toContain('001');
       expect(versions).toContain('002');
@@ -42,6 +42,7 @@ describe('PRAMAAN Database Migration Reproducibility & Ledger Verification (Area
       expect(versions).toContain('007');
       expect(versions).toContain('008');
       expect(versions).toContain('009');
+      expect(versions).toContain('010');
 
       // Verify SHA-256 checksum format
       for (const row of res.rows) {
