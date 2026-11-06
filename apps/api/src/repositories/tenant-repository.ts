@@ -14,27 +14,38 @@ export class InMemoryTenantRepository implements ITenantRepository {
   constructor(private store: TenantStore = new TenantStore()) {}
 
   public async getOrganization(context: SessionContext, id: string): Promise<OrganizationDiscovery | null> {
-    const org = this.store.getOrganization(id);
-    if (!org) return null;
+    const callerOrg = this.store.getOrganization(context.orgId);
+    const targetOrg = this.store.getOrganization(id);
+    if (!targetOrg) return null;
 
-    // RLS Invariant: College can only discover own organization or parent/system university
-    if (org.id !== context.orgId && org.kind !== 'university') {
+    // RLS Invariant: Caller can discover own organization, parent university, or affiliated colleges
+    const isSelf = targetOrg.id === context.orgId;
+    const isParentUni = Boolean(callerOrg?.parentId && callerOrg.parentId === targetOrg.id);
+    const isAffiliatedCollege = targetOrg.parentId === context.orgId;
+
+    if (!isSelf && !isParentUni && !isAffiliatedCollege) {
       return null;
     }
 
     return {
-      id: org.id,
-      parentId: org.parentId,
-      kind: org.kind,
-      name: org.name,
-      createdAt: org.createdAt,
-      updatedAt: org.updatedAt
+      id: targetOrg.id,
+      parentId: targetOrg.parentId,
+      kind: targetOrg.kind,
+      name: targetOrg.name,
+      createdAt: targetOrg.createdAt,
+      updatedAt: targetOrg.updatedAt
     };
   }
 
   public async listOrganizations(context: SessionContext): Promise<OrganizationDiscovery[]> {
+    const callerOrg = this.store.getOrganization(context.orgId);
     return this.store.listOrganizations()
-      .filter(org => org.id === context.orgId || org.kind === 'university')
+      .filter(targetOrg => {
+        const isSelf = targetOrg.id === context.orgId;
+        const isParentUni = Boolean(callerOrg?.parentId && callerOrg.parentId === targetOrg.id);
+        const isAffiliatedCollege = targetOrg.parentId === context.orgId;
+        return isSelf || isParentUni || isAffiliatedCollege;
+      })
       .map(org => ({
         id: org.id,
         parentId: org.parentId,
@@ -87,8 +98,8 @@ export class PgTenantRepository implements ITenantRepository {
   /**
    * Tenant-scoped organization discovery:
    * Executes strictly inside withTenantTransaction under app_api role.
-   * Kernel RLS policy (tenant_isolation_organizations: id = current_app_org_id() OR kind = 'university')
-   * guarantees that a college cannot discover another college's private tenant metadata.
+   * Kernel RLS policy (tenant_isolation_organizations: id = current_app_org_id() OR id = current_app_parent_org_id() OR parent_id = current_app_org_id())
+   * guarantees that a college cannot discover foreign colleges or unrelated universities.
    * Returns sanitized discovery metadata only.
    */
   public async listOrganizations(context: SessionContext): Promise<OrganizationDiscovery[]> {

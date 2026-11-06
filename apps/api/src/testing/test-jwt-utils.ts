@@ -8,6 +8,8 @@ export interface CreateTestTokenOptions {
   alg?: string;
   issuer?: string | null;
   audience?: string | null;
+  omitRole?: boolean;
+  omitExp?: boolean;
 }
 
 /**
@@ -15,7 +17,7 @@ export interface CreateTestTokenOptions {
  * NOT part of production verifier code.
  */
 export async function createTestToken(
-  claims: { sub: string; email?: string; [key: string]: unknown },
+  claims: { sub?: string; email?: string; [key: string]: unknown },
   options: CreateTestTokenOptions = {}
 ): Promise<string> {
   const secret = options.customSecret || TEST_JWT_SECRET;
@@ -32,19 +34,28 @@ export async function createTestToken(
     ...claims
   };
 
+  if (options.omitRole) {
+    delete payload.role;
+  }
+
   if (options.audience !== null) {
     payload.aud = options.audience !== undefined ? options.audience : 'authenticated';
   }
 
   const jwtBuilder = new SignJWT(payload)
-    .setProtectedHeader({ alg, typ: 'JWT' })
-    .setIssuedAt();
+    .setProtectedHeader({ alg, typ: 'JWT' });
+
+  if (claims.iat === undefined) {
+    jwtBuilder.setIssuedAt();
+  }
 
   if (issuer) {
     jwtBuilder.setIssuer(issuer);
   }
 
-  if (options.expiresIn !== undefined) {
+  if (options.omitExp) {
+    // Intentionally omit expiration claim
+  } else if (options.expiresIn !== undefined) {
     jwtBuilder.setExpirationTime(options.expiresIn);
   } else {
     jwtBuilder.setExpirationTime('2h');

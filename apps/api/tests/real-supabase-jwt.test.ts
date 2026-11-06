@@ -5,6 +5,7 @@ import { AuthService } from '../src/services/auth-service.js';
 import { PgUserRepository } from '../src/repositories/user-repository.js';
 import { getDbPool } from '../src/db/pool.js';
 import { runQuery } from '../../../scripts/supabase-runner.mjs';
+import { createTestToken } from '../src/testing/test-jwt-utils.js';
 import crypto from 'crypto';
 import pg from 'pg';
 
@@ -234,109 +235,162 @@ describe('Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2, P0-4
     }
   });
 
-  // --- P1-5 Strict Claims Validation Tests ---
+  // ==========================================================================
+  // SECTION 2: ISOLATED CRYPTOGRAPHIC CLAIMS & ROLE VALIDATION TESTS (P1-5)
+  // Uses an isolated, test-only signing key to prove individual claim validators
+  // are reached AFTER signature verification succeeds.
+  // NEVER uses the production Supabase JWT secret.
+  // ==========================================================================
+
+  const ISOLATED_TEST_SECRET = 'pramaan-claims-unit-test-isolated-secret-32-chars-minimum!';
+  const ISOLATED_TEST_ISSUER = 'https://auth.isolated-claim-test.pramaan.edu/auth/v1';
+  const claimsVerifier = new JwtVerifier({
+    jwtSecret: ISOLATED_TEST_SECRET,
+    issuer: ISOLATED_TEST_ISSUER,
+    audience: 'authenticated'
+  });
 
   it('10. Rejects token with missing expiration (exp) claim', async () => {
-    // Decode genuine token segments and tamper payload to remove exp
-    const parts = genuineAccessToken.split('.');
-    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
-    delete claims.exp;
+    const token = await createTestToken(
+      { sub: 'isolated-test-subject-001' },
+      { customSecret: ISOLATED_TEST_SECRET, issuer: ISOLATED_TEST_ISSUER, omitExp: true }
+    );
 
-    // Use test signer without exp to simulate un-expiring token
-    const tamperedPayload = Buffer.from(JSON.stringify(claims)).toString('base64url');
-    const tokenWithoutExp = `${parts[0]}.${tamperedPayload}.${parts[2]}`;
-
-    const verifyRes = await jwtVerifier.verifyToken(tokenWithoutExp);
+    const verifyRes = await claimsVerifier.verifyToken(token);
     expect(verifyRes.valid).toBe(false);
-    expect(verifyRes.error).toBeDefined();
+    expect(verifyRes.error).toBe('Missing or invalid expiration claim (exp) in token payload.');
   });
 
-  it('11. Rejects token when role claim is "service_role" (prohibiting service key as user auth)', async () => {
-    const parts = genuineAccessToken.split('.');
-    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
-    claims.role = 'service_role'; // Imposter service role
+  it('11. Rejects expired token', async () => {
+    const token = await createTestToken(
+      { sub: 'isolated-test-subject-001' },
+      { customSecret: ISOLATED_TEST_SECRET, issuer: ISOLATED_TEST_ISSUER, expiresIn: -3600 }
+    );
 
-    const tamperedPayload = Buffer.from(JSON.stringify(claims)).toString('base64url');
-    const serviceToken = `${parts[0]}.${tamperedPayload}.${parts[2]}`;
-
-    const verifyRes = await jwtVerifier.verifyToken(serviceToken);
+    const verifyRes = await claimsVerifier.verifyToken(token);
     expect(verifyRes.valid).toBe(false);
+    expect(verifyRes.error).toBe('Token has expired.');
   });
 
-  it('12. Rejects token when role claim is "anon" (anonymous key prohibited)', async () => {
-    const parts = genuineAccessToken.split('.');
-    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
-    claims.role = 'anon';
+  it('12. Rejects token with missing issuer (iss) claim', async () => {
+    const token = await createTestToken(
+      { sub: 'isolated-test-subject-001' },
+      { customSecret: ISOLATED_TEST_SECRET, issuer: null }
+    );
 
-    const tamperedPayload = Buffer.from(JSON.stringify(claims)).toString('base64url');
-    const anonToken = `${parts[0]}.${tamperedPayload}.${parts[2]}`;
-
-    const verifyRes = await jwtVerifier.verifyToken(anonToken);
+    const verifyRes = await claimsVerifier.verifyToken(token);
     expect(verifyRes.valid).toBe(false);
+    expect(verifyRes.error).toMatch(/claim validation failed|missing issuer/i);
   });
 
-  it('13. Rejects token with missing issuer (iss) claim', async () => {
-    const parts = genuineAccessToken.split('.');
-    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
-    delete claims.iss;
+  it('13. Rejects token with missing audience (aud) claim', async () => {
+    const token = await createTestToken(
+      { sub: 'isolated-test-subject-001' },
+      { customSecret: ISOLATED_TEST_SECRET, issuer: ISOLATED_TEST_ISSUER, audience: null }
+    );
 
-    const tamperedPayload = Buffer.from(JSON.stringify(claims)).toString('base64url');
-    const tokenWithoutIss = `${parts[0]}.${tamperedPayload}.${parts[2]}`;
-
-    const verifyRes = await jwtVerifier.verifyToken(tokenWithoutIss);
+    const verifyRes = await claimsVerifier.verifyToken(token);
     expect(verifyRes.valid).toBe(false);
-    expect(verifyRes.error).toBeDefined();
+    expect(verifyRes.error).toMatch(/claim validation failed|missing audience/i);
   });
 
-  it('14. Rejects token with missing audience (aud) claim', async () => {
-    const parts = genuineAccessToken.split('.');
-    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
-    delete claims.aud;
+  it('14. Rejects token with missing or empty subject (sub) claim', async () => {
+    const token = await createTestToken(
+      { sub: '' },
+      { customSecret: ISOLATED_TEST_SECRET, issuer: ISOLATED_TEST_ISSUER }
+    );
 
-    const tamperedPayload = Buffer.from(JSON.stringify(claims)).toString('base64url');
-    const tokenWithoutAud = `${parts[0]}.${tamperedPayload}.${parts[2]}`;
-
-    const verifyRes = await jwtVerifier.verifyToken(tokenWithoutAud);
+    const verifyRes = await claimsVerifier.verifyToken(token);
     expect(verifyRes.valid).toBe(false);
-    expect(verifyRes.error).toBeDefined();
+    expect(verifyRes.error).toBe('Missing or empty subject claim (sub) in token payload.');
   });
 
   it('15. Rejects token with future issued-at (iat) timestamp beyond clock skew', async () => {
-    const parts = genuineAccessToken.split('.');
-    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
-    claims.iat = Math.floor(Date.now() / 1000) + 7200; // 2 hours in the future
+    const futureIat = Math.floor(Date.now() / 1000) + 7200; // 2 hours in the future
+    const token = await createTestToken(
+      { sub: 'isolated-test-subject-001', iat: futureIat },
+      { customSecret: ISOLATED_TEST_SECRET, issuer: ISOLATED_TEST_ISSUER }
+    );
 
-    const tamperedPayload = Buffer.from(JSON.stringify(claims)).toString('base64url');
-    const tokenWithFutureIat = `${parts[0]}.${tamperedPayload}.${parts[2]}`;
-
-    const verifyRes = await jwtVerifier.verifyToken(tokenWithFutureIat);
+    const verifyRes = await claimsVerifier.verifyToken(token);
     expect(verifyRes.valid).toBe(false);
-    expect(verifyRes.error).toBeDefined();
+    expect(verifyRes.error).toBe('Token issued-at claim (iat) is in the future.');
   });
 
-  it('16. Rejects expired token', async () => {
-    const parts = genuineAccessToken.split('.');
-    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
-    claims.exp = Math.floor(Date.now() / 1000) - 3600; // Expired 1 hour ago
+  it('16. Rejects token when role claim is "service_role" (prohibiting service key as user auth)', async () => {
+    const token = await createTestToken(
+      { sub: 'isolated-test-subject-001', role: 'service_role' },
+      { customSecret: ISOLATED_TEST_SECRET, issuer: ISOLATED_TEST_ISSUER }
+    );
 
-    const tamperedPayload = Buffer.from(JSON.stringify(claims)).toString('base64url');
-    const expiredToken = `${parts[0]}.${tamperedPayload}.${parts[2]}`;
-
-    const verifyRes = await jwtVerifier.verifyToken(expiredToken);
+    const verifyRes = await claimsVerifier.verifyToken(token);
     expect(verifyRes.valid).toBe(false);
-    expect(verifyRes.error).toBeDefined();
+    expect(verifyRes.error).toBe(
+      "FORBIDDEN_TOKEN_ROLE: Token role 'service_role' is not permitted for user authentication (role must be exactly \"authenticated\")."
+    );
   });
 
-  it('17. Rejects token with missing or empty subject (sub) claim', async () => {
-    const parts = genuineAccessToken.split('.');
-    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
-    delete claims.sub;
+  it('17. Rejects token when role claim is "anon" (anonymous key prohibited)', async () => {
+    const token = await createTestToken(
+      { sub: 'isolated-test-subject-001', role: 'anon' },
+      { customSecret: ISOLATED_TEST_SECRET, issuer: ISOLATED_TEST_ISSUER }
+    );
 
-    const tamperedPayload = Buffer.from(JSON.stringify(claims)).toString('base64url');
-    const tokenWithoutSub = `${parts[0]}.${tamperedPayload}.${parts[2]}`;
-
-    const verifyRes = await jwtVerifier.verifyToken(tokenWithoutSub);
+    const verifyRes = await claimsVerifier.verifyToken(token);
     expect(verifyRes.valid).toBe(false);
-    expect(verifyRes.error).toBeDefined();
+    expect(verifyRes.error).toBe(
+      "FORBIDDEN_TOKEN_ROLE: Token role 'anon' is not permitted for user authentication (role must be exactly \"authenticated\")."
+    );
+  });
+
+  it('18. Rejects token with missing role claim', async () => {
+    const token = await createTestToken(
+      { sub: 'isolated-test-subject-001' },
+      { customSecret: ISOLATED_TEST_SECRET, issuer: ISOLATED_TEST_ISSUER, omitRole: true }
+    );
+
+    const verifyRes = await claimsVerifier.verifyToken(token);
+    expect(verifyRes.valid).toBe(false);
+    expect(verifyRes.error).toBe(
+      'MISSING_OR_EMPTY_ROLE: Token is missing a valid role claim (role must be "authenticated").'
+    );
+  });
+
+  it('19. Rejects token with empty role claim', async () => {
+    const token = await createTestToken(
+      { sub: 'isolated-test-subject-001', role: '   ' },
+      { customSecret: ISOLATED_TEST_SECRET, issuer: ISOLATED_TEST_ISSUER }
+    );
+
+    const verifyRes = await claimsVerifier.verifyToken(token);
+    expect(verifyRes.valid).toBe(false);
+    expect(verifyRes.error).toBe(
+      'MISSING_OR_EMPTY_ROLE: Token is missing a valid role claim (role must be "authenticated").'
+    );
+  });
+
+  it('20. Rejects token with invalid arbitrary role (e.g. "admin")', async () => {
+    const token = await createTestToken(
+      { sub: 'isolated-test-subject-001', role: 'admin' },
+      { customSecret: ISOLATED_TEST_SECRET, issuer: ISOLATED_TEST_ISSUER }
+    );
+
+    const verifyRes = await claimsVerifier.verifyToken(token);
+    expect(verifyRes.valid).toBe(false);
+    expect(verifyRes.error).toBe(
+      "FORBIDDEN_TOKEN_ROLE: Token role 'admin' is not permitted for user authentication (role must be exactly \"authenticated\")."
+    );
+  });
+
+  it('21. Validates correctly signed token with role: "authenticated"', async () => {
+    const token = await createTestToken(
+      { sub: 'isolated-test-subject-001', role: 'authenticated' },
+      { customSecret: ISOLATED_TEST_SECRET, issuer: ISOLATED_TEST_ISSUER }
+    );
+
+    const verifyRes = await claimsVerifier.verifyToken(token);
+    expect(verifyRes.valid).toBe(true);
+    expect(verifyRes.payload?.role).toBe('authenticated');
+    expect(verifyRes.payload?.sub).toBe('isolated-test-subject-001');
   });
 });

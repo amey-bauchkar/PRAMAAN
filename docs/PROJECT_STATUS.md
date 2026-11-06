@@ -22,7 +22,11 @@ Following the initial M0 and M1 build and subsequent security audits, an **exhau
 - **Production Fail-Closed Invariants:** System fails startup immediately if production lacks `DATABASE_URL`, Supabase JWT configuration, or real PostgreSQL repositories.
 - **Full Transaction Context Isolation:** Parameterized `set_config` isolates `app.current_org_id`, `app.current_user_id`, and `app.current_user_role` per transaction.
 - **Physical Connection Pool Socket Reuse:** Verified socket reuse via `SELECT pg_backend_pid()` and proven fail-closed context clearing.
-- **100% Test Success:** All 132 tests pass across 18 test files (including 35 live Supabase PostgreSQL 17 integration and security tests).
+- **Parent University Discovery Isolation:** Enforced kernel RLS relationship where colleges only discover their own affiliated parent university (`id = current_app_parent_org_id()`), never unrelated universities or foreign colleges.
+- **Strict Role Claim Verification:** Enforced `payload.role === 'authenticated'` across all API authentication paths; rejected missing, empty, `"anon"`, `"service_role"`, and arbitrary roles.
+- **Production TLS Invariants:** Enforced `rejectUnauthorized: true` with zero production bypass (eliminated `DATABASE_SSL_ALLOW_INSECURE` in production).
+- **Accurate Credential Audit Status:** Historical git commits (`21fa9a7` / `25cd045`) contained a previously committed password. That credential was immediately rotated out-of-band via Supabase management channels. Current migration 007 contains zero password literals, and rerunning it cannot reset credentials.
+- **100% Test Success:** All 140 tests pass across 18 test files (including 44 live Supabase PostgreSQL 17 integration and security tests).
 
 ---
 
@@ -31,11 +35,11 @@ Following the initial M0 and M1 build and subsequent security audits, an **exhau
 | Tier | Description | Files / Tests | Status |
 | :--- | :--- | :--- | :--- |
 | **Pure Unit Tests** | Pure domain logic: state machine, anchor hashing, audit hash chaining, eligibility rules, 4/5ths fairness math. | 5 files, 29 tests | `UNIT_TESTED` (Passing in 30ms) |
-| **API, RBAC & Token Tests** | Fastify HTTP endpoints, positive RBAC matrix, email takeover prevention, fail-closed startup, and JWT test utilities. | 8 files, 60 tests | `INTEGRATION_TESTED` (Passing in 600ms) |
-| **Live Database Tests** | Real PostgreSQL 17 on Supabase: RLS isolation, cross-tenant mutation rejection, triggers, constraints, DCL permissions, physical connection reuse via backend PID, restricted runtime user (`pramaan_app_user`), tenant discovery isolation, and genuine Supabase ES256 JWKS token validation. | 5 files, 43 tests | `SECURITY_VERIFIED` (Passing on live Supabase DB) |
-| **Total Suite** | Full monorepo test pack running under Vitest. | **18 files, 132 tests** | **100% Passing** |
+| **API, RBAC & Token Tests** | Fastify HTTP endpoints, positive RBAC matrix, email takeover prevention, fail-closed startup, strict claims validation, and JWT test utilities. | 8 files, 67 tests | `INTEGRATION_TESTED` (Passing in 600ms) |
+| **Live Database Tests** | Real PostgreSQL 17 on Supabase: RLS isolation, cross-tenant mutation rejection, triggers, constraints, DCL permissions, physical connection reuse via backend PID, restricted runtime user (`pramaan_app_user`), parent university discovery isolation, and genuine Supabase ES256 JWKS token validation. | 5 files, 44 tests | `SECURITY_VERIFIED` (Passing on live Supabase DB) |
+| **Total Suite** | Full monorepo test pack running under Vitest. | **18 files, 140 tests** | **100% Passing** |
 
-### Complete Test Inventory (18 Files, 132 Tests)
+### Complete Test Inventory (18 Files, 140 Tests)
 1. `packages/domain/tests/skill-state-machine.test.ts` (8 tests)
 2. `packages/domain/tests/anchor-resolver.test.ts` (4 tests)
 3. `packages/domain/tests/audit-chain.test.ts` (7 tests)
@@ -48,10 +52,10 @@ Following the initial M0 and M1 build and subsequent security audits, an **exhau
 10. `apps/api/tests/api-endpoints.test.ts` (7 tests)
 11. `apps/api/tests/api-route-rbac.test.ts` (18 tests)
 12. `apps/api/tests/email-takeover-prevention.test.ts` (4 tests)
-13. `apps/api/tests/prod-fail-closed.test.ts` (3 tests)
+13. `apps/api/tests/prod-fail-closed.test.ts` (6 tests)
 14. `apps/api/tests/pg-auth-integration.test.ts` (2 tests)
-15. `apps/api/tests/real-supabase-jwt.test.ts` (17 tests)
-16. `apps/api/tests/restricted-runtime-user.test.ts` (8 tests)
+15. `apps/api/tests/real-supabase-jwt.test.ts` (21 tests)
+16. `apps/api/tests/restricted-runtime-user.test.ts` (9 tests)
 17. `db/tests/connection-pool-reuse.test.ts` (1 test)
 18. `db/tests/supabase-real-db.test.ts` (19 tests)
 

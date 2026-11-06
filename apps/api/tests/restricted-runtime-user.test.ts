@@ -9,6 +9,9 @@ describe('Production Security: Restricted Runtime Database Login Verification (P
 
   const TENANT_A_ID = '90000000-0000-0000-0000-000000000001';
   const TENANT_B_ID = '90000000-0000-0000-0000-000000000002';
+  const PARENT_UNI_ID = '90000000-0000-0000-0000-000000000003';
+  const UNRELATED_UNI_ID = '90000000-0000-0000-0000-000000000004';
+  const STANDALONE_COLLEGE_ID = '90000000-0000-0000-0000-000000000005';
 
   beforeAll(async () => {
     try {
@@ -17,19 +20,32 @@ describe('Production Security: Restricted Runtime Database Login Verification (P
 
     pool = getDbPool();
 
-    // Seed test colleges via administrative runner
+    // Seed test organizations via administrative runner
     await runQuery(`
-      DELETE FROM organizations WHERE id IN ('${TENANT_A_ID}', '${TENANT_B_ID}');
+      DELETE FROM organizations WHERE id IN (
+        '${TENANT_A_ID}', '${TENANT_B_ID}', '${PARENT_UNI_ID}', '${UNRELATED_UNI_ID}', '${STANDALONE_COLLEGE_ID}'
+      );
+
+      -- 1. Seed Parent and Unrelated Universities
       INSERT INTO organizations (id, name, kind)
       VALUES 
-        ('${TENANT_A_ID}', 'Isolated College Alpha', 'college'),
-        ('${TENANT_B_ID}', 'Isolated College Beta', 'college');
+        ('${PARENT_UNI_ID}', 'Affiliated State University', 'university'),
+        ('${UNRELATED_UNI_ID}', 'Unrelated Foreign University', 'university');
+
+      -- 2. Seed Colleges with explicit parent relationships
+      INSERT INTO organizations (id, name, kind, parent_id)
+      VALUES 
+        ('${TENANT_A_ID}', 'Isolated College Alpha', 'college', '${PARENT_UNI_ID}'),
+        ('${TENANT_B_ID}', 'Isolated College Beta', 'college', '${UNRELATED_UNI_ID}'),
+        ('${STANDALONE_COLLEGE_ID}', 'Autonomous Standalone College', 'college', NULL);
     `);
   });
 
   afterAll(async () => {
     await runQuery(`
-      DELETE FROM organizations WHERE id IN ('${TENANT_A_ID}', '${TENANT_B_ID}');
+      DELETE FROM organizations WHERE id IN (
+        '${TENANT_A_ID}', '${TENANT_B_ID}', '${PARENT_UNI_ID}', '${UNRELATED_UNI_ID}', '${STANDALONE_COLLEGE_ID}'
+      );
     `);
   });
 
@@ -189,5 +205,50 @@ describe('Production Security: Restricted Runtime Database Login Verification (P
     // 5. College B querying getOrganization for College A returns null
     const crossTenantGetB = await tenantRepo.getOrganization(contextB, TENANT_A_ID);
     expect(crossTenantGetB).toBeNull();
+  });
+
+  it('9. Enforces parent university discovery relationship (College discovers parent university, NEVER unrelated university)', async () => {
+    const tenantRepo = new PgTenantRepository(pool);
+
+    const contextA = {
+      userId: '91000000-0000-0000-0000-000000000001',
+      orgId: TENANT_A_ID, // College Alpha whose parent_id is PARENT_UNI_ID
+      role: 'officer' as const
+    };
+
+    const contextStandalone = {
+      userId: '91000000-0000-0000-0000-000000000005',
+      orgId: STANDALONE_COLLEGE_ID, // Autonomous college with parent_id = NULL
+      role: 'officer' as const
+    };
+
+    // 1. College A listOrganizations discovers itself AND its direct parent university
+    const listA = await tenantRepo.listOrganizations(contextA);
+    expect(listA.some(org => org.id === TENANT_A_ID)).toBe(true);
+    expect(listA.some(org => org.id === PARENT_UNI_ID)).toBe(true);
+
+    // 2. College A NEVER discovers an unrelated university or another college
+    expect(listA.some(org => org.id === UNRELATED_UNI_ID)).toBe(false);
+    expect(listA.some(org => org.id === TENANT_B_ID)).toBe(false);
+
+    // 3. College A can getOrganization for its parent university
+    const parentUni = await tenantRepo.getOrganization(contextA, PARENT_UNI_ID);
+    expect(parentUni).not.toBeNull();
+    expect(parentUni?.id).toBe(PARENT_UNI_ID);
+    expect(parentUni?.name).toBe('Affiliated State University');
+
+    // 4. College A querying getOrganization for the unrelated university returns null (kernel RLS drops row)
+    const unrelatedUni = await tenantRepo.getOrganization(contextA, UNRELATED_UNI_ID);
+    expect(unrelatedUni).toBeNull();
+
+    // 5. Standalone autonomous college with no parent discovers ONLY itself
+    const listStandalone = await tenantRepo.listOrganizations(contextStandalone);
+    expect(listStandalone.some(org => org.id === STANDALONE_COLLEGE_ID)).toBe(true);
+    expect(listStandalone.some(org => org.id === PARENT_UNI_ID)).toBe(false);
+    expect(listStandalone.some(org => org.id === UNRELATED_UNI_ID)).toBe(false);
+
+    // 6. Standalone college querying getOrganization for any university returns null
+    const standaloneParentAttempt = await tenantRepo.getOrganization(contextStandalone, PARENT_UNI_ID);
+    expect(standaloneParentAttempt).toBeNull();
   });
 });

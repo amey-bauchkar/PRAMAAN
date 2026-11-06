@@ -468,12 +468,14 @@ To eliminate the use of administrative credentials for normal application runtim
 4. **Account Takeover Immunity:** The procedure queries strictly by verified `auth_subject`. It never accepts or links accounts by email, immunizing the system against OAuth email collision / takeover attacks.
 5. **Least Privilege Execution:** Execution is revoked from `PUBLIC` and granted strictly to `pramaan_app_user` and `app_api`.
 6. **Secure Provisioning & Rotation Procedure:**
-   - Literal passwords are NEVER committed to migrations or SQL source code.
-   - When provisioning or rotating the runtime user password, the administrator executes an out-of-band administrative command via the secure Supabase console or management API:
+   - **Historical Credential Audit:** A legacy password literal was committed in earlier Git commits (`21fa9a7` / `25cd045`) and remains in historical git commit logs. The credential was immediately rotated out-of-band on live Supabase via administrative channels upon identification.
+   - **Zero Password Literals in Current Code:** The current migration 007 and all codebase SQL scripts contain NO password literals.
+   - **Rerun Protection:** Re-running migration 007 executes `ALTER ROLE pramaan_app_user NOBYPASSRLS...` without resetting, altering, or exposing the credential.
+   - **Out-of-Band Provisioning:** When provisioning or rotating the runtime user password, the administrator executes an out-of-band administrative command via the secure Supabase console or management API:
      ```sql
      ALTER ROLE pramaan_app_user WITH PASSWORD '<HIGH_ENTROPY_RANDOM_SECRET>';
      ```
-   - The password is saved strictly in the runtime environment secrets manager (or untracked `.env`), and re-running migration 007 alters role attributes without resetting or exposing the password.
+   - The password is saved strictly in the runtime environment secrets manager (or untracked `.env`). Zero current or replacement credentials are documented or committed.
 
 ### 4.4 Parameterized Transaction Context Isolation (`withTenantTransaction`)
 PostgreSQL does not permit `$1` parameters in `SET LOCAL` statements directly. Parameterization is achieved via `set_config` with `is_local = true`:
@@ -493,15 +495,25 @@ Direct and pooled connections to the remote database use strict TLS encryption:
 - CA root bundle is stored in `certs/supabase-ca.crt` (including the Supabase Root CA and intermediate chain).
 - `rejectUnauthorized: true` prevents untrusted or self-signed man-in-the-middle certificates.
 - SNI hostname verification (`servername: new URL(connectionString).hostname`) prevents MITM attacks routing to unauthorized hostnames.
+- **Zero Production Downgrade Bypass:** In production (`NODE_ENV=production`), `rejectUnauthorized: true` is unconditionally enforced. Insecure TLS bypasses (`DATABASE_SSL_ALLOW_INSECURE`) are strictly prohibited and ignored in production.
 
-### 4.6 Tenant Discovery RLS Isolation
-To protect organizational privacy:
+### 4.6 Parent University Discovery RLS Isolation (`008_parent_university_discovery_policy.sql`)
+To protect institutional privacy across educational institutions:
 - The `organizations` table is governed by kernel policy `tenant_isolation_organizations`:
   ```sql
   CREATE POLICY tenant_isolation_organizations ON organizations
     FOR SELECT TO app_api
-    USING (id = current_app_org_id() OR kind = 'university');
+    USING (
+      id = current_app_org_id()
+      OR id = current_app_parent_org_id()
+      OR parent_id = current_app_org_id()
+    );
   ```
+- **Discovery Rules:**
+  1. A college discovers itself (`id = current_app_org_id()`).
+  2. A college discovers its direct parent university (`id = current_app_parent_org_id()`), but CANNOT discover unrelated universities or foreign colleges.
+  3. A university discovers itself and its affiliated colleges (`parent_id = current_app_org_id()`).
+  4. An autonomous college without a parent (`parent_id IS NULL`) discovers ONLY itself.
 - All discovery queries (`PgTenantRepository.listOrganizations` and `getOrganization`) execute strictly inside `withTenantTransaction` under `app_api`.
-- As verified on live PostgreSQL 17 (`apps/api/tests/restricted-runtime-user.test.ts`), College A querying organizations returns strictly College A; College B's record is completely invisible (filtered by RLS). Calling `getOrganization` with another college's ID returns `null`. Sensitive configuration and key references are never exposed.
+- As verified on live PostgreSQL 17 (`apps/api/tests/restricted-runtime-user.test.ts` Test 8 & 9), College Alpha querying organizations returns strictly College Alpha and its parent university; unrelated universities and colleges are completely invisible. Sensitive internal configurations are stripped.
 

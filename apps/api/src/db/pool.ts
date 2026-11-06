@@ -35,7 +35,21 @@ export function resolveSslConfig(connectionString?: string): boolean | pg.Connec
     servername = new URL(connectionString).hostname;
   } catch {}
 
-  // 3. Configure strict TLS verification if CA certificate is present or in production
+  // 3. Environment-aware TLS configuration
+  const isProduction = process.env.NODE_ENV === 'production';
+
+  // In production, TLS must ALWAYS enforce rejectUnauthorized: true.
+  // There is NO insecure bypass in production (DATABASE_SSL_ALLOW_INSECURE is ignored/prohibited).
+  if (isProduction) {
+    return {
+      rejectUnauthorized: true,
+      ca,
+      servername
+    };
+  }
+
+  // Non-production (local development / testing):
+  // If CA certificate is available, use strict verification.
   if (ca) {
     return {
       rejectUnauthorized: true,
@@ -44,15 +58,7 @@ export function resolveSslConfig(connectionString?: string): boolean | pg.Connec
     };
   }
 
-  // If in production without explicit CA, enforce rejectUnauthorized: true
-  if (process.env.NODE_ENV === 'production' && process.env.DATABASE_SSL_ALLOW_INSECURE !== 'true') {
-    return {
-      rejectUnauthorized: true,
-      servername
-    };
-  }
-
-  // Development/testing fallback when CA certificate is not yet provisioned
+  // Local development/testing fallback when CA bundle is not yet configured
   return {
     rejectUnauthorized: false
   };

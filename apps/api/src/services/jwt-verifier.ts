@@ -2,8 +2,8 @@ import { jwtVerify, createRemoteJWKSet, JWTPayload, JWTVerifyGetKey } from 'jose
 
 export interface VerifiedTokenPayload extends JWTPayload {
   sub: string;
+  role: 'authenticated';
   email?: string;
-  role?: string;
   user_metadata?: Record<string, unknown>;
   app_metadata?: Record<string, unknown>;
 }
@@ -169,12 +169,18 @@ export class JwtVerifier {
         return { valid: false, error: 'Missing issuer claim (iss) in token payload.' };
       }
 
-      // 6. Role check: Reject service_role or anonymous tokens from user-facing authentication
+      // 6. Strict Role validation: Must exist, be string, and equal exactly 'authenticated'
       const tokenRole = (payload as any).role;
-      if (tokenRole && tokenRole !== 'authenticated') {
+      if (!tokenRole || typeof tokenRole !== 'string' || tokenRole.trim() === '') {
         return {
           valid: false,
-          error: `FORBIDDEN_TOKEN_ROLE: Token role '${tokenRole}' is not permitted for user authentication (service-role and anonymous tokens are rejected).`
+          error: 'MISSING_OR_EMPTY_ROLE: Token is missing a valid role claim (role must be "authenticated").'
+        };
+      }
+      if (tokenRole !== 'authenticated') {
+        return {
+          valid: false,
+          error: `FORBIDDEN_TOKEN_ROLE: Token role '${tokenRole}' is not permitted for user authentication (role must be exactly "authenticated").`
         };
       }
 
