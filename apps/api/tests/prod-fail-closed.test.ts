@@ -8,12 +8,20 @@ import fs from 'fs';
 describe('Production Mode Fail-Closed Invariants (P1-7)', () => {
   const originalEnv = { ...process.env };
 
+  const setEnv = (key: string, value?: string) => {
+    if (value === undefined) {
+      delete (process.env as any)[key];
+    } else {
+      (process.env as any)[key] = value;
+    }
+  };
+
   afterEach(() => {
     process.env = { ...originalEnv };
   });
 
   it('1. Fails startup in production when DATABASE_URL is missing', () => {
-    process.env.NODE_ENV = 'production';
+    setEnv('NODE_ENV', 'production');
     delete process.env.DATABASE_URL;
     process.env.SUPABASE_URL = 'https://qshujrddrzoemlzmleru.supabase.co';
 
@@ -23,7 +31,7 @@ describe('Production Mode Fail-Closed Invariants (P1-7)', () => {
   });
 
   it('2. Fails startup in production when attempting to inject in-memory repositories', () => {
-    process.env.NODE_ENV = 'production';
+    setEnv('NODE_ENV', 'production');
     process.env.DATABASE_URL = 'postgresql://fake:password@localhost:5432/db';
     process.env.SUPABASE_URL = 'https://qshujrddrzoemlzmleru.supabase.co';
 
@@ -32,10 +40,64 @@ describe('Production Mode Fail-Closed Invariants (P1-7)', () => {
         tenantRepository: new InMemoryTenantRepository(new TenantStore())
       });
     }).toThrow(/FATAL: Production mode prohibits in-memory repositories/);
+
+    expect(() => {
+      buildApp({
+        persistenceMode: 'in-memory'
+      });
+    }).toThrow(/FATAL: Production mode prohibits in-memory persistenceMode/);
+  });
+
+  it('2b. Fails startup in production when attempting to inject any in-memory repository variant', async () => {
+    setEnv('NODE_ENV', 'production');
+    process.env.DATABASE_URL = 'postgresql://fake:password@localhost:5432/db';
+    process.env.SUPABASE_URL = 'https://qshujrddrzoemlzmleru.supabase.co';
+
+    const { InMemoryAuditRepository } = await import('../src/repositories/audit-repository.js');
+    const { InMemoryConsentRepository } = await import('../src/repositories/consent-repository.js');
+    const { InMemoryUserRepository } = await import('../src/repositories/user-repository.js');
+    const { AuditService } = await import('../src/services/audit-service.js');
+    const { ConsentService } = await import('../src/services/consent-service.js');
+
+    const auditSvc = new AuditService();
+    expect(() => {
+      buildApp({ auditRepository: new InMemoryAuditRepository(auditSvc) });
+    }).toThrow(/FATAL: Production mode prohibits in-memory repositories/);
+
+    expect(() => {
+      buildApp({ consentRepository: new InMemoryConsentRepository(new ConsentService(auditSvc)) });
+    }).toThrow(/FATAL: Production mode prohibits in-memory repositories/);
+
+    expect(() => {
+      buildApp({ userRepository: new InMemoryUserRepository() });
+    }).toThrow(/FATAL: Production mode prohibits in-memory repositories/);
+  });
+
+  it('2c. Fails startup when persistenceMode is postgres but DATABASE_URL is missing', () => {
+    delete process.env.DATABASE_URL;
+    expect(() => {
+      buildApp({ persistenceMode: 'postgres' });
+    }).toThrow(/FATAL: persistenceMode is set to 'postgres' but DATABASE_URL is not configured/);
+  });
+
+  it('2d. Development/Test mode honors explicit persistenceMode and reports it via /health', async () => {
+    setEnv('NODE_ENV');
+    process.env.SUPABASE_URL = 'https://qshujrddrzoemlzmleru.supabase.co';
+    const memApp = buildApp({ persistenceMode: 'in-memory' });
+    expect(memApp.persistenceMode).toBe('in-memory');
+    const memRes = await memApp.inject({ method: 'GET', url: '/health' });
+    expect(memRes.json().persistenceMode).toBe('in-memory');
+
+    if (process.env.DATABASE_URL) {
+      const pgApp = buildApp({ persistenceMode: 'postgres' });
+      expect(pgApp.persistenceMode).toBe('postgres');
+      const pgRes = await pgApp.inject({ method: 'GET', url: '/health' });
+      expect(pgRes.json().persistenceMode).toBe('postgres');
+    }
   });
 
   it('3. Fails startup in production when Supabase JWT configuration is completely missing', () => {
-    process.env.NODE_ENV = 'production';
+    setEnv('NODE_ENV', 'production');
     process.env.DATABASE_URL = 'postgresql://fake:password@localhost:5432/db';
     delete process.env.SUPABASE_URL;
     delete process.env.SUPABASE_JWKS_URI;
@@ -49,7 +111,7 @@ describe('Production Mode Fail-Closed Invariants (P1-7)', () => {
   // --- Production TLS Invariants (Item 3) ---
 
   it('4. Production enforces rejectUnauthorized: true for remote database connections', () => {
-    process.env.NODE_ENV = 'production';
+    setEnv('NODE_ENV', 'production');
     delete process.env.DATABASE_CA_CERT;
     delete process.env.DATABASE_CA_PATH;
 
@@ -62,7 +124,7 @@ describe('Production Mode Fail-Closed Invariants (P1-7)', () => {
   });
 
   it('5. Production strictly prohibits TLS downgrade even if DATABASE_SSL_ALLOW_INSECURE=true is set', () => {
-    process.env.NODE_ENV = 'production';
+    setEnv('NODE_ENV', 'production');
     process.env.DATABASE_SSL_ALLOW_INSECURE = 'true'; // Attempted exploit / bypass
     delete process.env.DATABASE_CA_CERT;
     delete process.env.DATABASE_CA_PATH;
@@ -76,7 +138,7 @@ describe('Production Mode Fail-Closed Invariants (P1-7)', () => {
   });
 
   it('6. Production verifies CA certificate and loads bundle when present', () => {
-    process.env.NODE_ENV = 'production';
+    setEnv('NODE_ENV', 'production');
     delete process.env.DATABASE_SSL_ALLOW_INSECURE;
 
     const remoteUrl = 'postgresql://pramaan_app_user:secret@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres';
@@ -87,6 +149,45 @@ describe('Production Mode Fail-Closed Invariants (P1-7)', () => {
     if (fs.existsSync('certs/supabase-ca.crt')) {
       expect((sslConfig as any).ca).toBeDefined();
       expect((sslConfig as any).ca).toContain('BEGIN CERTIFICATE');
+    }
+  });
+
+  it('7. Fails fast when DATABASE_CA_PATH is explicitly set but file does not exist', () => {
+    setEnv('NODE_ENV', 'production');
+    process.env.DATABASE_CA_PATH = '/nonexistent/path/to/missing_ca.crt';
+    delete process.env.DATABASE_CA_CERT;
+
+    const remoteUrl = 'postgresql://pramaan_app_user:secret@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres';
+    expect(() => {
+      resolveSslConfig(remoteUrl);
+    }).toThrow(/DATABASE_CA_PATH is configured \('.*missing_ca\.crt'\) but file does not exist/);
+  });
+
+  it('8. Verifies production TLS configuration on live remote database connection', async () => {
+    const dbUrl = process.env.DATABASE_URL;
+    if (!dbUrl || dbUrl.includes('localhost')) return;
+
+    setEnv('NODE_ENV', 'production');
+    const sslConfig = resolveSslConfig(dbUrl);
+    expect(typeof sslConfig).toBe('object');
+    expect((sslConfig as any).rejectUnauthorized).toBe(true);
+    expect((sslConfig as any).servername).toBeDefined();
+
+    // Verify a live connection under strict production SSL succeeds
+    const pg = await import('pg');
+    const pool = new pg.default.Pool({
+      connectionString: dbUrl,
+      ssl: sslConfig as any,
+      max: 1
+    });
+
+    try {
+      const client = await pool.connect();
+      const res = await client.query('SELECT current_user, inet_server_port();');
+      expect(res.rows[0].current_user).toBe('pramaan_app_user');
+      client.release();
+    } finally {
+      await pool.end();
     }
   });
 });

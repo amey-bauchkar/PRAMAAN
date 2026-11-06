@@ -1,0 +1,98 @@
+name: PRAMAAN CI & Security Verification Gate
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    name: Build, Strict Typecheck & Unit/Contract Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install Dependencies (Frozen Lockfile)
+        run: npm ci
+
+      - name: Strict TypeScript Compilation Check
+        run: npx tsc --noEmit
+
+      - name: Monorepo Production Build
+        run: npm run build
+
+      - name: Run Domain, Contract & Fastify API Route Tests
+        run: |
+          npx vitest run \
+            packages/domain/tests/ \
+            apps/api/tests/api-endpoints.test.ts \
+            apps/api/tests/api-route-rbac.test.ts \
+            apps/api/tests/auth-membership-tenant.test.ts \
+            apps/api/tests/email-takeover-prevention.test.ts \
+            apps/api/tests/m1-audit-chain.test.ts \
+            apps/api/tests/m1-consent-ledger.test.ts \
+            apps/api/tests/m1-tenancy-rls.test.ts \
+            apps/api/tests/prod-fail-closed.test.ts \
+            apps/api/tests/consent-adversarial.test.ts
+        env:
+          NODE_ENV: test
+          SUPABASE_URL: https://qshujrddrzoemlzmleru.supabase.co
+
+  isolated-postgres-integration:
+    name: Isolated PostgreSQL 17 RLS & Migration Verification
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci_test_admin_password
+          POSTGRES_DB: pramaan_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install Dependencies (Frozen Lockfile)
+        run: npm ci
+
+      - name: Execute Idempotent Migration Runner on Clean PostgreSQL 17
+        run: node scripts/migrate-supabase.mjs
+        env:
+          DATABASE_URL_ADMIN: postgresql://postgres:ci_test_admin_password@localhost:5432/pramaan_test
+
+      - name: Verify Migration Idempotency Rerun on Clean DB
+        run: node scripts/migrate-supabase.mjs
+        env:
+          DATABASE_URL_ADMIN: postgresql://postgres:ci_test_admin_password@localhost:5432/pramaan_test
+
+      - name: Apply Deterministic Multi-Tenant Seed
+        run: node scripts/seed-demo.mjs
+        env:
+          DATABASE_URL_ADMIN: postgresql://postgres:ci_test_admin_password@localhost:5432/pramaan_test
+
+      - name: Run Migration Runner & Ledger Automated Tests
+        run: npx vitest run db/tests/migration-runner.test.ts
+        env:
+          DATABASE_URL_ADMIN: postgresql://postgres:ci_test_admin_password@localhost:5432/pramaan_test

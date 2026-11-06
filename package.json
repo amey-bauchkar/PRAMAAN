@@ -12,7 +12,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "lint": "echo 'Linting checks...'",
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "migrate": "node scripts/migrate-supabase.mjs",
+    "seed": "node scripts/seed-demo.mjs",
     "dev:api": "npm run dev --workspace=@pramaan/api",
     "dev:web": "npm run dev --workspace=@pramaan/web",
     "dev:runner": "npm run dev --workspace=@pramaan/runner"

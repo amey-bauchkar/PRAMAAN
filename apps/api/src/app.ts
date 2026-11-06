@@ -14,6 +14,7 @@ import { IUserRepository, InMemoryUserRepository, PgUserRepository } from './rep
 import { getDbPool } from './db/pool.js';
 
 export interface AppOptions {
+  persistenceMode?: 'postgres' | 'in-memory';
   tenantRepository?: ITenantRepository;
   auditRepository?: IAuditRepository;
   consentRepository?: IConsentRepository;
@@ -25,11 +26,14 @@ export interface AppOptions {
   consentService?: ConsentService;
 }
 
-export function buildApp(opts: AppOptions = {}): FastifyInstance {
+export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistenceMode?: 'postgres' | 'in-memory' } {
   const isProduction = process.env.NODE_ENV === 'production';
 
   // Production Fail-Closed Guards: In-memory fallback and missing database/JWT credentials strictly prohibited
   if (isProduction) {
+    if (opts.persistenceMode === 'in-memory') {
+      throw new Error('FATAL: Production mode prohibits in-memory persistenceMode.');
+    }
     if (!process.env.DATABASE_URL) {
       throw new Error('FATAL: Production mode requires a valid DATABASE_URL. In-memory storage is prohibited.');
     }
@@ -37,10 +41,10 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
       opts.tenantStore || 
       opts.auditService || 
       opts.consentService ||
-      opts.tenantRepository instanceof InMemoryTenantRepository ||
-      opts.auditRepository instanceof InMemoryAuditRepository ||
-      opts.consentRepository instanceof InMemoryConsentRepository ||
-      opts.userRepository instanceof InMemoryUserRepository
+      (opts.tenantRepository && !(opts.tenantRepository instanceof PgTenantRepository)) ||
+      (opts.auditRepository && !(opts.auditRepository instanceof PgAuditRepository)) ||
+      (opts.consentRepository && !(opts.consentRepository instanceof PgConsentRepository)) ||
+      (opts.userRepository && !(opts.userRepository instanceof PgUserRepository))
     ) {
       throw new Error('FATAL: Production mode prohibits in-memory repositories or mock stores.');
     }
@@ -49,10 +53,38 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
     }
   }
 
-  const app = Fastify({ logger: false });
+  // Explicit persistence mode selection
+  if (opts.persistenceMode === 'postgres' && !process.env.DATABASE_URL) {
+    throw new Error('FATAL: persistenceMode is set to \'postgres\' but DATABASE_URL is not configured.');
+  }
 
-  // Resolve repositories (PostgreSQL if DATABASE_URL configured and not explicitly using memory/legacy opts)
-  const isPostgresConfigured = Boolean(process.env.DATABASE_URL) && !opts.tenantStore && !opts.tenantRepository;
+  // Resolve active persistence mode:
+  let activePersistenceMode: 'postgres' | 'in-memory';
+  if (isProduction) {
+    activePersistenceMode = 'postgres';
+  } else if (opts.persistenceMode) {
+    activePersistenceMode = opts.persistenceMode;
+  } else if (
+    opts.tenantStore || 
+    opts.auditService || 
+    opts.consentService ||
+    opts.tenantRepository instanceof InMemoryTenantRepository ||
+    opts.auditRepository instanceof InMemoryAuditRepository ||
+    opts.consentRepository instanceof InMemoryConsentRepository ||
+    opts.userRepository instanceof InMemoryUserRepository
+  ) {
+    activePersistenceMode = 'in-memory';
+  } else if (process.env.DATABASE_URL) {
+    activePersistenceMode = 'postgres';
+  } else {
+    activePersistenceMode = 'in-memory';
+  }
+
+  const app = Fastify({ logger: false }) as FastifyInstance & { persistenceMode?: 'postgres' | 'in-memory' };
+  app.persistenceMode = activePersistenceMode;
+
+  // Resolve repositories based on active persistence mode
+  const usePostgres = activePersistenceMode === 'postgres';
 
   let tenantRepo: ITenantRepository;
   let auditRepo: IAuditRepository;
@@ -63,7 +95,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
     tenantRepo = opts.tenantRepository;
   } else if (opts.tenantStore) {
     tenantRepo = new InMemoryTenantRepository(opts.tenantStore);
-  } else if (isPostgresConfigured) {
+  } else if (usePostgres) {
     tenantRepo = new PgTenantRepository(getDbPool());
   } else {
     tenantRepo = new InMemoryTenantRepository(new TenantStore());
@@ -73,7 +105,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
     auditRepo = opts.auditRepository;
   } else if (opts.auditService) {
     auditRepo = new InMemoryAuditRepository(opts.auditService);
-  } else if (isPostgresConfigured) {
+  } else if (usePostgres) {
     auditRepo = new PgAuditRepository(getDbPool());
   } else {
     auditRepo = new InMemoryAuditRepository(new AuditService());
@@ -83,7 +115,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
     consentRepo = opts.consentRepository;
   } else if (opts.consentService) {
     consentRepo = new InMemoryConsentRepository(opts.consentService);
-  } else if (isPostgresConfigured) {
+  } else if (usePostgres) {
     consentRepo = new PgConsentRepository(getDbPool(), auditRepo);
   } else {
     const rawAudit = opts.auditService ?? new AuditService();
@@ -92,7 +124,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
 
   if (opts.userRepository) {
     userRepo = opts.userRepository;
-  } else if (isPostgresConfigured) {
+  } else if (usePostgres) {
     userRepo = new PgUserRepository(getDbPool());
   } else {
     userRepo = new InMemoryUserRepository();
@@ -121,6 +153,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
     return {
       status: 'healthy',
       service: 'pramaan-api',
+      persistenceMode: activePersistenceMode,
       timestamp: new Date().toISOString()
     };
   });
@@ -234,19 +267,29 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
 
     if (context.role === 'student') {
       const grant = await consentRepo.getGrant(context, body.grantId);
-      if (grant) {
+      if (!grant) {
+        return reply.status(404).send({ error: 'Grant not found.' });
+      }
+      const isDirectUserMatch = grant.studentId === context.userId;
+      let isStudentRecMatch = false;
+      if (!isDirectUserMatch) {
         const studentRec = await tenantRepo.getStudent(context, grant.studentId);
-        if (studentRec && studentRec.userId !== context.userId) {
-          return reply.status(403).send({
-            error: 'FORBIDDEN_OWNERSHIP: Students may only revoke their own consent grants.'
-          });
+        if (studentRec && studentRec.userId === context.userId) {
+          isStudentRecMatch = true;
         }
+      }
+
+      if (!isDirectUserMatch && !isStudentRecMatch) {
+        return reply.status(403).send({
+          error: 'FORBIDDEN_OWNERSHIP: Students may only revoke their own consent grants.'
+        });
       }
     }
 
     const result = await consentRepo.revokeConsent(context, body.grantId, body.reason);
     if (!result.success) {
-      return reply.status(400).send(result);
+      const statusCode = result.error === 'Grant not found.' ? 404 : 400;
+      return reply.status(statusCode).send(result);
     }
 
     return reply.send(result);

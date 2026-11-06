@@ -28,3 +28,4 @@ CREATE POLICY tenant_isolation_organizations ON organizations
       OR id = current_app_parent_org_id()
       OR parent_id = current_app_org_id()
     );
+

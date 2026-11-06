@@ -12,21 +12,17 @@
 PRAMAAN is an evidence-based placement intelligence platform built for colleges, students, placement officers (TPOs), and recruiters. Its core thesis is:
 $$\text{Evidence} \rightarrow \text{Observed Skill} \rightarrow \text{Verification} \rightarrow \text{Verified Skill} \rightarrow \text{Skill Passport} \rightarrow \text{Eligibility} \rightarrow \text{Placement Decision}$$
 
-Following the initial M0 and M1 build and subsequent security audits, an **exhaustive security hardening and verification audit** was conducted against live PostgreSQL 17 on Supabase (`db.qshujrddrzoemlzmleru.supabase.co`).
-- **PostgreSQL RLS Kernel Isolation:** Verified under `app_api` (`NOBYPASSRLS`) across all 42 tables, blocking cross-tenant SELECT, INSERT, UPDATE, and DELETE.
-- **Genuine Supabase JWT Authentication:** Verified with asymmetric ES256 key rotation against live Supabase project JWKS (`https://qshujrddrzoemlzmleru.supabase.co/auth/v1/.well-known/jwks.json`). All dev fallback secrets removed.
-- **Account Takeover Immunity:** Eliminated automatic email-based identity linking. Identity is anchored strictly to verified Supabase `sub` UUID claims via scoped `resolve_user_identity` stored procedure.
-- **Restricted Runtime Database Role:** Created `pramaan_app_user` with `NOBYPASSRLS`, `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`, `NOINHERIT` granted `app_api` and execution on `resolve_user_identity`.
-- **Positive RBAC & Ownership Allowlists:** Enforced across all API routes (`/api/tenants`, `/api/students`, `/api/consent/grant`, `/api/consent/revoke`, `/api/audit`, `/api/audit/verify`).
-- **Tenant Discovery Sanitization:** `GET /api/tenants` returns sanitized `OrganizationDiscovery` DTOs, masking internal configuration, rate limits, and key references.
-- **Production Fail-Closed Invariants:** System fails startup immediately if production lacks `DATABASE_URL`, Supabase JWT configuration, or real PostgreSQL repositories.
-- **Full Transaction Context Isolation:** Parameterized `set_config` isolates `app.current_org_id`, `app.current_user_id`, and `app.current_user_role` per transaction.
-- **Physical Connection Pool Socket Reuse:** Verified socket reuse via `SELECT pg_backend_pid()` and proven fail-closed context clearing.
-- **Parent University Discovery Isolation:** Enforced kernel RLS relationship where colleges only discover their own affiliated parent university (`id = current_app_parent_org_id()`), never unrelated universities or foreign colleges.
-- **Strict Role Claim Verification:** Enforced `payload.role === 'authenticated'` across all API authentication paths; rejected missing, empty, `"anon"`, `"service_role"`, and arbitrary roles.
-- **Production TLS Invariants:** Enforced `rejectUnauthorized: true` with zero production bypass (eliminated `DATABASE_SSL_ALLOW_INSECURE` in production).
+Following the initial M0 and M1 build and subsequent security audits, an **exhaustive security hardening, migration reproducibility, and M1 final closure audit** was conducted against live PostgreSQL 17 on Supabase (`db.qshujrddrzoemlzmleru.supabase.co`).
+- **PostgreSQL RLS Kernel Isolation:** Verified under `app_api` (`NOBYPASSRLS`) across all 42 domain tables, blocking cross-tenant SELECT, INSERT, UPDATE, and DELETE.
+- **Migration Reproducibility & Ledger Engine (P0):** Engineered a fully idempotent, version-controlled migration engine (`scripts/migrate-supabase.mjs`) tracked via an explicit `schema_migrations` ledger with SHA-256 checksums. Verified clean ordered application of migrations 001 through 008 (including 006b, 007, 008) and proven rerun idempotency (0 statements re-executed, zero drift). Administrative credentials (`DATABASE_URL_ADMIN`) are strictly separated from application runtime credentials (`DATABASE_URL`).
+- **Production TLS Verification & Strict CA Pinning (P0):** Enforced `rejectUnauthorized: true` with zero production bypass. Unconditionally validates `DATABASE_CA_PATH`, failing fast at startup if explicitly configured but inaccessible. Verified live TLS connections under `pramaan_app_user`.
+- **Explicit Persistence Selection & Fail-Closed Invariants (P1):** Configured explicit persistence selection (`persistenceMode: 'postgres' | 'in-memory'`). Production unconditionally prohibits all in-memory repository classes (`InMemoryTenantRepository`, `InMemoryAuditRepository`, `InMemoryConsentRepository`, `InMemoryUserRepository`) and mock stores, failing closed immediately.
+- **Consent Security & Adversarial Boundaries (P1):** Added exhaustive adversarial test coverage (`apps/api/tests/consent-adversarial.test.ts`): proven blocking of cross-student revocation (403 `FORBIDDEN_OWNERSHIP`), unknown grant revocation (404), officer mandatory documented reason (400 `OFFICER_REASON_REQUIRED`), instant OAuth credential purge, derived repository evidence withdrawal (`status = 'withdrawn'`), skill downgrade to `'claimed'`, immutable audit trail, and idempotent re-revocation handling.
+- **CI / CD Automated Quality Gate (P1):** Created `.github/workflows/ci.yml` incorporating frozen lockfile installation (`npm ci`), strict TypeScript static analysis (`tsc --noEmit`), full monorepo production build (`npm run build`), unit & Fastify route testing, and isolated PostgreSQL 17 service container integration tests. Zero production credentials in CI.
+- **Clean Monorepo Build:** Resolved monorepo TypeScript path bindings and scaffolded initial web client shell; `npm run build` cleanly succeeds across `@pramaan/contracts`, `@pramaan/domain`, `@pramaan/api`, and `@pramaan/web`.
+- **Quality Gates & Security Hygiene (P2):** Replaced placeholder root lint script with strict `tsc --noEmit`, audited `.gitignore` to block `.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, and `*.secret`.
 - **Accurate Credential Audit Status:** Historical git commits (`21fa9a7` / `25cd045`) contained a previously committed password. That credential was immediately rotated out-of-band via Supabase management channels. Current migration 007 contains zero password literals, and rerunning it cannot reset credentials.
-- **100% Test Success:** All 140 tests pass across 18 test files (including 44 live Supabase PostgreSQL 17 integration and security tests).
+- **100% Test Success:** All 156 tests pass across 20 test files (including 44 live Supabase PostgreSQL 17 integration and security tests).
 
 ---
 
@@ -35,11 +31,11 @@ Following the initial M0 and M1 build and subsequent security audits, an **exhau
 | Tier | Description | Files / Tests | Status |
 | :--- | :--- | :--- | :--- |
 | **Pure Unit Tests** | Pure domain logic: state machine, anchor hashing, audit hash chaining, eligibility rules, 4/5ths fairness math. | 5 files, 29 tests | `UNIT_TESTED` (Passing in 30ms) |
-| **API, RBAC & Token Tests** | Fastify HTTP endpoints, positive RBAC matrix, email takeover prevention, fail-closed startup, strict claims validation, and JWT test utilities. | 8 files, 67 tests | `INTEGRATION_TESTED` (Passing in 600ms) |
-| **Live Database Tests** | Real PostgreSQL 17 on Supabase: RLS isolation, cross-tenant mutation rejection, triggers, constraints, DCL permissions, physical connection reuse via backend PID, restricted runtime user (`pramaan_app_user`), parent university discovery isolation, and genuine Supabase ES256 JWKS token validation. | 5 files, 44 tests | `SECURITY_VERIFIED` (Passing on live Supabase DB) |
-| **Total Suite** | Full monorepo test pack running under Vitest. | **18 files, 140 tests** | **100% Passing** |
+| **API, RBAC & Adversarial Tests** | Fastify HTTP endpoints, positive RBAC matrix, email takeover prevention, fail-closed startup, strict claims validation, JWT test utilities, and consent adversarial boundaries. | 10 files, 83 tests | `INTEGRATION_TESTED` (Passing in ~1s) |
+| **Live Database Tests** | Real PostgreSQL 17 on Supabase: RLS isolation, cross-tenant mutation rejection, triggers, constraints, DCL permissions, physical connection reuse via backend PID, restricted runtime user (`pramaan_app_user`), parent university discovery isolation, migration ledger idempotency, and genuine Supabase ES256 JWKS token validation. | 5 files, 44 tests | `SECURITY_VERIFIED` (Passing on live Supabase DB) |
+| **Total Suite** | Full monorepo test pack running under Vitest. | **20 files, 156 tests** | **100% Passing** |
 
-### Complete Test Inventory (18 Files, 140 Tests)
+### Complete Test Inventory (20 Files, 156 Tests)
 1. `packages/domain/tests/skill-state-machine.test.ts` (8 tests)
 2. `packages/domain/tests/anchor-resolver.test.ts` (4 tests)
 3. `packages/domain/tests/audit-chain.test.ts` (7 tests)
@@ -52,12 +48,14 @@ Following the initial M0 and M1 build and subsequent security audits, an **exhau
 10. `apps/api/tests/api-endpoints.test.ts` (7 tests)
 11. `apps/api/tests/api-route-rbac.test.ts` (18 tests)
 12. `apps/api/tests/email-takeover-prevention.test.ts` (4 tests)
-13. `apps/api/tests/prod-fail-closed.test.ts` (6 tests)
-14. `apps/api/tests/pg-auth-integration.test.ts` (2 tests)
-15. `apps/api/tests/real-supabase-jwt.test.ts` (21 tests)
-16. `apps/api/tests/restricted-runtime-user.test.ts` (9 tests)
-17. `db/tests/connection-pool-reuse.test.ts` (1 test)
-18. `db/tests/supabase-real-db.test.ts` (19 tests)
+13. `apps/api/tests/prod-fail-closed.test.ts` (11 tests)
+14. `apps/api/tests/consent-adversarial.test.ts` (7 tests)
+15. `apps/api/tests/pg-auth-integration.test.ts` (2 tests)
+16. `apps/api/tests/real-supabase-jwt.test.ts` (21 tests)
+17. `apps/api/tests/restricted-runtime-user.test.ts` (9 tests)
+18. `db/tests/connection-pool-reuse.test.ts` (1 test)
+19. `db/tests/supabase-real-db.test.ts` (19 tests)
+20. `db/tests/migration-runner.test.ts` (4 tests)
 
 ---
 

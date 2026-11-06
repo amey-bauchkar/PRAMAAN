@@ -12,19 +12,33 @@ export function resolveSslConfig(connectionString?: string): boolean | pg.Connec
   // 1. Resolve CA certificate from env var or certificate file
   let ca: string | undefined = process.env.DATABASE_CA_CERT;
   if (!ca) {
-    const candidates = [
-      process.env.DATABASE_CA_PATH,
-      'certs/supabase-ca.crt',
-      'prod-ca-2021.crt',
-      '../../certs/supabase-ca.crt'
-    ].filter(Boolean) as string[];
+    if (process.env.DATABASE_CA_PATH) {
+      if (!fs.existsSync(process.env.DATABASE_CA_PATH)) {
+        throw new Error(
+          `DATABASE_CA_PATH is configured ('${process.env.DATABASE_CA_PATH}') but file does not exist or is inaccessible.`
+        );
+      }
+      try {
+        ca = fs.readFileSync(process.env.DATABASE_CA_PATH, 'utf8');
+      } catch (err: any) {
+        throw new Error(
+          `DATABASE_CA_PATH is configured ('${process.env.DATABASE_CA_PATH}') but could not be read: ${err.message}`
+        );
+      }
+    } else {
+      const candidates = [
+        'certs/supabase-ca.crt',
+        'prod-ca-2021.crt',
+        '../../certs/supabase-ca.crt'
+      ];
 
-    for (const candidate of candidates) {
-      if (fs.existsSync(candidate)) {
-        try {
-          ca = fs.readFileSync(candidate, 'utf8');
-          break;
-        } catch {}
+      for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) {
+          try {
+            ca = fs.readFileSync(candidate, 'utf8');
+            break;
+          } catch {}
+        }
       }
     }
   }

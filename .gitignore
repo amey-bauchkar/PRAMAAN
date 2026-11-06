@@ -8,10 +8,18 @@ build/
 .next/
 out/
 
-# Environment variables
+# Environment variables and secrets
 .env
-.env*.local
+.env.*
 !.env.example
+
+# Cryptographic keys and secrets
+*.pem
+*.key
+*.p12
+*.pfx
+*.secret
+!certs/supabase-ca.crt
 
 # Logs
 logs/

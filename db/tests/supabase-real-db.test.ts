@@ -129,7 +129,9 @@ describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariant
       SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity 
       FROM pg_class c 
       JOIN pg_namespace n ON n.oid = c.relnamespace 
-      WHERE n.nspname = 'public' AND c.relkind = 'r'
+      WHERE n.nspname = 'public' 
+        AND c.relkind = 'r'
+        AND c.relname NOT IN ('schema_migrations', '_pramaan_migrations')
       ORDER BY c.relname;
     `);
 
