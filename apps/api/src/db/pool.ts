@@ -1,7 +1,62 @@
 import pg from 'pg';
+import fs from 'fs';
 import { SessionContext } from '@pramaan/contracts';
 
 let poolInstance: pg.Pool | null = null;
+
+export function resolveSslConfig(connectionString?: string): boolean | pg.ConnectionConfig['ssl'] {
+  if (!connectionString || connectionString.includes('localhost') || connectionString.includes('127.0.0.1')) {
+    return false;
+  }
+
+  // 1. Resolve CA certificate from env var or certificate file
+  let ca: string | undefined = process.env.DATABASE_CA_CERT;
+  if (!ca) {
+    const candidates = [
+      process.env.DATABASE_CA_PATH,
+      'certs/supabase-ca.crt',
+      'prod-ca-2021.crt',
+      '../../certs/supabase-ca.crt'
+    ].filter(Boolean) as string[];
+
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate)) {
+        try {
+          ca = fs.readFileSync(candidate, 'utf8');
+          break;
+        } catch {}
+      }
+    }
+  }
+
+  // 2. Extract hostname for SNI / servername verification
+  let servername: string | undefined;
+  try {
+    servername = new URL(connectionString).hostname;
+  } catch {}
+
+  // 3. Configure strict TLS verification if CA certificate is present or in production
+  if (ca) {
+    return {
+      rejectUnauthorized: true,
+      ca,
+      servername
+    };
+  }
+
+  // If in production without explicit CA, enforce rejectUnauthorized: true
+  if (process.env.NODE_ENV === 'production' && process.env.DATABASE_SSL_ALLOW_INSECURE !== 'true') {
+    return {
+      rejectUnauthorized: true,
+      servername
+    };
+  }
+
+  // Development/testing fallback when CA certificate is not yet provisioned
+  return {
+    rejectUnauthorized: false
+  };
+}
 
 export function getDbPool(): pg.Pool {
   if (!poolInstance) {
@@ -14,13 +69,14 @@ export function getDbPool(): pg.Pool {
       if (process.env.NODE_ENV === 'production') {
         throw new Error('DATABASE_URL environment variable is mandatory in production environment.');
       }
-      // For local development fallback or testing
       console.warn('DATABASE_URL is not set. Database pool will not be available.');
     }
 
+    const ssl = resolveSslConfig(connectionString);
+
     poolInstance = new pg.Pool({
       connectionString: connectionString || undefined,
-      ssl: connectionString?.includes('localhost') ? false : { rejectUnauthorized: false },
+      ssl,
       max: 10,
       idleTimeoutMillis: 10000,
       connectionTimeoutMillis: 5000
@@ -46,7 +102,7 @@ export async function closeDbPool(): Promise<void> {
  * 1. Acquires a client from the connection pool.
  * 2. Begins transaction (BEGIN).
  * 3. Switches role to app_api (SET LOCAL ROLE app_api).
- * 4. Sets tenant context (SET LOCAL "app.current_org_id" = $1).
+ * 4. Sets tenant context safely using parameterized set_config(name, value, is_local).
  * 5. Executes the callback.
  * 6. Commits on success, rolls back on error.
  * 7. Safely releases client back to the pool in a finally block.
@@ -89,4 +145,3 @@ export async function withTenantTransaction<T>(
     client.release();
   }
 }
-

@@ -137,7 +137,11 @@ describe('PRAMAAN Fastify HTTP Endpoints: Authentication & RBAC Authorization', 
     expect(authRes.statusCode).toBe(200);
     const json = JSON.parse(authRes.payload);
     expect(Array.isArray(json)).toBe(true);
-    expect(json.length).toBeGreaterThanOrEqual(2);
+    // Under tenant isolation (P0-3), an Apex officer only discovers Apex, never foreign college Zenith
+    expect(json.length).toBe(1);
+    expect(json[0].id).toBe(apexOrgId);
+    expect(json[0].name).toBe('Apex Institute of Technology');
+    expect(json.some((t: any) => t.id === zenithOrgId)).toBe(false);
   });
 
   it('3. GET /api/students enforces role isolation (Student sees only self, Officer sees cohort)', async () => {

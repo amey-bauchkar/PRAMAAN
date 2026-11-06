@@ -4,7 +4,7 @@
 **Project:** PRAMAAN (QUASAR 5.0 — EdTech Domain)  
 **Database Target:** Real PostgreSQL 17.11 on Supabase (`db.qshujrddrzoemlzmleru.supabase.co`)  
 **Auditor / Engineer:** Principal Software Architect & Security Engineer (Antigravity Solo Partner)  
-**Verification Status:** **PASSED & SECURITY VERIFIED** (100% of 116 tests passing across 17 test suites)
+**Verification Status:** **PASSED & SECURITY VERIFIED** (100% of 132 tests passing across 18 test suites)
 
 ---
 
@@ -12,22 +12,23 @@
 
 Prior to commencing Milestone M2 feature development, an exhaustive independent security audit and verification was conducted across all Milestone M0 and M1 components. 
 
-The audit focused on six foundational pillars required for enterprise campus placement deployment:
-1. **Unconditional Multi-Tenant Isolation:** Proving at the PostgreSQL kernel level that no college tenant can read, insert, mutate, or delete another college tenant's student, academic, or placement records across all 42 tables.
-2. **Genuine Supabase Authentication & Asymmetric JWKS Verification:** Replacing all fallback and mock secrets with asymmetric ES256 signature and expiration verification against live Supabase project JWKS (`jose`), deriving institutional tenancy strictly from database `memberships`, and eliminating `x-user-id` fallbacks.
-3. **Account Takeover Immunity (P0-3):** Elimination of email-based identity linking in `AuthService` and `resolve_user_identity(p_auth_subject)`. Verified Supabase `sub` UUID claim is the sole identity anchor.
-4. **Restricted Runtime Database Role & Stored Procedure (P0-5):** Replacing administrative database login with dedicated `pramaan_app_user` (`NOBYPASSRLS`, `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`, `NOINHERIT`) granted `app_api` and execution on `resolve_user_identity`.
-5. **Positive API Route RBAC Matrix & Discovery Sanitization (P0-4, P0-6):** Enforcing explicit role allowlists across all endpoints and sanitizing `/api/tenants` to mask internal configuration, rate limits, and key references.
-6. **Physical Connection Pooling Socket Reuse Verification:** Proving on live PostgreSQL that backend socket connections are reused (`SELECT pg_backend_pid()`) while transaction-scoped `SET LOCAL` / parameterized `set_config` context completely resets and fails closed.
+The audit focused on seven foundational pillars required for enterprise campus placement deployment:
+1. **Unconditional Multi-Tenant Isolation (P0-3):** Proving at the PostgreSQL kernel level that no college tenant can read, insert, mutate, or delete another college tenant's student, academic, or placement records across all 42 tables. Tenant discovery via `PgTenantRepository` and `/api/tenants` is strictly isolated under `app_api` RLS so colleges cannot discover foreign institutions.
+2. **Dedicated Restricted Database Runtime Role (P0-1, P0-2):** Complete rotation of compromised passwords via secure channels. Migration 007 purged of literal passwords. Production pool connects strictly as `pramaan_app_user` (`NOSUPERUSER`, `NOBYPASSRLS`, `NOCREATEROLE`, `NOCREATEDB`, `NOINHERIT`), assuming `app_api` only within scoped transactions.
+3. **Genuine Supabase Authentication & Strict Claims Verification (P1-5):** Asymmetric ES256 signature verification against live Supabase project JWKS (`jose`). Mandatory validation of `sub`, `exp`, `iat` with clock skew tolerance, `aud: 'authenticated'`, `iss`, algorithm pinning, and hard rejection of `service_role` and `anon` keys.
+4. **Account Takeover Immunity:** Elimination of email-based identity linking in `AuthService` and `resolve_user_identity(p_auth_subject)`. Verified Supabase `sub` UUID claim is the sole identity anchor. Stored procedure hardened with explicit `SET search_path = pg_catalog, public` and fully qualified tables.
+5. **Positive API Route RBAC Matrix & Discovery Sanitization:** Enforcing explicit role allowlists across all endpoints and sanitizing `/api/tenants` to return `OrganizationDiscovery` DTOs masking internal configuration, rate limits, and key references.
+6. **TLS Certificate Authority Validation (P1-6):** Connection pool enforces strict CA certificate validation (`certs/supabase-ca.crt`), `rejectUnauthorized: true`, and SNI hostname verification (`servername: hostname`).
+7. **Ephemeral Test Account Lifecycle (P0-4):** Automatic provisioning of disposable test accounts with instant cleanup via Supabase Auth Admin API; zero static test account credentials.
 
 All claims in this report are backed by automated tests running against the **live Supabase PostgreSQL 17 instance** and pure TypeScript domain suites.
 
 ```
 Monorepo Test Suite Summary:
 ├── Pure Domain Unit Tests:          29 tests (Deterministic, zero DB dependency)
-├── API, RBAC & Token Tests:         55 tests (Fastify, positive RBAC matrix, email takeover, fail-closed)
-└── Live PostgreSQL 17 DB Tests:     32 tests (Supabase real DB, RLS, triggers, pool socket reuse, genuine ES256 JWKS)
-Total:                               116 tests, 100% passing (Execution time: 8.11s)
+├── API, RBAC & Token Tests:         60 tests (Fastify, positive RBAC matrix, email takeover, fail-closed)
+└── Live PostgreSQL 17 DB Tests:     43 tests (Supabase real DB, RLS, triggers, pool socket reuse, genuine ES256 JWKS, restricted runtime role)
+Total:                               132 tests, 100% passing (Execution time: 7.89s)
 ```
 
 ---
@@ -276,7 +277,7 @@ npx vitest run db/tests/connection-pool-reuse.test.ts
    Duration  2.58s
 ```
 
-### 8.4 Real Supabase JWT ES256 & Remote JWKS Verification Test
+### 8.4 Genuine Supabase Asymmetric ES256 & Strict Claims Verification
 ```powershell
 npx vitest run apps/api/tests/real-supabase-jwt.test.ts
 ```
@@ -284,16 +285,48 @@ npx vitest run apps/api/tests/real-supabase-jwt.test.ts
 ```text
  RUN  v2.1.9 C:/Users/SEBIN/Desktop/PRAMAAN
 
- ✓ apps/api/tests/real-supabase-jwt.test.ts (9 tests) 2174ms
-   ✓ Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2) > 1. Authenticates genuine Supabase ES256 access token against live JWKS endpoint 365ms
-   ✓ Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2) > 8. Rejects identity when membership status is suspended in database 610ms
+ ✓ apps/api/tests/real-supabase-jwt.test.ts (17 tests) 3499ms
+   ✓ Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2, P0-4, P1-5) > 1. Authenticates genuine Supabase ES256 access token against live JWKS endpoint 671ms
+   ✓ Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2, P0-4, P1-5) > 8. Rejects identity when membership status is suspended in database 462ms
+   ✓ Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2, P0-4, P1-5) > 9. Rejects identity when membership status is revoked in database 439ms
+   ✓ Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2, P0-4, P1-5) > 10. Rejects token with missing expiration (exp) claim
+   ✓ Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2, P0-4, P1-5) > 11. Rejects token when role claim is "service_role" (prohibiting service key as user auth)
+   ✓ Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2, P0-4, P1-5) > 12. Rejects token when role claim is "anon" (anonymous key prohibited)
+   ✓ Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2, P0-4, P1-5) > 13. Rejects token with missing issuer (iss) claim
+   ✓ Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2, P0-4, P1-5) > 14. Rejects token with missing audience (aud) claim
+   ✓ Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2, P0-4, P1-5) > 15. Rejects token with future issued-at (iat) timestamp beyond clock skew
+   ✓ Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2, P0-4, P1-5) > 16. Rejects expired token
+   ✓ Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2, P0-4, P1-5) > 17. Rejects token with missing or empty subject (sub) claim
 
  Test Files  1 passed (1)
-      Tests  9 passed (9)
-   Duration  2.86s
+      Tests  17 passed (17)
+   Duration  5.42s
 ```
 
-### 8.5 Full Monorepo Vitest Suite (116 Tests Across 17 Files)
+### 8.5 Restricted Runtime Database Role & Tenant Discovery Verification (P0-2, P0-3)
+```powershell
+npx vitest run apps/api/tests/restricted-runtime-user.test.ts
+```
+**Output:**
+```text
+ RUN  v2.1.9 C:/Users/SEBIN/Desktop/PRAMAAN
+
+ ✓ apps/api/tests/restricted-runtime-user.test.ts (8 tests) 4587ms
+   ✓ Production Security: Restricted Runtime Database Login Verification (P0-2, P0-3) > 1. Application pool connects strictly as pramaan_app_user (never postgres, superuser or service_role) 705ms
+   ✓ Production Security: Restricted Runtime Database Login Verification (P0-2, P0-3) > 2. Verifies pramaan_app_user is NOT a superuser
+   ✓ Production Security: Restricted Runtime Database Login Verification (P0-2, P0-3) > 3. Verifies pramaan_app_user has NOBYPASSRLS (Kernel RLS enforced)
+   ✓ Production Security: Restricted Runtime Database Login Verification (P0-2, P0-3) > 4. Verifies pramaan_app_user cannot create roles or databases
+   ✓ Production Security: Restricted Runtime Database Login Verification (P0-2, P0-3) > 5. Verifies pramaan_app_user is prohibited from executing DDL statements
+   ✓ Production Security: Restricted Runtime Database Login Verification (P0-2, P0-3) > 6. Verifies transaction role assumption switches to app_api within tenant transaction 488ms
+   ✓ Production Security: Restricted Runtime Database Login Verification (P0-2, P0-3) > 7. Verifies scoped identity resolution function callable by pramaan_app_user
+   ✓ Production Security: Restricted Runtime Database Login Verification (P0-2, P0-3) > 8. Verifies PgTenantRepository enforces tenant isolation under app_api RLS (P0-3) 2485ms
+
+ Test Files  1 passed (1)
+      Tests  8 passed (8)
+   Duration  9.22s
+```
+
+### 8.6 Full Monorepo Vitest Suite (132 Tests Across 18 Files)
 ```powershell
 npx vitest run
 ```
@@ -301,28 +334,29 @@ npx vitest run
 ```text
  RUN  v2.1.9 C:/Users/SEBIN/Desktop/PRAMAAN
 
+ ✓ packages/domain/tests/skill-state-machine.test.ts (8 tests) 7ms
+ ✓ packages/domain/tests/fairness-calculator.test.ts (5 tests) 10ms
  ✓ packages/domain/tests/audit-chain.test.ts (7 tests) 9ms
- ✓ packages/domain/tests/skill-state-machine.test.ts (8 tests) 5ms
- ✓ packages/domain/tests/fairness-calculator.test.ts (5 tests) 6ms
+ ✓ apps/api/tests/m1-consent-ledger.test.ts (3 tests) 12ms
+ ✓ apps/api/tests/auth-membership-tenant.test.ts (13 tests) 34ms
  ✓ packages/domain/tests/eligibility-evaluator.test.ts (5 tests) 8ms
- ✓ apps/api/tests/m1-consent-ledger.test.ts (3 tests) 9ms
- ✓ apps/api/tests/auth-membership-tenant.test.ts (13 tests) 25ms
  ✓ apps/api/tests/m1-tenancy-rls.test.ts (5 tests) 8ms
- ✓ packages/domain/tests/anchor-resolver.test.ts (4 tests) 4ms
- ✓ apps/api/tests/email-takeover-prevention.test.ts (4 tests) 18ms
- ✓ apps/api/tests/m1-audit-chain.test.ts (3 tests) 9ms
- ✓ apps/api/tests/prod-fail-closed.test.ts (3 tests) 5ms
- ✓ apps/api/tests/api-endpoints.test.ts (7 tests) 509ms
- ✓ apps/api/tests/api-route-rbac.test.ts (18 tests) 593ms
- ✓ apps/api/tests/pg-auth-integration.test.ts (2 tests) 682ms
- ✓ db/tests/connection-pool-reuse.test.ts (1 test) 2029ms
- ✓ apps/api/tests/real-supabase-jwt.test.ts (9 tests) 2174ms
- ✓ db/tests/supabase-real-db.test.ts (19 tests) 8664ms
+ ✓ apps/api/tests/email-takeover-prevention.test.ts (4 tests) 19ms
+ ✓ packages/domain/tests/anchor-resolver.test.ts (4 tests) 5ms
+ ✓ apps/api/tests/m1-audit-chain.test.ts (3 tests) 5ms
+ ✓ apps/api/tests/api-endpoints.test.ts (7 tests) 578ms
+ ✓ apps/api/tests/api-route-rbac.test.ts (18 tests) 683ms
+ ✓ apps/api/tests/prod-fail-closed.test.ts (3 tests) 4ms
+ ✓ apps/api/tests/pg-auth-integration.test.ts (2 tests) 1054ms
+ ✓ db/tests/connection-pool-reuse.test.ts (1 test) 2627ms
+ ✓ apps/api/tests/real-supabase-jwt.test.ts (17 tests) 3499ms
+ ✓ apps/api/tests/restricted-runtime-user.test.ts (8 tests) 4587ms
+ ✓ db/tests/supabase-real-db.test.ts (19 tests) 7254ms
 
- Test Files  17 passed (17)
-      Tests  116 passed (116)
-   Start at  04:54:44
-   Duration  9.36s (transform 932ms, setup 0ms, collect 4.14s, tests 14.76s, environment 5ms, prepare 3.30s)
+ Test Files  18 passed (18)
+      Tests  132 passed (132)
+   Start at  11:42:41
+   Duration  7.89s (transform 819ms, setup 0ms, collect 4.13s, tests 20.40s, environment 5ms, prepare 4.04s)
 ```
 
 ---

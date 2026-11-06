@@ -4,6 +4,7 @@ import { PgUserRepository } from '../src/repositories/user-repository.js';
 import { AuthService } from '../src/services/auth-service.js';
 import { JwtVerifier } from '../src/services/jwt-verifier.js';
 import { createTestToken } from '../src/testing/test-jwt-utils.js';
+import { runQuery } from '../../../scripts/supabase-runner.mjs';
 import pg from 'pg';
 
 describe('Real PostgreSQL Supabase Integration: Authenticated Identity & Membership Mapping', () => {
@@ -29,41 +30,29 @@ describe('Real PostgreSQL Supabase Integration: Authenticated Identity & Members
     jwtVerifier = new JwtVerifier(testSecret);
     authService = new AuthService({ jwtVerifier, userRepository: pgUserRepo });
 
-    // Seed test identity directly in PostgreSQL
-    const client = await pool.connect();
-    try {
-      await client.query(`
-        DELETE FROM memberships WHERE id = '${TEST_MEMBERSHIP}';
-        DELETE FROM users WHERE id = '${TEST_USER}';
-        DELETE FROM organizations WHERE id = '${TEST_COLLEGE}';
+    // Seed test identity directly in PostgreSQL via admin runner
+    await runQuery(`
+      DELETE FROM memberships WHERE id = '${TEST_MEMBERSHIP}';
+      DELETE FROM users WHERE id = '${TEST_USER}';
+      DELETE FROM organizations WHERE id = '${TEST_COLLEGE}';
 
-        INSERT INTO organizations (id, name, kind)
-        VALUES ('${TEST_COLLEGE}', 'Live Integration College', 'college');
+      INSERT INTO organizations (id, name, kind)
+      VALUES ('${TEST_COLLEGE}', 'Live Integration College', 'college');
 
-        INSERT INTO users (id, auth_subject, email, full_name)
-        VALUES ('${TEST_USER}', '${TEST_AUTH_SUB}', '${TEST_EMAIL}', 'Live Test Officer');
+      INSERT INTO users (id, auth_subject, email, full_name)
+      VALUES ('${TEST_USER}', '${TEST_AUTH_SUB}', '${TEST_EMAIL}', 'Live Test Officer');
 
-        INSERT INTO memberships (id, user_id, org_id, role, status)
-        VALUES ('${TEST_MEMBERSHIP}', '${TEST_USER}', '${TEST_COLLEGE}', 'officer', 'active');
-      `);
-    } finally {
-      client.release();
-    }
+      INSERT INTO memberships (id, user_id, org_id, role, status)
+      VALUES ('${TEST_MEMBERSHIP}', '${TEST_USER}', '${TEST_COLLEGE}', 'officer', 'active');
+    `);
   }, 20000);
 
   afterAll(async () => {
-    if (pool) {
-      const client = await pool.connect();
-      try {
-        await client.query(`
-          DELETE FROM memberships WHERE id = '${TEST_MEMBERSHIP}';
-          DELETE FROM users WHERE id = '${TEST_USER}';
-          DELETE FROM organizations WHERE id = '${TEST_COLLEGE}';
-        `);
-      } finally {
-        client.release();
-      }
-    }
+    await runQuery(`
+      DELETE FROM memberships WHERE id = '${TEST_MEMBERSHIP}';
+      DELETE FROM users WHERE id = '${TEST_USER}';
+      DELETE FROM organizations WHERE id = '${TEST_COLLEGE}';
+    `);
   }, 20000);
 
   it('Verifies authenticated JWT identity against live PostgreSQL users and memberships tables', async () => {

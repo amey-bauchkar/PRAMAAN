@@ -3,11 +3,14 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { JwtVerifier } from '../src/services/jwt-verifier.js';
 import { AuthService } from '../src/services/auth-service.js';
 import { PgUserRepository } from '../src/repositories/user-repository.js';
-import { getDbPool, closeDbPool } from '../src/db/pool.js';
+import { getDbPool } from '../src/db/pool.js';
+import { runQuery } from '../../../scripts/supabase-runner.mjs';
+import crypto from 'crypto';
 import pg from 'pg';
 
-describe('Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2)', () => {
+describe('Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2, P0-4, P1-5)', () => {
   let supabase: SupabaseClient;
+  let adminSupabase: SupabaseClient;
   let pool: pg.Pool;
   let pgUserRepo: PgUserRepository;
   let authService: AuthService;
@@ -15,6 +18,7 @@ describe('Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2)', ()
 
   let genuineAccessToken: string;
   let genuineAuthSubject: string;
+  let ephemeralUserId: string;
 
   const TEST_COLLEGE_ID = 'd0000000-0000-0000-0000-000000000001';
   const TEST_USER_ID = 'd1000000-0000-0000-0000-000000000001';
@@ -27,26 +31,49 @@ describe('Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2)', ()
 
     const supabaseUrl = process.env.SUPABASE_URL;
     const anonKey = process.env.SUPABASE_ANON_KEY;
-    if (!supabaseUrl || !anonKey) {
-      throw new Error('SUPABASE_URL and SUPABASE_ANON_KEY must be configured.');
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    if (!supabaseUrl || !anonKey || !serviceRoleKey) {
+      throw new Error('SUPABASE_URL, SUPABASE_ANON_KEY, and SUPABASE_SERVICE_ROLE_KEY must be configured.');
     }
 
     supabase = createClient(supabaseUrl, anonKey, {
       auth: { persistSession: false, autoRefreshToken: false }
     });
 
-    // Sign in test user to obtain authentic ES256 Supabase token
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email: 'test-real-auth@example.com',
-      password: 'TestPassword123!'
+    adminSupabase = createClient(supabaseUrl, serviceRoleKey, {
+      auth: { persistSession: false, autoRefreshToken: false }
     });
 
-    if (error || !data.session?.access_token || !data.user?.id) {
-      throw new Error(`Failed to obtain genuine Supabase token: ${error?.message}`);
+    // P0-4: Secure disposable test identity per run (zero hardcoded credentials)
+    const testUuid = crypto.randomUUID();
+    const tempEmail = `ephemeral-test-${testUuid}@pramaan-test.internal`;
+    const tempPassword = crypto.randomBytes(24).toString('base64') + '!Aa1';
+
+    const { data: createdUser, error: createError } = await adminSupabase.auth.admin.createUser({
+      email: tempEmail,
+      password: tempPassword,
+      email_confirm: true
+    });
+
+    if (createError || !createdUser.user) {
+      throw new Error(`Failed to create ephemeral test user: ${createError?.message}`);
     }
 
-    genuineAccessToken = data.session.access_token;
-    genuineAuthSubject = data.user.id;
+    ephemeralUserId = createdUser.user.id;
+    genuineAuthSubject = createdUser.user.id;
+
+    // Sign in ephemeral user to obtain authentic ES256 Supabase token
+    const { data: sessionData, error: signInError } = await supabase.auth.signInWithPassword({
+      email: tempEmail,
+      password: tempPassword
+    });
+
+    if (signInError || !sessionData.session?.access_token) {
+      throw new Error(`Failed to obtain genuine Supabase token: ${signInError?.message}`);
+    }
+
+    genuineAccessToken = sessionData.session.access_token;
 
     pool = getDbPool();
     pgUserRepo = new PgUserRepository(pool);
@@ -63,39 +90,37 @@ describe('Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2)', ()
       userRepository: pgUserRepo
     });
 
-    // Seed test identity and active membership in live PostgreSQL
-    const client = await pool.connect();
-    try {
-      await client.query(`
-        DELETE FROM memberships WHERE id = '${TEST_MEMBERSHIP_ID}';
-        DELETE FROM users WHERE id = '${TEST_USER_ID}';
-        DELETE FROM organizations WHERE id = '${TEST_COLLEGE_ID}';
+    // Seed test identity and active membership in live PostgreSQL via admin runner
+    await runQuery(`
+      DELETE FROM memberships WHERE id = '${TEST_MEMBERSHIP_ID}';
+      DELETE FROM users WHERE id = '${TEST_USER_ID}';
+      DELETE FROM organizations WHERE id = '${TEST_COLLEGE_ID}';
 
-        INSERT INTO organizations (id, name, kind)
-        VALUES ('${TEST_COLLEGE_ID}', 'Supabase Auth Verification College', 'college');
+      INSERT INTO organizations (id, name, kind)
+      VALUES ('${TEST_COLLEGE_ID}', 'Supabase Auth Verification College', 'college');
 
-        INSERT INTO users (id, auth_subject, email, full_name)
-        VALUES ('${TEST_USER_ID}', '${genuineAuthSubject}', 'test-real-auth@example.com', 'Supabase Real User');
+      INSERT INTO users (id, auth_subject, email, full_name)
+      VALUES ('${TEST_USER_ID}', '${genuineAuthSubject}', '${tempEmail}', 'Supabase Real User');
 
-        INSERT INTO memberships (id, user_id, org_id, role, status)
-        VALUES ('${TEST_MEMBERSHIP_ID}', '${TEST_USER_ID}', '${TEST_COLLEGE_ID}', 'officer', 'active');
-      `);
-    } finally {
-      client.release();
-    }
+      INSERT INTO memberships (id, user_id, org_id, role, status)
+      VALUES ('${TEST_MEMBERSHIP_ID}', '${TEST_USER_ID}', '${TEST_COLLEGE_ID}', 'officer', 'active');
+    `);
   }, 30000);
 
   afterAll(async () => {
-    if (pool) {
-      const client = await pool.connect();
+    // 1. Cleanup database test records
+    await runQuery(`
+      DELETE FROM memberships WHERE id = '${TEST_MEMBERSHIP_ID}';
+      DELETE FROM users WHERE id = '${TEST_USER_ID}';
+      DELETE FROM organizations WHERE id = '${TEST_COLLEGE_ID}';
+    `);
+
+    // 2. P0-4: Delete ephemeral user from Supabase Auth
+    if (adminSupabase && ephemeralUserId) {
       try {
-        await client.query(`
-          DELETE FROM memberships WHERE id = '${TEST_MEMBERSHIP_ID}';
-          DELETE FROM users WHERE id = '${TEST_USER_ID}';
-          DELETE FROM organizations WHERE id = '${TEST_COLLEGE_ID}';
-        `);
-      } finally {
-        client.release();
+        await adminSupabase.auth.admin.deleteUser(ephemeralUserId);
+      } catch (err) {
+        console.error('Error cleaning up ephemeral test user:', err);
       }
     }
   }, 30000);
@@ -119,7 +144,6 @@ describe('Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2)', ()
 
   it('2. Rejects genuine token with tampered signature segment', async () => {
     const parts = genuineAccessToken.split('.');
-    // Tamper signature segment
     const tamperedToken = `${parts[0]}.${parts[1]}.tampered_signature_payload`;
 
     const verifyRes = await jwtVerifier.verifyToken(tamperedToken);
@@ -150,7 +174,6 @@ describe('Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2)', ()
   });
 
   it('5. Rejects unsigned token ("alg": "none")', async () => {
-    // Unsigned base64 header {"alg":"none","typ":"JWT"} and payload {"sub":"fake","aud":"authenticated"}
     const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url');
     const payload = Buffer.from(JSON.stringify({ sub: genuineAuthSubject, aud: 'authenticated' })).toString('base64url');
     const unsignedToken = `${header}.${payload}.`;
@@ -178,42 +201,142 @@ describe('Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2)', ()
   });
 
   it('8. Rejects identity when membership status is suspended in database', async () => {
-    const client = await pool.connect();
-    try {
-      await client.query(`
-        UPDATE memberships SET status = 'suspended' WHERE id = '${TEST_MEMBERSHIP_ID}';
-      `);
+    await runQuery(`
+      UPDATE memberships SET status = 'suspended' WHERE id = '${TEST_MEMBERSHIP_ID}';
+    `);
 
+    try {
       const authRes = await authService.resolveContext(`Bearer ${genuineAccessToken}`);
       expect(authRes.authenticated).toBe(false);
       expect(authRes.statusCode).toBe(403);
       expect(authRes.error).toMatch(/Membership is suspended/);
     } finally {
-      // Restore active status
-      await client.query(`
+      await runQuery(`
         UPDATE memberships SET status = 'active' WHERE id = '${TEST_MEMBERSHIP_ID}';
       `);
-      client.release();
     }
   });
 
   it('9. Rejects identity when membership status is revoked in database', async () => {
-    const client = await pool.connect();
-    try {
-      await client.query(`
-        UPDATE memberships SET status = 'revoked' WHERE id = '${TEST_MEMBERSHIP_ID}';
-      `);
+    await runQuery(`
+      UPDATE memberships SET status = 'revoked' WHERE id = '${TEST_MEMBERSHIP_ID}';
+    `);
 
+    try {
       const authRes = await authService.resolveContext(`Bearer ${genuineAccessToken}`);
       expect(authRes.authenticated).toBe(false);
       expect(authRes.statusCode).toBe(403);
       expect(authRes.error).toMatch(/Membership is revoked/);
     } finally {
-      // Restore active status
-      await client.query(`
+      await runQuery(`
         UPDATE memberships SET status = 'active' WHERE id = '${TEST_MEMBERSHIP_ID}';
       `);
-      client.release();
     }
+  });
+
+  // --- P1-5 Strict Claims Validation Tests ---
+
+  it('10. Rejects token with missing expiration (exp) claim', async () => {
+    // Decode genuine token segments and tamper payload to remove exp
+    const parts = genuineAccessToken.split('.');
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    delete claims.exp;
+
+    // Use test signer without exp to simulate un-expiring token
+    const tamperedPayload = Buffer.from(JSON.stringify(claims)).toString('base64url');
+    const tokenWithoutExp = `${parts[0]}.${tamperedPayload}.${parts[2]}`;
+
+    const verifyRes = await jwtVerifier.verifyToken(tokenWithoutExp);
+    expect(verifyRes.valid).toBe(false);
+    expect(verifyRes.error).toBeDefined();
+  });
+
+  it('11. Rejects token when role claim is "service_role" (prohibiting service key as user auth)', async () => {
+    const parts = genuineAccessToken.split('.');
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    claims.role = 'service_role'; // Imposter service role
+
+    const tamperedPayload = Buffer.from(JSON.stringify(claims)).toString('base64url');
+    const serviceToken = `${parts[0]}.${tamperedPayload}.${parts[2]}`;
+
+    const verifyRes = await jwtVerifier.verifyToken(serviceToken);
+    expect(verifyRes.valid).toBe(false);
+  });
+
+  it('12. Rejects token when role claim is "anon" (anonymous key prohibited)', async () => {
+    const parts = genuineAccessToken.split('.');
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    claims.role = 'anon';
+
+    const tamperedPayload = Buffer.from(JSON.stringify(claims)).toString('base64url');
+    const anonToken = `${parts[0]}.${tamperedPayload}.${parts[2]}`;
+
+    const verifyRes = await jwtVerifier.verifyToken(anonToken);
+    expect(verifyRes.valid).toBe(false);
+  });
+
+  it('13. Rejects token with missing issuer (iss) claim', async () => {
+    const parts = genuineAccessToken.split('.');
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    delete claims.iss;
+
+    const tamperedPayload = Buffer.from(JSON.stringify(claims)).toString('base64url');
+    const tokenWithoutIss = `${parts[0]}.${tamperedPayload}.${parts[2]}`;
+
+    const verifyRes = await jwtVerifier.verifyToken(tokenWithoutIss);
+    expect(verifyRes.valid).toBe(false);
+    expect(verifyRes.error).toBeDefined();
+  });
+
+  it('14. Rejects token with missing audience (aud) claim', async () => {
+    const parts = genuineAccessToken.split('.');
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    delete claims.aud;
+
+    const tamperedPayload = Buffer.from(JSON.stringify(claims)).toString('base64url');
+    const tokenWithoutAud = `${parts[0]}.${tamperedPayload}.${parts[2]}`;
+
+    const verifyRes = await jwtVerifier.verifyToken(tokenWithoutAud);
+    expect(verifyRes.valid).toBe(false);
+    expect(verifyRes.error).toBeDefined();
+  });
+
+  it('15. Rejects token with future issued-at (iat) timestamp beyond clock skew', async () => {
+    const parts = genuineAccessToken.split('.');
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    claims.iat = Math.floor(Date.now() / 1000) + 7200; // 2 hours in the future
+
+    const tamperedPayload = Buffer.from(JSON.stringify(claims)).toString('base64url');
+    const tokenWithFutureIat = `${parts[0]}.${tamperedPayload}.${parts[2]}`;
+
+    const verifyRes = await jwtVerifier.verifyToken(tokenWithFutureIat);
+    expect(verifyRes.valid).toBe(false);
+    expect(verifyRes.error).toBeDefined();
+  });
+
+  it('16. Rejects expired token', async () => {
+    const parts = genuineAccessToken.split('.');
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    claims.exp = Math.floor(Date.now() / 1000) - 3600; // Expired 1 hour ago
+
+    const tamperedPayload = Buffer.from(JSON.stringify(claims)).toString('base64url');
+    const expiredToken = `${parts[0]}.${tamperedPayload}.${parts[2]}`;
+
+    const verifyRes = await jwtVerifier.verifyToken(expiredToken);
+    expect(verifyRes.valid).toBe(false);
+    expect(verifyRes.error).toBeDefined();
+  });
+
+  it('17. Rejects token with missing or empty subject (sub) claim', async () => {
+    const parts = genuineAccessToken.split('.');
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    delete claims.sub;
+
+    const tamperedPayload = Buffer.from(JSON.stringify(claims)).toString('base64url');
+    const tokenWithoutSub = `${parts[0]}.${tamperedPayload}.${parts[2]}`;
+
+    const verifyRes = await jwtVerifier.verifyToken(tokenWithoutSub);
+    expect(verifyRes.valid).toBe(false);
+    expect(verifyRes.error).toBeDefined();
   });
 });

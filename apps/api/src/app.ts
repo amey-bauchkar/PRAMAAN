@@ -143,7 +143,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance {
     const context = await resolveSessionContext(req, reply);
     if (!context) return;
 
-    return tenantRepo.listOrganizations();
+    return tenantRepo.listOrganizations(context);
   });
 
   // Students under RLS & Positive RBAC Allowlists

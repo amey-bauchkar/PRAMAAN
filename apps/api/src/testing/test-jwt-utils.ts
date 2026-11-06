@@ -6,8 +6,8 @@ export interface CreateTestTokenOptions {
   expiresIn?: string | number;
   customSecret?: string;
   alg?: string;
-  issuer?: string;
-  audience?: string;
+  issuer?: string | null;
+  audience?: string | null;
 }
 
 /**
@@ -22,15 +22,26 @@ export async function createTestToken(
   const key = new TextEncoder().encode(secret);
   const alg = options.alg || 'HS256';
 
-  const jwtBuilder = new SignJWT({
-    aud: options.audience !== undefined ? options.audience : 'authenticated',
+  const defaultIssuer = process.env.SUPABASE_URL
+    ? `${process.env.SUPABASE_URL.replace(/\/$/, '')}/auth/v1`
+    : undefined;
+  const issuer = options.issuer === null ? undefined : (options.issuer ?? defaultIssuer);
+
+  const payload: Record<string, unknown> = {
+    role: (claims as any).role !== undefined ? (claims as any).role : 'authenticated',
     ...claims
-  })
+  };
+
+  if (options.audience !== null) {
+    payload.aud = options.audience !== undefined ? options.audience : 'authenticated';
+  }
+
+  const jwtBuilder = new SignJWT(payload)
     .setProtectedHeader({ alg, typ: 'JWT' })
     .setIssuedAt();
 
-  if (options.issuer) {
-    jwtBuilder.setIssuer(options.issuer);
+  if (issuer) {
+    jwtBuilder.setIssuer(issuer);
   }
 
   if (options.expiresIn !== undefined) {

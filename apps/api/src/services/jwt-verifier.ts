@@ -63,16 +63,29 @@ export class JwtVerifier {
 
     this.audience = resolvedConfig.audience || 'authenticated';
 
+    // Resolve issuer
+    this.issuer = resolvedConfig.issuer;
+    if (!this.issuer) {
+      if (process.env.SUPABASE_URL) {
+        this.issuer = `${process.env.SUPABASE_URL.replace(/\/$/, '')}/auth/v1`;
+      }
+    }
+
+    // In production, never skip issuer validation
+    if (isProduction && !this.issuer) {
+      throw new Error(
+        'FATAL: Production JWT verification requires an explicit issuer (SUPABASE_URL or config.issuer). Never skip issuer validation in production.'
+      );
+    }
+
     if (jwksUri) {
       this.isAsymmetric = true;
       this.keyOrJwks = createRemoteJWKSet(new URL(jwksUri));
       this.allowedAlgorithms = resolvedConfig.allowedAlgorithms || ['ES256', 'RS256'];
-      this.issuer = resolvedConfig.issuer || (process.env.SUPABASE_URL ? `${process.env.SUPABASE_URL.replace(/\/$/, '')}/auth/v1` : undefined);
     } else if (jwtSecret) {
       this.isAsymmetric = false;
       this.keyOrJwks = new TextEncoder().encode(jwtSecret);
       this.allowedAlgorithms = resolvedConfig.allowedAlgorithms || ['HS256'];
-      this.issuer = resolvedConfig.issuer; // Only validate issuer for symmetric if explicitly requested
     } else {
       if (isProduction) {
         throw new Error(
@@ -88,8 +101,9 @@ export class JwtVerifier {
 
   /**
    * Cryptographically verifies a Supabase access token.
-   * Enforces algorithm restrictions, signature validation, expiry (exp), not-before (nbf),
-   * audience (default 'authenticated'), issuer (if configured), and mandatory 'sub' subject claim.
+   * Enforces algorithm restrictions, signature validation, expiry (exp), issued-at (iat),
+   * not-before (nbf), audience ('authenticated'), issuer (if configured/production),
+   * mandatory 'sub' subject claim, and rejects service_role/anon tokens.
    */
   public async verifyToken(token: string): Promise<JwtVerifyResult> {
     if (!token || typeof token !== 'string') {
@@ -126,8 +140,42 @@ export class JwtVerifier {
         payload = verifyRes.payload;
       }
 
+      // 1. Mandatory sub claim
       if (!payload.sub || typeof payload.sub !== 'string' || payload.sub.trim() === '') {
         return { valid: false, error: 'Missing or empty subject claim (sub) in token payload.' };
+      }
+
+      // 2. Mandatory exp claim
+      if (typeof payload.exp !== 'number') {
+        return { valid: false, error: 'Missing or invalid expiration claim (exp) in token payload.' };
+      }
+
+      // 3. Mandatory iat claim
+      if (typeof payload.iat !== 'number') {
+        return { valid: false, error: 'Missing or invalid issued-at claim (iat) in token payload.' };
+      }
+      const nowSec = Math.floor(Date.now() / 1000);
+      if (payload.iat > nowSec + 60) {
+        return { valid: false, error: 'Token issued-at claim (iat) is in the future.' };
+      }
+
+      // 4. Mandatory aud claim
+      if (!payload.aud) {
+        return { valid: false, error: 'Missing audience claim (aud) in token payload.' };
+      }
+
+      // 5. Mandatory iss claim when issuer is configured
+      if (this.issuer && !payload.iss) {
+        return { valid: false, error: 'Missing issuer claim (iss) in token payload.' };
+      }
+
+      // 6. Role check: Reject service_role or anonymous tokens from user-facing authentication
+      const tokenRole = (payload as any).role;
+      if (tokenRole && tokenRole !== 'authenticated') {
+        return {
+          valid: false,
+          error: `FORBIDDEN_TOKEN_ROLE: Token role '${tokenRole}' is not permitted for user authentication (service-role and anonymous tokens are rejected).`
+        };
       }
 
       return {

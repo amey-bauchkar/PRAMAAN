@@ -447,26 +447,33 @@ This ensures:
 ### 4.3 Restricted Runtime Application User & Pre-Tenant Identity Resolution (`007_restricted_runtime_role.sql`)
 To eliminate the use of administrative credentials for normal application runtime:
 1. **Dedicated Application Role:** `pramaan_app_user` created with `NOBYPASSRLS`, `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`, `NOINHERIT`.
-2. **Membership in `app_api`:** Role is granted `app_api`, restricting all queries to RLS policies.
+2. **Membership in `app_api`:** Role is granted `app_api`, restricting all queries to RLS policies. It assumes `app_api` within transaction boundaries using `SET LOCAL ROLE app_api;`.
 3. **Pre-Tenant Identity Resolution Stored Procedure:** Before tenant context is known, looking up user memberships is handled by a narrowly scoped `SECURITY DEFINER` function:
    ```sql
    CREATE OR REPLACE FUNCTION resolve_user_identity(p_auth_subject TEXT)
    RETURNS TABLE (...)
    SECURITY DEFINER
-   SET search_path = public
+   SET search_path = pg_catalog, public
    LANGUAGE plpgsql AS $$
    BEGIN
        RETURN QUERY
        SELECT u.id, u.auth_subject, u.email, u.full_name, u.created_at,
               m.id, m.org_id, m.department_id, m.role, m.status, m.created_at
-       FROM users u
-       LEFT JOIN memberships m ON m.user_id = u.id
+       FROM public.users u
+       LEFT JOIN public.memberships m ON m.user_id = u.id
        WHERE u.auth_subject = p_auth_subject;
    END;
    $$;
    ```
 4. **Account Takeover Immunity:** The procedure queries strictly by verified `auth_subject`. It never accepts or links accounts by email, immunizing the system against OAuth email collision / takeover attacks.
 5. **Least Privilege Execution:** Execution is revoked from `PUBLIC` and granted strictly to `pramaan_app_user` and `app_api`.
+6. **Secure Provisioning & Rotation Procedure:**
+   - Literal passwords are NEVER committed to migrations or SQL source code.
+   - When provisioning or rotating the runtime user password, the administrator executes an out-of-band administrative command via the secure Supabase console or management API:
+     ```sql
+     ALTER ROLE pramaan_app_user WITH PASSWORD '<HIGH_ENTROPY_RANDOM_SECRET>';
+     ```
+   - The password is saved strictly in the runtime environment secrets manager (or untracked `.env`), and re-running migration 007 alters role attributes without resetting or exposing the password.
 
 ### 4.4 Parameterized Transaction Context Isolation (`withTenantTransaction`)
 PostgreSQL does not permit `$1` parameters in `SET LOCAL` statements directly. Parameterization is achieved via `set_config` with `is_local = true`:
@@ -480,4 +487,21 @@ This guarantees:
 1. Zero SQL injection risk when binding tenant or user context variables.
 2. Transaction-scoped lifetime: variables reset automatically upon transaction commit or rollback.
 3. Fail-closed defense: connections returned to the pool clear their local settings immediately.
+
+### 4.5 Strict TLS CA Certificate Pinning & SNI Verification
+Direct and pooled connections to the remote database use strict TLS encryption:
+- CA root bundle is stored in `certs/supabase-ca.crt` (including the Supabase Root CA and intermediate chain).
+- `rejectUnauthorized: true` prevents untrusted or self-signed man-in-the-middle certificates.
+- SNI hostname verification (`servername: new URL(connectionString).hostname`) prevents MITM attacks routing to unauthorized hostnames.
+
+### 4.6 Tenant Discovery RLS Isolation
+To protect organizational privacy:
+- The `organizations` table is governed by kernel policy `tenant_isolation_organizations`:
+  ```sql
+  CREATE POLICY tenant_isolation_organizations ON organizations
+    FOR SELECT TO app_api
+    USING (id = current_app_org_id() OR kind = 'university');
+  ```
+- All discovery queries (`PgTenantRepository.listOrganizations` and `getOrganization`) execute strictly inside `withTenantTransaction` under `app_api`.
+- As verified on live PostgreSQL 17 (`apps/api/tests/restricted-runtime-user.test.ts`), College A querying organizations returns strictly College A; College B's record is completely invisible (filtered by RLS). Calling `getOrganization` with another college's ID returns `null`. Sensitive configuration and key references are never exposed.
 
