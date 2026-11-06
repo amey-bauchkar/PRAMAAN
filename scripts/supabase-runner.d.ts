@@ -7,11 +7,14 @@ export declare const DEFAULT_APPROVED_TEST_PATTERNS: readonly string[];
 export declare function isApprovedSupabaseProjectRef(projectRef?: string): boolean;
 export declare function isProductionDatabaseTarget(dbUrl?: string): boolean;
 export declare function isApprovedTestDatabase(dbUrl?: string): boolean;
+export declare function assertApprovedDatabaseTarget(targetUrl?: string, operation?: string): void;
 export declare function assertSafeTestEnvironment(operation?: string, targetUrl?: string): void;
 export declare function assertNotInstitutionalTenant(orgId: string, operation?: string): void;
 export declare function cleanSqlForInspection(sql: string): string;
+export declare function hasSideEffectingFunction(sql: string): boolean;
 export declare function isMutationQuery(sql: string): boolean;
 export declare function isDestructiveQuery(sql: string): boolean;
+export declare function isSafeReadOnlyQuery(sql: string): boolean;
 
 export interface SafeCleanupTestAuditParams {
   orgId: string;

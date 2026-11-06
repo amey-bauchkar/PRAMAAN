@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import pg from 'pg';
+import { resolveAdminSslConfig } from '../../scripts/admin-db-ssl.mjs';
 import {
   assertSafeTestEnvironment,
+  assertApprovedDatabaseTarget,
   assertNotInstitutionalTenant,
   INSTITUTIONAL_ORG_IDS,
   APPROVED_LOCAL_HOSTS,
@@ -10,6 +13,8 @@ import {
   isApprovedSupabaseProjectRef,
   isDestructiveQuery,
   isMutationQuery,
+  hasSideEffectingFunction,
+  isSafeReadOnlyQuery,
   cleanSqlForInspection,
   safeCleanupTestAuditEvents,
   runQuery
@@ -267,6 +272,14 @@ describe('Database Test Safety Guard & Production Target Protection (Final Harde
     await expect(runQuery('SELECT * INTO student_backup FROM students;')).rejects.toThrow(
       /Destructive or mutating database operations require direct DATABASE_URL_ADMIN PostgreSQL connectivity/
     );
+
+    await expect(runQuery("SELECT nextval('student_id_seq');")).rejects.toThrow(
+      /Destructive or mutating database operations require direct DATABASE_URL_ADMIN PostgreSQL connectivity/
+    );
+
+    await expect(runQuery("SELECT setval('student_id_seq', 5000);")).rejects.toThrow(
+      /Destructive or mutating database operations require direct DATABASE_URL_ADMIN PostgreSQL connectivity/
+    );
   });
 
   it('17. runQuery rejects Management API execution when project ref is unapproved or missing', async () => {
@@ -452,5 +465,185 @@ describe('Database Test Safety Guard & Production Target Protection (Final Harde
     await expect(safeCleanupTestAuditEvents(missingId as any)).rejects.toThrow(
       /requires an explicit id string/
     );
+  });
+
+  // --- 9. PostgreSQL Side-Effecting Functions & Read-Only Execution Safety ---
+  it('27. isMutationQuery, isDestructiveQuery, and hasSideEffectingFunction detect nextval and setval as mutations', () => {
+    const sequenceMutations = [
+      "SELECT nextval('student_id_seq');",
+      "SELECT nextval('my_seq'::regclass);",
+      "SELECT * FROM nextval('student_id_seq');",
+      "SELECT pg_catalog.nextval('seq');",
+      "SELECT setval('student_id_seq', 5000);",
+      "SELECT public.setval('student_id_seq', 1, false);",
+      "SELECT 1 WHERE 1 = nextval('seq');"
+    ];
+
+    for (const sql of sequenceMutations) {
+      expect(hasSideEffectingFunction(sql)).toBe(true);
+      expect(isMutationQuery(sql)).toBe(true);
+      expect(isDestructiveQuery(sql)).toBe(true);
+      expect(isSafeReadOnlyQuery(sql)).toBe(false);
+    }
+  });
+
+  it('28. Detects other PostgreSQL side-effecting administrative, large object, and session functions', () => {
+    const sideEffectQueries = [
+      'SELECT pg_terminate_backend(1234);',
+      'SELECT pg_cancel_backend(1234);',
+      'SELECT pg_reload_conf();',
+      'SELECT pg_rotate_logfile();',
+      "SELECT pg_create_restore_point('rp1');",
+      'SELECT pg_switch_wal();',
+      'SELECT pg_promote();',
+      "SELECT pg_create_logical_replication_slot('slot1', 'test_decoding');",
+      "SELECT pg_drop_replication_slot('slot1');",
+      "SELECT pg_notify('chan', 'payload');",
+      "SELECT pg_write_file('test.txt', 'data');",
+      "SELECT pg_file_unlink('test.txt');",
+      'SELECT lo_create(0);',
+      'SELECT lo_unlink(123);',
+      "SELECT dblink_exec('conn', 'DELETE FROM users');",
+      'SELECT pg_advisory_lock(12345);',
+      'SELECT pg_advisory_unlock(12345);',
+      'SELECT pg_advisory_xact_lock(12345);'
+    ];
+
+    for (const sql of sideEffectQueries) {
+      expect(hasSideEffectingFunction(sql)).toBe(true);
+      expect(isMutationQuery(sql)).toBe(true);
+      expect(isDestructiveQuery(sql)).toBe(true);
+      expect(isSafeReadOnlyQuery(sql)).toBe(false);
+    }
+  });
+
+  it('29. Comments and whitespace cannot hide nextval or setval mutations', () => {
+    const hiddenQueries = [
+      "/* comment */ SELECT nextval('seq');",
+      "-- line comment\nSELECT setval('seq', 10);",
+      "SELECT 1; SELECT nextval('seq');",
+      "SELECT 1;\n-- inline comment\nSELECT setval('seq', 100);",
+      "/* multiline\ncomment */\nSELECT nextval('seq');"
+    ];
+
+    for (const sql of hiddenQueries) {
+      expect(hasSideEffectingFunction(sql)).toBe(true);
+      expect(isMutationQuery(sql)).toBe(true);
+      expect(isDestructiveQuery(sql)).toBe(true);
+      expect(isSafeReadOnlyQuery(sql)).toBe(false);
+    }
+  });
+
+  it('30. Preserves normal read-only SELECT queries when string literals, comments, or column names contain nextval or setval', () => {
+    const safeSelects = [
+      "SELECT 'nextval' AS fn, 'setval' AS fn2 FROM students;",
+      "SELECT 'SELECT nextval(seq)' AS sql_template;",
+      "SELECT * FROM students WHERE notes LIKE '%nextval%';",
+      'SELECT "nextval", "setval" FROM sequence_metadata;',
+      '/* comment mentioning nextval and setval */ SELECT 1;',
+      '-- line comment about nextval\nSELECT id, name FROM students;'
+    ];
+
+    for (const sql of safeSelects) {
+      expect(hasSideEffectingFunction(sql)).toBe(false);
+      expect(isMutationQuery(sql)).toBe(false);
+      expect(isDestructiveQuery(sql)).toBe(false);
+      expect(isSafeReadOnlyQuery(sql)).toBe(true);
+    }
+  });
+
+  it('31. Management API fallback cannot execute side-effecting SELECT statements or non-guaranteed queries', async () => {
+    delete process.env.DATABASE_URL_ADMIN;
+    delete process.env.DATABASE_URL;
+    process.env.SUPABASE_MANAGEMENT_TOKEN = 'test-token';
+    process.env.SUPABASE_PROJECT_REF = 'qshujrddrzoemlzmleru';
+
+    await expect(runQuery("SELECT nextval('student_id_seq');")).rejects.toThrow(
+      /Destructive or mutating database operations require direct DATABASE_URL_ADMIN PostgreSQL connectivity/
+    );
+
+    await expect(runQuery("SELECT setval('student_id_seq', 5000);")).rejects.toThrow(
+      /Destructive or mutating database operations require direct DATABASE_URL_ADMIN PostgreSQL connectivity/
+    );
+
+    await expect(runQuery("SELECT pg_terminate_backend(1234);")).rejects.toThrow(
+      /Destructive or mutating database operations require direct DATABASE_URL_ADMIN PostgreSQL connectivity/
+    );
+
+    await expect(runQuery("SELECT lo_unlink(100);")).rejects.toThrow(
+      /Destructive or mutating database operations require direct DATABASE_URL_ADMIN PostgreSQL connectivity/
+    );
+
+    await expect(runQuery("LISTEN my_channel;")).rejects.toThrow(
+      /Read-only execution cannot be safely guaranteed for this query/
+    );
+  });
+
+  it('32. Direct admin execution validates its database target even for ordinary read-only queries', async () => {
+    // Direct assertApprovedDatabaseTarget invocation
+    expect(() => assertApprovedDatabaseTarget('postgresql://attacker:pass@attacker.example:5432/pramaan_test')).toThrow(
+      /Database target is not on the approved test database allowlist/
+    );
+
+    // Unapproved host
+    process.env.DATABASE_URL_ADMIN = 'postgresql://attacker:pass@attacker.example:5432/pramaan_test';
+    await expect(runQuery('SELECT 1;')).rejects.toThrow(
+      /Database target is not on the approved test database allowlist/
+    );
+
+    // Production database name
+    process.env.DATABASE_URL_ADMIN = 'postgresql://postgres:pass@localhost:5432/production';
+    await expect(runQuery('SELECT 1;')).rejects.toThrow(
+      /Database target is recognized as a production database/
+    );
+
+    // Production environment
+    process.env.DATABASE_URL_ADMIN = 'postgresql://postgres:pass@localhost:5432/pramaan_test';
+    (process.env as any).NODE_ENV = 'production';
+    await expect(runQuery('SELECT 1;')).rejects.toThrow(
+      /cannot be executed in a production environment/
+    );
+  });
+
+  it('33. Normal read-only SELECT queries execute successfully via direct admin connection', async () => {
+    process.env.DATABASE_URL_ADMIN = originalAdminUrl;
+    if (process.env.DATABASE_URL_ADMIN && isApprovedTestDatabase(process.env.DATABASE_URL_ADMIN)) {
+      const res = await runQuery('SELECT 1 AS num;');
+      expect(res).toBeDefined();
+      expect(Array.isArray(res)).toBe(true);
+      expect(res[0]?.num).toBe(1);
+    }
+  });
+
+  it('34. PostgreSQL engine strictly rejects nextval and setval inside a READ ONLY transaction', async () => {
+    process.env.DATABASE_URL_ADMIN = originalAdminUrl;
+    if (process.env.DATABASE_URL_ADMIN && isApprovedTestDatabase(process.env.DATABASE_URL_ADMIN)) {
+      const ssl = resolveAdminSslConfig(process.env.DATABASE_URL_ADMIN);
+      const client = new pg.Client({ connectionString: process.env.DATABASE_URL_ADMIN, ssl });
+      await client.connect();
+
+      const testSeqName = 'pramaan_test_seq_readonly_guard';
+      try {
+        await client.query(`DROP SEQUENCE IF EXISTS ${testSeqName};`);
+        await client.query(`CREATE SEQUENCE ${testSeqName};`);
+
+        // Attempting nextval inside a READ ONLY transaction fails at the PostgreSQL storage engine level
+        await client.query('BEGIN READ ONLY;');
+        await expect(client.query(`SELECT nextval('${testSeqName}');`)).rejects.toThrow(
+          /cannot execute nextval\(\) in a read-only transaction/
+        );
+        await client.query('ROLLBACK;').catch(() => {});
+
+        // Attempting setval inside a READ ONLY transaction fails at the PostgreSQL storage engine level
+        await client.query('BEGIN READ ONLY;');
+        await expect(client.query(`SELECT setval('${testSeqName}', 5000);`)).rejects.toThrow(
+          /cannot execute setval\(\) in a read-only transaction/
+        );
+        await client.query('ROLLBACK;').catch(() => {});
+      } finally {
+        await client.query(`DROP SEQUENCE IF EXISTS ${testSeqName};`).catch(() => {});
+        await client.end();
+      }
+    }
   });
 });

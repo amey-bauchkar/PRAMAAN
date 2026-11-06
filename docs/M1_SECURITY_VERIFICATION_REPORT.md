@@ -4,7 +4,7 @@
 **Project:** PRAMAAN (QUASAR 5.0 — EdTech Domain)  
 **Database Target:** Real PostgreSQL 17.11 on Supabase (`db.qshujrddrzoemlzmleru.supabase.co`)  
 **Auditor / Engineer:** Principal Software Architect & Security Engineer (Antigravity Solo Partner)  
-**Verification Status:** **PASSED & SECURITY VERIFIED** (100% of 210 tests passing across 23 test suites)
+**Verification Status:** **PASSED & SECURITY VERIFIED** (100% of 218 tests passing across 23 test suites)
 
 ---
 
@@ -34,8 +34,8 @@ All claims in this report are backed by automated tests running against the **li
 Monorepo Test Suite Summary:
 ├── Pure Domain Unit Tests:          41 tests (Skill state machine, anchor resolver, fairness, eligibility, audit chain integrity, authenticated checkpoints, caller-key override rejection)
 ├── API, RBAC & Adversarial Tests:  112 tests (Fastify, positive RBAC matrix, email takeover, fail-closed, strict claims, consent adversarial, audit concurrency, restricted runtime user, genuine ES256 JWKS)
-└── DB, Migration & Safety Tests:    57 tests (Supabase real DB, RLS, triggers, pool socket reuse, strict URL/host/db safety guard, target allowlist, MERGE and SELECT INTO mutation detection, cross-tenant audit isolation regression, migration ledger, admin TLS)
-Total:                              210 tests, 100% passing (Execution time: 22.41s across 23 files)
+└── DB, Migration & Safety Tests:    65 tests (Supabase real DB, RLS, triggers, pool socket reuse, strict URL/host/db safety guard, target allowlist, MERGE/SELECT INTO detection, nextval/setval side-effect prevention, read-only transaction execution, cross-tenant audit isolation regression, migration ledger, admin TLS)
+Total:                              218 tests, 100% passing (Execution time: 22.16s across 23 files)
 ```
 
 ---
@@ -356,7 +356,7 @@ npx vitest run
 
  ✓ packages/domain/tests/skill-state-machine.test.ts (8 tests) 7ms
  ✓ packages/domain/tests/audit-chain.test.ts (19 tests) 17ms
- ✓ db/tests/test-safety-guard.test.ts (26 tests) 37ms
+ ✓ db/tests/test-safety-guard.test.ts (34 tests) 1814ms
  ✓ apps/api/tests/auth-membership-tenant.test.ts (13 tests) 25ms
  ✓ apps/api/tests/m1-consent-ledger.test.ts (3 tests) 6ms
  ✓ packages/domain/tests/fairness-calculator.test.ts (5 tests) 5ms
@@ -379,9 +379,9 @@ npx vitest run
  ✓ db/tests/supabase-real-db.test.ts (20 tests) 21639ms
 
  Test Files  23 passed (23)
-      Tests  210 passed (210)
-   Start at  18:07:32
-   Duration  22.41s (transform 1.09s, setup 0ms, collect 5.58s, tests 53.09s, environment 6ms, prepare 3.78s)
+      Tests  218 passed (218)
+   Start at  18:31:10
+   Duration  22.16s (transform 1.02s, setup 0ms, collect 5.10s, tests 54.41s, environment 5ms, prepare 3.52s)
 ```
 
 ### 8.7 Test Environment Breakdown & Multi-Stage Execution Distinction (P1)
@@ -390,7 +390,7 @@ To ensure absolute reporting accuracy and maintain transparency across environme
 1. **Full Local Monorepo Vitest Run:**
    - **Environment:** Local workstation with configured development `.env` credentials (`DATABASE_URL`, `DATABASE_URL_ADMIN`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `ALLOW_DESTRUCTIVE_DB_TESTS=true`, `CHECKPOINT_SIGNING_KEY`).
    - **Scope:** All 23 test files (pure domain algorithms, Fastify API, administrative SSL/ledger, connection pool reuse, genuine JWKS, restricted runtime user, strict database test safety guards, and live Supabase PostgreSQL 17 database).
-   - **Result:** **210 passed (100%)**, 0 failed, 0 skipped.
+   - **Result:** **218 passed (100%)**, 0 failed, 0 skipped.
 
 2. **Isolated PostgreSQL 17 GitHub Actions Tests (CI Job 2):**
    - **Environment:** Clean `postgres:17-alpine` Docker service container inside GitHub Actions (`.github/workflows/ci.yml`).
@@ -476,17 +476,20 @@ To prevent integration test executions from causing unintended side-effects or d
    - **Separate Database Name Validation:** Database name is parsed and validated separately against `DEFAULT_APPROVED_DB_NAMES` (`pramaan_test`, `postgres`, `test`, `pramaan_dev`, `template1`). Production database names (e.g. `production`, `pramaan_production`) on local hosts are rejected.
    - **Remote Supabase Target Authentication:** Remote targets must match exact approved project references (`qshujrddrzoemlzmleru`) within recognized host formats (`db.<ref>.supabase.co` direct, or `<region>.pooler.supabase.com` with `<user>.<ref>`). Project references appearing in passwords, query parameters, or paths on unrelated hosts (e.g. `attacker.example/qshujrddrzoemlzmleru`) are strictly rejected.
    - **Fail Closed on Missing Target Identity:** Missing `DATABASE_URL_ADMIN` and missing `targetUrl` in `assertSafeTestEnvironment()` fails closed immediately (`Database target identity is missing`).
-   - **Prohibition of Management API Fallback for Mutations:** `runQuery()` prohibits Management API execution for destructive or mutating queries. Destructive operations strictly require direct `DATABASE_URL_ADMIN` PostgreSQL connectivity.
+   - **Target Identity Validation on All Direct Admin Queries:** `assertApprovedDatabaseTarget(adminUrl)` validates database target identity and environment guards for all queries executed via direct admin connection, ensuring ordinary read-only queries cannot bypass database target allowlisting.
+   - **Prohibition of Management API Fallback for Mutations:** `runQuery()` prohibits Management API execution for destructive, mutating, or side-effecting queries. Destructive operations strictly require direct `DATABASE_URL_ADMIN` PostgreSQL connectivity.
+   - **Strict Management API Gatekeeping (`isSafeReadOnlyQuery`):** Management API fallback strictly requires queries to be verified safe read-only statements (`isSafeReadOnlyQuery`). Any query containing side-effects, transaction commands, session alterations, or unverified statement verbs is blocked.
    - **Approved Project Reference Required for Management API:** Management API queries require `SUPABASE_PROJECT_REF` to be explicitly set and validated against `isApprovedSupabaseProjectRef()`. Silent default fallback is prohibited.
    - **Explicit Opt-In Required:** `assertSafeTestEnvironment(operation, targetUrl)` halts execution immediately unless `ALLOW_DESTRUCTIVE_DB_TESTS=true` is set.
    - **Environment Guard:** Fails closed if `NODE_ENV === 'production'`, `ENVIRONMENT === 'production'`, or `VERCEL_ENV === 'production'`.
-3. **Comprehensive Mutation & DDL Guarding:**
+3. **Comprehensive Mutation, DDL & Side-Effect Guarding (Layered Defense):**
    - `isMutationQuery(sql)` / `isDestructiveQuery(sql)` inspects SQL queries after stripping block comments (`/* ... */`), line comments (`-- ...`), string literals (`'...'`), double-quoted identifiers (`"..."`), and dollar-quoted strings (`$$...$$`).
-   - Detects all mutation and DDL commands: `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `DROP`, `ALTER`, `CREATE`, `GRANT`, `REVOKE`, `RENAME`, `DO`, `CALL`, `EXECUTE`, `VACUUM`, `REINDEX`, `COPY`, `LOCK`, PostgreSQL `MERGE` statements (`MERGE INTO ...`), `SELECT INTO` table creation statements (`SELECT ... INTO ...`), as well as `CLUSTER`, `REFRESH`, `CHECKPOINT`, and `REASSIGN`.
-   - Blocks bypass attempts hidden behind leading whitespace, inline comments, or multi-statement batches (`SELECT 1; DROP TABLE`).
-   - Preserves normal read-only `SELECT` queries without false positives on string literals or column names (e.g. `deleted_at`, or string literals containing `'MERGE'` or `'INTO'`).
-   - Enforced automatically in `runQuery()` before query execution.
-   - Automated Verification: Verified by 26 regression tests in `db/tests/test-safety-guard.test.ts`.
+   - **Side-Effecting Function Detection (`hasSideEffectingFunction`):** Detects PostgreSQL functions with state-mutating, server-altering, or session-locking side effects, including `nextval()`, `setval()`, Large Object functions (`lo_create`, `lo_unlink`, `lo_import`, `lo_export`), administrative control functions (`pg_terminate_backend`, `pg_cancel_backend`, `pg_reload_conf`, `pg_rotate_logfile`, `pg_create_restore_point`, `pg_switch_wal`, `pg_promote`), replication slot functions (`pg_create_logical_replication_slot`, `pg_drop_replication_slot`), notification and filesystem functions (`pg_notify`, `pg_write_file`, `pg_file_unlink`), advisory locks (`pg_advisory_lock`, `pg_advisory_xact_lock`), and remote execution (`dblink_exec`).
+   - **Mutation & DDL Commands:** Detects all standard data and schema mutations: `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `DROP`, `ALTER`, `CREATE`, `GRANT`, `REVOKE`, `RENAME`, `DO`, `CALL`, `EXECUTE`, `VACUUM`, `REINDEX`, `COPY`, `LOCK`, PostgreSQL `MERGE` statements (`MERGE INTO ...`), `SELECT INTO` table creation statements (`SELECT ... INTO ...`), as well as `CLUSTER`, `REFRESH`, `CHECKPOINT`, and `REASSIGN`.
+   - **Engine-Level READ ONLY Transaction Execution:** Where feasible (when queries do not manage their own explicit transaction blocks via `BEGIN` / `COMMIT`), read-only queries executed via direct admin connection are wrapped inside `BEGIN READ ONLY; ... COMMIT;`. PostgreSQL's core storage engine natively blocks mutations, table writes, and sequence increments (`cannot execute nextval() in a read-only transaction`).
+   - **Transparent Limitation / Heuristic Scope:** Regex detection operates as an application-level heuristic filter and is **not claimed to provide complete SQL grammar parsing**. True defense-in-depth is achieved through the multi-layer combination of heuristic filtering, engine-level PostgreSQL `READ ONLY` transaction isolation, strict target identity allowlisting, and Management API gatekeeping.
+   - **Comments and Literal Preservation:** Blocks bypass attempts hidden behind leading whitespace, inline comments, or multi-statement batches (`SELECT 1; DROP TABLE`). Preserves normal read-only `SELECT` queries without false positives on string literals or column names (e.g. `deleted_at`, or string literals containing `'MERGE'`, `'INTO'`, `'nextval'`, or `'setval'`).
+   - **Automated Verification:** Verified by 34 regression tests in `db/tests/test-safety-guard.test.ts`.
 4. **Dedicated Test Tenant Fixtures:** Tests no longer insert synthetic audit events into institutional tenant chains (`College A`). A dedicated test tenant (`TEST_AUDIT_TENANT_ID = 'e0000000-0000-0000-0000-000000000099'`) is used exclusively for immutability and DCL privilege testing.
 5. **Institutional Tenant Immutability Protection:** `assertNotInstitutionalTenant(orgId)` blocks destructive operations against production institutional tenants (`00000000-0000-0000-0000-000000000001` and `00000000-0000-0000-0000-000000000002`). Institutional records are never deleted or modified by tests.
 6. **Unconditional Trigger-Safe Cleanup:** Cleanup in `afterAll` runs within a `try ... finally` block, ensuring test audit events are cleaned up and the database immutability trigger `trg_audit_events_immutable` is unconditionally re-enabled even if assertions fail. Immutability triggers are never disabled outside tightly controlled test cleanup.
@@ -559,10 +562,10 @@ The repository administrator must enable branch protection in GitHub:
 ## 13. Conclusion & Readiness Gate for Milestone M2
 
 The comprehensive M1 closure audit confirms that all security, tenancy, authentication, ledger, pipeline, and audit-integrity invariants are fully implemented, verified, and locked:
-- **100% Passing Tests:** 210 automated tests across 23 test suites (0 failures, 0 regressions).
+- **100% Passing Tests:** 218 automated tests across 23 test suites (0 failures, 0 regressions).
 - **Authenticated Checkpoint Integrity:** `AuditChain.verifyChain()` strictly enforces genesis anchoring and cryptographic checkpoint authentication (orgId binding, finite non-negative integer seq, HMAC-SHA256 signature with backend-configured verification key). Caller-controlled signing keys are completely removed. Plain unauthenticated `{ seq, hash }` objects and the historical dummy `a*64` hash are strictly rejected as `INVALID`.
 - **Tenant College A Status:** College A historical chain in the development database starts at `seq = 100000` and remains strictly **`UNANCHORED`** (`valid: false, isComplete: false`). Internal suffix links being valid does not authenticate missing historical prefixes. Complete verification is not claimed without an authentic cryptographic anchor.
-- **Strict Database Target Guarding & Exact Audit Cleanup:** Eliminated substring-based allowlisting in favor of strict WHATWG URL parsing (PostgreSQL protocol, exact hostnames `localhost`, `127.0.0.1`, `::1`, `host.docker.internal`, `postgres`, separate database name validation, and exact project reference verification for Supabase). Missing target identity fails closed immediately. Management API execution is prohibited from executing mutations. All SQL mutations, DDL statements, PostgreSQL `MERGE` statements, and `SELECT INTO` table creations are guarded by comment- and literal-resilient parsing. `safeCleanupTestAuditEvents` requires all 5 exact identifiers (`orgId`, `seq`, `action`, `objectType`, `id`), prohibiting blanket tenant deletions. Institutional records are unconditionally protected.
+- **Strict Database Target Guarding & Exact Audit Cleanup:** Eliminated substring-based allowlisting in favor of strict WHATWG URL parsing (PostgreSQL protocol, exact hostnames `localhost`, `127.0.0.1`, `::1`, `host.docker.internal`, `postgres`, separate database name validation, and exact project reference verification for Supabase). Missing target identity fails closed immediately. Direct admin database execution validates targets for all queries. Management API execution is prohibited from executing mutations or side-effects and is gated strictly by `isSafeReadOnlyQuery`. PostgreSQL side-effecting functions (`nextval`, `setval`, `lo_*`, `pg_terminate_backend`, etc.), DDL statements, MERGE statements, and SELECT INTO table creations are guarded by layered heuristic detection and engine-level PostgreSQL READ ONLY transactions (`cannot execute nextval() in a read-only transaction`). `safeCleanupTestAuditEvents` requires all 5 exact identifiers (`orgId`, `seq`, `action`, `objectType`, `id`), prohibiting blanket tenant deletions. Institutional records are unconditionally protected.
 - **Forensic Accuracy:** Commit attribution (`0bf87bdf` vs `454854e`) and Migration 009 deletion scope are accurately documented, with verified database facts distinguished from commit history inferences.
 - **Quality Gates:** ESLint (`npm run lint`), TypeScript strict typecheck (`npm run typecheck`), and monorepo production build (`npm run build`) all pass with 0 errors.
 - **CI / CD Pipeline:** Multi-stage GitHub Actions workflow with clean isolated PostgreSQL 17 container execution and credential-safe live Supabase verification gate (status SKIPPED in CI when secrets are absent).

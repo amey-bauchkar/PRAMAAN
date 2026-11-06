@@ -185,6 +185,38 @@ export function isApprovedTestDatabase(dbUrl) {
   }
 }
 
+export function assertApprovedDatabaseTarget(targetUrl, operation = 'Database query') {
+  const nodeEnv = (process.env.NODE_ENV || '').toLowerCase();
+  const env = (process.env.ENVIRONMENT || '').toLowerCase();
+  const vercelEnv = (process.env.VERCEL_ENV || '').toLowerCase();
+
+  // 1. Block explicit production environment flags
+  if (nodeEnv === 'production' || env === 'production' || vercelEnv === 'production') {
+    throw new Error(
+      `[SECURITY_GUARD] Operation blocked: "${operation}" cannot be executed in a production environment (NODE_ENV=${process.env.NODE_ENV}, ENVIRONMENT=${process.env.ENVIRONMENT}).`
+    );
+  }
+
+  // 2. Database target identity verification
+  const urlToCheck = targetUrl || process.env.DATABASE_URL_ADMIN || process.env.DATABASE_URL;
+  if (!urlToCheck) {
+    throw new Error(
+      `[SECURITY_GUARD] Operation blocked: Database target identity is missing. "${operation}" requires an explicitly validated database target (DATABASE_URL_ADMIN).`
+    );
+  }
+
+  if (isProductionDatabaseTarget(urlToCheck)) {
+    throw new Error(
+      `[SECURITY_GUARD] Operation blocked: Database target is recognized as a production database.`
+    );
+  }
+  if (!isApprovedTestDatabase(urlToCheck)) {
+    throw new Error(
+      `[SECURITY_GUARD] Operation blocked: Database target is not on the approved test database allowlist.`
+    );
+  }
+}
+
 export function assertSafeTestEnvironment(operation = 'Database integration test / destructive operation', targetUrl) {
   const nodeEnv = (process.env.NODE_ENV || '').toLowerCase();
   const env = (process.env.ENVIRONMENT || '').toLowerCase();
@@ -248,17 +280,51 @@ export function cleanSqlForInspection(sql) {
   return cleaned.trim();
 }
 
+export function hasSideEffectingFunction(sql) {
+  if (typeof sql !== 'string') return false;
+  const cleaned = cleanSqlForInspection(sql);
+  if (!cleaned) return false;
+
+  // Detect PostgreSQL built-in functions with data-mutating, server-modifying, or session-locking side effects
+  const sideEffectFunctionsRegex = /(?:\b|\.)(nextval|setval|lo_create|lo_unlink|lo_import|lo_export|lo_truncate|lo_put|pg_terminate_backend|pg_cancel_backend|pg_reload_conf|pg_rotate_logfile|pg_create_restore_point|pg_switch_wal|pg_promote|pg_create_logical_replication_slot|pg_drop_replication_slot|pg_replication_slot_advance|pg_notify|pg_write_file|pg_file_unlink|pg_advisory_lock|pg_advisory_lock_shared|pg_advisory_unlock|pg_advisory_unlock_all|pg_advisory_xact_lock|pg_advisory_xact_lock_shared|pg_try_advisory_lock|pg_try_advisory_xact_lock|dblink_exec)\s*\(/i;
+
+  return sideEffectFunctionsRegex.test(cleaned);
+}
+
 export function isMutationQuery(sql) {
   if (typeof sql !== 'string') return false;
   const cleaned = cleanSqlForInspection(sql);
   if (!cleaned) return false;
 
   const mutationKeywordsRegex = /\b(INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER|CREATE|GRANT|REVOKE|RENAME|DO|CALL|EXECUTE|VACUUM|REINDEX|COPY|LOCK|MERGE|INTO|CLUSTER|REFRESH|CHECKPOINT|REASSIGN)\b/i;
-  return mutationKeywordsRegex.test(cleaned);
+  if (mutationKeywordsRegex.test(cleaned)) return true;
+
+  if (hasSideEffectingFunction(cleaned)) return true;
+
+  return false;
 }
 
 export function isDestructiveQuery(sql) {
   return isMutationQuery(sql);
+}
+
+export function isSafeReadOnlyQuery(sql) {
+  if (typeof sql !== 'string') return false;
+  const cleaned = cleanSqlForInspection(sql);
+  if (!cleaned) return false;
+
+  // 1. If it's a mutation or has side-effects, it is never safe read-only
+  if (isMutationQuery(sql)) return false;
+
+  // 2. Prohibit transaction commands or session alteration in safe read-only
+  const unsafeCommandsRegex = /\b(BEGIN|COMMIT|ROLLBACK|START|SET|RESET|DISCARD|LISTEN|UNLISTEN|NOTIFY|LOAD|LOCK)\b/i;
+  if (unsafeCommandsRegex.test(cleaned)) return false;
+
+  // 3. Must begin with recognized read-only query verbs (SELECT, WITH, SHOW, EXPLAIN, VALUES)
+  const readOnlyVerbRegex = /^(?:EXPLAIN\s+)?(?:SELECT|WITH|SHOW|VALUES)\b/i;
+  if (!readOnlyVerbRegex.test(cleaned)) return false;
+
+  return true;
 }
 
 export async function safeCleanupTestAuditEvents(params) {
@@ -329,6 +395,9 @@ export async function runQuery(sql) {
       );
     }
     assertSafeTestEnvironment('Destructive SQL execution via runQuery', adminUrl);
+  } else if (adminUrl) {
+    // Validate target identity even for non-destructive / read-only queries
+    assertApprovedDatabaseTarget(adminUrl, 'Direct admin SQL execution via runQuery');
   }
 
   if (adminUrl) {
@@ -337,7 +406,24 @@ export async function runQuery(sql) {
     try {
       const client = await pool.connect();
       try {
-        const res = await client.query(sql);
+        const cleaned = cleanSqlForInspection(sql);
+        const hasExplicitTransaction = /\b(BEGIN|START\s+TRANSACTION)\b/i.test(cleaned);
+
+        let res;
+        // Where feasible, execute genuinely read-only queries inside a PostgreSQL READ ONLY transaction
+        if (!isDestructive && !hasExplicitTransaction) {
+          await client.query('BEGIN READ ONLY;');
+          try {
+            res = await client.query(sql);
+            await client.query('COMMIT;');
+          } catch (txErr) {
+            await client.query('ROLLBACK;').catch(() => {});
+            throw txErr;
+          }
+        } else {
+          res = await client.query(sql);
+        }
+
         // If multiple SQL statements were executed, return rows of last statement or combine
         if (Array.isArray(res)) {
           // If a batch contains a SELECT statement, return its rows (matching Supabase Query API behavior)
@@ -357,11 +443,17 @@ export async function runQuery(sql) {
     }
   }
 
-  // Fallback to Supabase Management API only for non-destructive read-only queries
+  // Fallback to Supabase Management API only for non-destructive, verified read-only queries
   if (process.env.SUPABASE_MANAGEMENT_TOKEN) {
     if (isDestructive) {
       throw new Error(
         '[SECURITY_GUARD] Management API fallback cannot execute destructive/mutating SQL.'
+      );
+    }
+
+    if (!isSafeReadOnlyQuery(sql)) {
+      throw new Error(
+        '[SECURITY_GUARD] Management API query blocked: Read-only execution cannot be safely guaranteed for this query.'
       );
     }
 
