@@ -36,6 +36,7 @@ jobs:
         run: |
           npx vitest run \
             packages/domain/tests/ \
+            apps/api/tests/anchor-service-and-api.test.ts \
             apps/api/tests/api-endpoints.test.ts \
             apps/api/tests/api-route-rbac.test.ts \
             apps/api/tests/auth-membership-tenant.test.ts \

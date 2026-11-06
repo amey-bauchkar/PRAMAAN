@@ -740,4 +740,383 @@ export function greetCandidate(naam: string): string {
     expect(result.codeSpan).toContain('function calculateShannonEntropy');
     expect(result.computedHash).toBe(targetHash);
   });
+
+  // --------------------------------------------------------------------------
+  // HARDENING TESTS (Sections 6, 7, 8, 9)
+  // --------------------------------------------------------------------------
+
+  it('23. Rejects lineEnd beyond total source lines (OUT_OF_BOUNDS)', () => {
+    const lines = sampleTypeScriptContent.split('\n');
+    const anchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: sampleOrgId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      lineStart: 4,
+      lineEnd: lines.length + 50, // Beyond end of file!
+      contentHash: 'a'.repeat(64),
+      rawFileHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const result = AnchorResolver.resolve(sampleSnapshot, anchor);
+    expect(result.status).toBe('ANCHOR_INVALID');
+    expect(result.valid).toBe(false);
+    expect(result.error).toBe('OUT_OF_BOUNDS');
+  });
+
+  it('24. Rejects lineStart beyond total source lines (OUT_OF_BOUNDS)', () => {
+    const lines = sampleTypeScriptContent.split('\n');
+    const anchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: sampleOrgId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      lineStart: lines.length + 10,
+      lineEnd: lines.length + 20,
+      contentHash: 'a'.repeat(64),
+      rawFileHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const result = AnchorResolver.resolve(sampleSnapshot, anchor);
+    expect(result.status).toBe('ANCHOR_INVALID');
+    expect(result.valid).toBe(false);
+    expect(result.error).toBe('OUT_OF_BOUNDS');
+  });
+
+  it('25. Incomplete byte offsets: rejects when only byteStart is provided', () => {
+    const anchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: sampleOrgId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      lineStart: 4,
+      lineEnd: 12,
+      byteStart: 75,
+      // byteEnd omitted
+      contentHash: 'a'.repeat(64),
+      rawFileHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const result = AnchorResolver.resolve(sampleSnapshot, anchor);
+    expect(result.status).toBe('ANCHOR_INVALID');
+    expect(result.valid).toBe(false);
+    expect(result.error).toBe('INCOMPLETE_BYTE_OFFSETS');
+  });
+
+  it('26. Incomplete byte offsets: rejects when only byteEnd is provided', () => {
+    const anchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: sampleOrgId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      lineStart: 4,
+      lineEnd: 12,
+      // byteStart omitted
+      byteEnd: 250,
+      contentHash: 'a'.repeat(64),
+      rawFileHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const result = AnchorResolver.resolve(sampleSnapshot, anchor);
+    expect(result.status).toBe('ANCHOR_INVALID');
+    expect(result.valid).toBe(false);
+    expect(result.error).toBe('INCOMPLETE_BYTE_OFFSETS');
+  });
+
+  it('27. Rejects byte boundary splitting a multi-byte UTF-8 character (INVALID_UTF8_BYTE_BOUNDARY)', () => {
+    // Unicode text with Hindi characters (3 bytes per character in UTF-8)
+    const unicodeSource = '// गणना उपयोगिता\nexport function calculate(): number { return 42; }\n';
+    const unicodeBytes = Buffer.from(unicodeSource, 'utf8');
+    const uRawHash = createHash('sha256').update(unicodeBytes).digest('hex');
+
+    const uSnapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/unicode.ts',
+      rawBytes: unicodeBytes,
+      rawFileHash: uRawHash,
+      capturedAt: new Date().toISOString(),
+    };
+
+    // The character 'ग' starts at byte 3, continuation bytes are 4 and 5
+    // Byte offset 4 is inside 'ग'!
+    const anchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: sampleOrgId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/unicode.ts',
+      lineStart: 1,
+      lineEnd: 1,
+      byteStart: 4, // Inside multi-byte UTF-8 character!
+      byteEnd: 10,
+      contentHash: 'a'.repeat(64),
+      rawFileHash: uRawHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const result = AnchorResolver.resolve(uSnapshot, anchor);
+    expect(result.status).toBe('ANCHOR_INVALID');
+    expect(result.valid).toBe(false);
+    expect(result.error).toBe('INVALID_UTF8_BYTE_BOUNDARY');
+  });
+
+  it('28. Rejects malformed non-UTF-8 source bytes safely (MALFORMED_UTF8_SOURCE)', () => {
+    // Invalid UTF-8 sequence (e.g. lone continuation bytes or invalid start byte 0xFF)
+    const invalidBytes = Buffer.from([0x65, 0x78, 0xff, 0xfe, 0x80, 0x81]);
+    const invalidHash = createHash('sha256').update(invalidBytes).digest('hex');
+
+    const malformedSnapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/malformed.ts',
+      rawBytes: invalidBytes,
+      rawFileHash: invalidHash,
+      capturedAt: new Date().toISOString(),
+    };
+
+    const anchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: sampleOrgId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/malformed.ts',
+      lineStart: 1,
+      lineEnd: 1,
+      contentHash: 'a'.repeat(64),
+      rawFileHash: invalidHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const result = AnchorResolver.resolve(malformedSnapshot, anchor);
+    expect(result.status).toBe('ANCHOR_INVALID');
+    expect(result.valid).toBe(false);
+    expect(result.error).toBe('MALFORMED_UTF8_SOURCE');
+  });
+
+  it('29. Rejects inconsistent line and byte offset metadata (LINE_BYTE_METADATA_INCONSISTENT)', () => {
+    // Valid symbol byte range is lines 4-12, but anchor metadata claims lines 1-3
+    const parser = new TypeScriptAstParser();
+    const parseRes = parser.parse(sampleTypeScriptContent, sampleFilePath);
+    const entropySymbol = parseRes.symbols.find(s => s.name === 'calculateShannonEntropy')!;
+
+    const anchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: sampleOrgId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      lineStart: 1, // Inconsistent! Should be 4
+      lineEnd: 3,   // Inconsistent! Should be 12
+      byteStart: entropySymbol.byteStart,
+      byteEnd: entropySymbol.byteEnd,
+      contentHash: entropySymbol.contentHash,
+      rawFileHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const result = AnchorResolver.resolve(sampleSnapshot, anchor);
+    expect(result.status).toBe('ANCHOR_INVALID');
+    expect(result.valid).toBe(false);
+    expect(result.error).toBe('LINE_BYTE_METADATA_INCONSISTENT');
+  });
+
+  it('30. Rejects Git blobSha mismatch when present in anchor and snapshot', () => {
+    const snapshotWithBlob: SourceSnapshot = {
+      ...sampleSnapshot,
+      blobSha: '1111111111111111111111111111111111111111',
+    };
+
+    const lines = sampleTypeScriptContent.split('\n');
+    const targetSpan = lines.slice(3, 12).join('\n');
+    const contentHash = createHash('sha256').update(Buffer.from(targetSpan, 'utf8')).digest('hex');
+
+    const anchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: sampleOrgId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      blobSha: '2222222222222222222222222222222222222222', // Mismatch!
+      lineStart: 4,
+      lineEnd: 12,
+      contentHash,
+      rawFileHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const result = AnchorResolver.resolve(snapshotWithBlob, anchor);
+    expect(result.status).toBe('ANCHOR_INVALID');
+    expect(result.valid).toBe(false);
+    expect(result.error).toBe('BLOB_SHA_MISMATCH');
+  });
+
+  it('31. Whitespace alterations are flagged as whitespaceMismatch, NOT lineEndingMismatch', () => {
+    const lines = sampleTypeScriptContent.split('\n');
+    const targetSpan = lines.slice(3, 12).join('\n');
+    // Content hash based on untrimmed text
+    const contentHash = createHash('sha256').update(Buffer.from(targetSpan, 'utf8')).digest('hex');
+
+    // Create modified content where indentation is changed (whitespace alteration)
+    const modifiedContent = sampleTypeScriptContent.replace('let entropy = 0;', '    let entropy = 0;   ');
+    const modBytes = Buffer.from(modifiedContent, 'utf8');
+    const modHash = createHash('sha256').update(modBytes).digest('hex');
+
+    const modSnapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      rawBytes: modBytes,
+      rawFileHash: modHash,
+      capturedAt: new Date().toISOString(),
+    };
+
+    const anchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: sampleOrgId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      lineStart: 4,
+      lineEnd: 12,
+      contentHash,
+      rawFileHash: modHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const result = AnchorResolver.resolve(modSnapshot, anchor);
+    expect(result.status).toBe('ANCHOR_INVALID');
+    expect(result.valid).toBe(false);
+    expect(result.error).toBe('HASH_MISMATCH');
+    // Should NOT be classified as line-ending mismatch!
+    expect(result.diagnostics?.lineEndingMismatch).toBe(false);
+  });
+
+  it('32. normalizeFilePath strictly rejects path traversal, null bytes, and absolute paths', async () => {
+    const { normalizeFilePath } = await import('../src/snapshot-store.js');
+
+    // Path traversal
+    expect(() => normalizeFilePath('../secret.ts')).toThrow(/Path traversal segment '\.\.' is prohibited/);
+    expect(() => normalizeFilePath('src/../../etc/passwd')).toThrow(/Path traversal segment '\.\.' is prohibited/);
+    expect(() => normalizeFilePath('./local.ts')).toThrow(/Path traversal segment '\.' is prohibited/);
+
+    // Null bytes
+    expect(() => normalizeFilePath('src/math.ts\0.js')).toThrow(/File path contains null bytes/);
+
+    // Absolute Unix paths
+    expect(() => normalizeFilePath('/etc/hosts')).toThrow(/Absolute paths are prohibited/);
+    expect(() => normalizeFilePath('\\windows\\system32')).toThrow(/Absolute paths are prohibited/);
+
+    // Absolute Windows drive paths
+    expect(() => normalizeFilePath('C:/boot.ini')).toThrow(/Absolute Windows drive paths are prohibited/);
+    expect(() => normalizeFilePath('D:\\data\\file.ts')).toThrow(/Absolute Windows drive paths are prohibited/);
+
+    // Empty and whitespace paths
+    expect(() => normalizeFilePath('')).toThrow(/cannot be empty/);
+    expect(() => normalizeFilePath('   ')).toThrow(/cannot be empty/);
+
+    // Duplicate slashes
+    expect(() => normalizeFilePath('src//math.ts')).toThrow(/Duplicate path separators are prohibited/);
+
+    // Valid canonical paths
+    expect(normalizeFilePath('src/algorithms/entropy.ts')).toBe('src/algorithms/entropy.ts');
+    expect(normalizeFilePath('src\\algorithms\\entropy.ts')).toBe('src/algorithms/entropy.ts');
+  });
+
+  it('33. InMemorySourceSnapshotStore defensive byte copying prevents external Buffer mutation', () => {
+    const store = new InMemorySourceSnapshotStore();
+    const originalBuffer = Buffer.from('console.log("immutable");', 'utf8');
+    const originalHash = createHash('sha256').update(originalBuffer).digest('hex');
+
+    const snap: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/test-immutable.ts',
+      rawBytes: originalBuffer,
+      rawFileHash: originalHash,
+      capturedAt: new Date().toISOString(),
+    };
+
+    store.saveSnapshot(snap);
+
+    // 1. Mutate the caller's original buffer
+    originalBuffer[0] = 0x58; // 'X'
+
+    // 2. Fetch snapshot from store and verify stored bytes were NOT mutated!
+    const retrieved = store.getSnapshot(sampleRepoId, sampleCommitSha, 'src/test-immutable.ts');
+    expect(retrieved).toBeDefined();
+    expect(retrieved!.rawBytes.toString('utf8')).toBe('console.log("immutable");');
+    expect(retrieved!.rawBytes[0]).toBe(0x63); // 'c'
+
+    // 3. Mutate the retrieved buffer
+    (retrieved!.rawBytes as Buffer)[0] = 0x5a; // 'Z'
+
+    // 4. Fetch again and verify store remains pristine!
+    const retrievedAgain = store.getSnapshot(sampleRepoId, sampleCommitSha, 'src/test-immutable.ts');
+    expect(retrievedAgain!.rawBytes.toString('utf8')).toBe('console.log("immutable");');
+  });
+
+  it('34. Tenant isolation in snapshot store prevents cross-tenant snapshot retrieval', () => {
+    const store = new InMemorySourceSnapshotStore();
+    const collegeA = '00000000-0000-0000-0000-000000000001';
+    const collegeB = '00000000-0000-0000-0000-000000000002';
+
+    const snapA: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      orgId: collegeA,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/secret.ts',
+      rawBytes: Buffer.from('college A secret', 'utf8'),
+      rawFileHash: createHash('sha256').update('college A secret').digest('hex'),
+      capturedAt: new Date().toISOString(),
+    };
+
+    store.saveSnapshot(snapA);
+
+    // College A retrieves their own snapshot -> Found
+    expect(store.getSnapshot(sampleRepoId, sampleCommitSha, 'src/secret.ts', collegeA)).toBeDefined();
+
+    // College B tries to retrieve College A's snapshot with their orgId -> Returns undefined!
+    expect(store.getSnapshot(sampleRepoId, sampleCommitSha, 'src/secret.ts', collegeB)).toBeUndefined();
+  });
 });

@@ -400,10 +400,19 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     if (result.error === 'CROSS_TENANT_ACCESS_REJECTED' || result.error === 'FORBIDDEN_STUDENT_ACCESS') {
       return reply.status(403).send(result);
     }
+    if (result.error === 'CONSENT_SERVICE_UNAVAILABLE' || result.error === 'TRUSTED_INGESTION_NOT_AVAILABLE') {
+      return reply.status(503).send(result);
+    }
     if (result.status === 'SNAPSHOT_NOT_FOUND' || result.status === 'FILE_NOT_FOUND') {
       return reply.status(404).send(result);
     }
-    if (result.status === 'ANCHOR_INVALID' || result.status === 'PARSER_VERSION_UNAVAILABLE') {
+    if (
+      result.status === 'ANCHOR_INVALID' ||
+      result.status === 'PARSER_VERSION_UNAVAILABLE' ||
+      result.error === 'STUDENT_OWNERSHIP_REQUIRED' ||
+      result.error === 'CONSENT_REQUIRED_OR_REVOKED' ||
+      result.error === 'UNTRUSTED_CLIENT_SNAPSHOT'
+    ) {
       return reply.status(422).send(result);
     }
 
@@ -440,6 +449,15 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       const regResult = await anchorService.registerSnapshot(context, snapParse.data);
       return reply.status(201).send(regResult);
     } catch (err: any) {
+      if (err.message.startsWith('DURABLE_STORAGE_REQUIRED')) {
+        return reply.status(503).send({ error: err.message });
+      }
+      if (err.message.startsWith('CONSENT_REQUIRED_OR_REVOKED') || err.message.startsWith('CONSENT_SERVICE_UNAVAILABLE')) {
+        return reply.status(422).send({ error: err.message });
+      }
+      if (err.message.startsWith('INVALID_SNAPSHOT_PATH')) {
+        return reply.status(400).send({ error: err.message });
+      }
       return reply.status(400).send({ error: err.message });
     }
   });
@@ -463,6 +481,10 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     }
 
     const parseResult = anchorService.parseSource(body.source, body.filePath);
+    if (!parseResult.success && parseResult.errors.some(e => e.startsWith('INVALID_FILE_PATH') || e.startsWith('UNSUPPORTED_FILE_TYPE'))) {
+      return reply.status(400).send(parseResult);
+    }
+
     return reply.status(200).send(parseResult);
   });
 

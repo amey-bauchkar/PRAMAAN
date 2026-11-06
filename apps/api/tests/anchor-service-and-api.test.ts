@@ -8,6 +8,8 @@ import { InMemoryUserRepository } from '../src/repositories/user-repository.js';
 import { TenantStore } from '../src/services/tenant-store.js';
 import { AuditService } from '../src/services/audit-service.js';
 import { ConsentService } from '../src/services/consent-service.js';
+import { InMemoryAuditRepository } from '../src/repositories/audit-repository.js';
+import { InMemoryConsentRepository } from '../src/repositories/consent-repository.js';
 import { createTestToken, TEST_JWT_SECRET } from '../src/testing/test-jwt-utils.js';
 import {
   ExactCodeAnchor,
@@ -52,6 +54,14 @@ describe('Anchor Service & Evidence Endpoints (M2 — P0-05)', () => {
     createdAt: new Date().toISOString(),
   };
 
+  const mentorUser = {
+    id: '20000000-0000-0000-0000-000000000002',
+    authSubject: 'sub-mentor',
+    email: 'mentor@apex.edu',
+    fullName: 'Faculty Mentor',
+    createdAt: new Date().toISOString(),
+  };
+
   const sampleTypeScriptCode = `export function addNumbers(a: number, b: number): number {
   return a + b;
 }
@@ -72,6 +82,7 @@ export class MathOperations {
   let student1Token: string;
   let student2Token: string;
   let officerToken: string;
+  let mentorToken: string;
   let collegeBSessionToken: string;
 
   beforeEach(async () => {
@@ -85,6 +96,7 @@ export class MathOperations {
       { user: studentUser1, role: 'student' as const },
       { user: studentUser2, role: 'student' as const },
       { user: officerUser, role: 'officer' as const },
+      { user: mentorUser, role: 'mentor' as const },
     ]) {
       await userRepo.registerUser(user);
       await userRepo.addMembership({
@@ -141,6 +153,11 @@ export class MathOperations {
     officerToken = await createTestToken({
       sub: officerUser.authSubject,
       email: officerUser.email,
+    });
+
+    mentorToken = await createTestToken({
+      sub: mentorUser.authSubject,
+      email: mentorUser.email,
     });
 
     // Token for College B student
@@ -247,7 +264,15 @@ export class MathOperations {
       payload: { snapshot },
     });
 
-    // 2. Create anchor for lines 1 to 3 (addNumbers)
+    // 2. Student 1 grants purpose consent
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
+    // 3. Create anchor for lines 1 to 3 (addNumbers)
     const lines = sampleTypeScriptCode.split('\n');
     const funcSpan = lines.slice(0, 3).join('\n');
     const contentHash = createHash('sha256').update(Buffer.from(funcSpan, 'utf8')).digest('hex');
@@ -255,6 +280,7 @@ export class MathOperations {
     const anchor: ExactCodeAnchor = {
       id: randomUUID(),
       orgId: collegeAOrgId,
+      studentId: studentUser1.id,
       repositoryId: sampleRepoId,
       commitSha: sampleCommitSha,
       filePath: sampleFilePath,
@@ -473,9 +499,18 @@ export class MathOperations {
   });
 
   it('7. POST /api/evidence/anchors/resolve returns 404 on missing snapshot', async () => {
+    // Ensure student has active consent so resolution proceeds to snapshot check
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
     const anchor: ExactCodeAnchor = {
       id: randomUUID(),
       orgId: collegeAOrgId,
+      studentId: studentUser1.id,
       repositoryId: sampleRepoId,
       commitSha: sampleCommitSha,
       filePath: 'src/missing-file.ts',
@@ -583,5 +618,363 @@ export class MathOperations {
     const verifyBody = verifyRes.json();
     expect(verifyBody.valid).toBe(true);
     expect(verifyBody.status).toBe('COMPLETE_AND_VALID');
+  });
+
+  // --------------------------------------------------------------------------
+  // 5. Hardened Security & Adversarial Regressions (Sections 4, 5, 6, 8, 10)
+  // --------------------------------------------------------------------------
+
+  it('10. POST /api/evidence/anchors/resolve fails closed when studentId is omitted (STUDENT_OWNERSHIP_REQUIRED)', async () => {
+    const anchorWithoutStudent: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: collegeAOrgId,
+      // studentId omitted!
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      lineStart: 1,
+      lineEnd: 3,
+      contentHash: 'a'.repeat(64),
+      rawFileHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/evidence/anchors/resolve',
+      headers: {
+        authorization: `Bearer ${officerToken}`,
+        'x-org-id': collegeAOrgId,
+      },
+      payload: { anchor: anchorWithoutStudent },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toBe('STUDENT_OWNERSHIP_REQUIRED');
+  });
+
+  it('11. POST /api/evidence/anchors/resolve fails closed when student attempts to forge studentId', async () => {
+    // Caller is Student 1, but requests anchor with studentId = Student 2
+    const forgedAnchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: collegeAOrgId,
+      studentId: studentUser2.id, // Forged!
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      lineStart: 1,
+      lineEnd: 3,
+      contentHash: 'a'.repeat(64),
+      rawFileHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/evidence/anchors/resolve',
+      headers: {
+        authorization: `Bearer ${student1Token}`,
+        'x-org-id': collegeAOrgId,
+      },
+      payload: { anchor: forgedAnchor },
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe('FORBIDDEN_STUDENT_ACCESS');
+  });
+
+  it('12. POST /api/evidence/anchors/resolve fails closed after consent is revoked', async () => {
+    // 1. Student grants consent
+    const grant = await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
+    // 2. Student revokes consent
+    await consentService.revokeConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      grant.id,
+      'Student requested revocation'
+    );
+
+    const anchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: collegeAOrgId,
+      studentId: studentUser1.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      lineStart: 1,
+      lineEnd: 3,
+      contentHash: 'a'.repeat(64),
+      rawFileHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/evidence/anchors/resolve',
+      headers: {
+        authorization: `Bearer ${student1Token}`,
+        'x-org-id': collegeAOrgId,
+      },
+      payload: { anchor },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toBe('CONSENT_REQUIRED_OR_REVOKED');
+  });
+
+  it('13. POST /api/evidence/anchors/resolve prevents officer from bypassing student consent requirement', async () => {
+    // Student 2 has NOT granted consent
+    const anchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: collegeAOrgId,
+      studentId: studentUser2.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      lineStart: 1,
+      lineEnd: 3,
+      contentHash: 'a'.repeat(64),
+      rawFileHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    // Placement Officer calls resolve on Student 2's unconsented repository evidence
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/evidence/anchors/resolve',
+      headers: {
+        authorization: `Bearer ${officerToken}`,
+        'x-org-id': collegeAOrgId,
+      },
+      payload: { anchor },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toBe('CONSENT_REQUIRED_OR_REVOKED');
+  });
+
+  it('14. POST /api/evidence/anchors/resolve prevents mentor from bypassing student consent requirement', async () => {
+    // Student 2 has NOT granted consent
+    const anchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: collegeAOrgId,
+      studentId: studentUser2.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      lineStart: 1,
+      lineEnd: 3,
+      contentHash: 'a'.repeat(64),
+      rawFileHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    // Mentor calls resolve on Student 2's unconsented repository evidence
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/evidence/anchors/resolve',
+      headers: {
+        authorization: `Bearer ${mentorToken}`,
+        'x-org-id': collegeAOrgId,
+      },
+      payload: { anchor },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toBe('CONSENT_REQUIRED_OR_REVOKED');
+  });
+
+  it('15. POST /api/evidence/anchors/resolve fails closed when consent infrastructure is unavailable (503)', async () => {
+    const { AnchorService } = await import('../src/services/anchor-service.js');
+    const serviceWithoutConsent = new AnchorService({
+      auditRepo: new InMemoryAuditRepository(auditService),
+      consentRepo: undefined, // Unavailable!
+    });
+
+    const appWithoutConsent = buildApp({
+      persistenceMode: 'in-memory',
+      authService,
+      anchorService: serviceWithoutConsent,
+    });
+
+    const anchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: collegeAOrgId,
+      studentId: studentUser1.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      lineStart: 1,
+      lineEnd: 3,
+      contentHash: 'a'.repeat(64),
+      rawFileHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const res = await appWithoutConsent.inject({
+      method: 'POST',
+      url: '/api/evidence/anchors/resolve',
+      headers: {
+        authorization: `Bearer ${student1Token}`,
+        'x-org-id': collegeAOrgId,
+      },
+      payload: { anchor },
+    });
+
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error).toBe('CONSENT_SERVICE_UNAVAILABLE');
+  });
+
+  it('16. POST /api/evidence/anchors/resolve rejects client-supplied snapshot claiming authoritative status', async () => {
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
+    const snapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      rawBytes: rawBytes.toString('utf8'),
+      rawFileHash,
+      capturedAt: new Date().toISOString(),
+    };
+
+    const anchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: collegeAOrgId,
+      studentId: studentUser1.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      lineStart: 1,
+      lineEnd: 3,
+      contentHash: createHash('sha256').update(rawBytes).digest('hex'),
+      rawFileHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    // In unit testing AnchorService with authoritative: true, client snapshots are rejected
+    const anchorSvc = (app as any).anchorService;
+    const authResult = await anchorSvc.resolveAnchor(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      anchor,
+      snapshot,
+      { authoritative: true }
+    );
+
+    expect(authResult.valid).toBe(false);
+    expect(authResult.error).toBe('UNTRUSTED_CLIENT_SNAPSHOT');
+    expect(authResult.authoritative).toBe(false);
+  });
+
+  it('17. POST /api/evidence/snapshots fails closed in production mode with in-memory store (503)', async () => {
+    const { AnchorService } = await import('../src/services/anchor-service.js');
+    const prodService = new AnchorService({
+      auditRepo: new InMemoryAuditRepository(auditService),
+      consentRepo: new InMemoryConsentRepository(consentService),
+      isProduction: true, // Marked production!
+    });
+
+    const prodApp = buildApp({
+      persistenceMode: 'in-memory',
+      authService,
+      anchorService: prodService,
+    });
+
+    const snapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      rawBytes: rawBytes.toString('utf8'),
+      rawFileHash,
+      capturedAt: new Date().toISOString(),
+    };
+
+    const res = await prodApp.inject({
+      method: 'POST',
+      url: '/api/evidence/snapshots',
+      headers: {
+        authorization: `Bearer ${officerToken}`,
+        'x-org-id': collegeAOrgId,
+      },
+      payload: { snapshot },
+    });
+
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error).toContain('DURABLE_STORAGE_REQUIRED');
+  });
+
+  it('18. POST /api/evidence/snapshots strictly rejects path traversal and null bytes (400)', async () => {
+    const maliciousSnapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: '../../etc/passwd', // Path traversal!
+      rawBytes: 'root:x:0:0:...',
+      rawFileHash: createHash('sha256').update('root:x:0:0:...').digest('hex'),
+      capturedAt: new Date().toISOString(),
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/evidence/snapshots',
+      headers: {
+        authorization: `Bearer ${officerToken}`,
+        'x-org-id': collegeAOrgId,
+      },
+      payload: { snapshot: maliciousSnapshot },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toContain('INVALID_SNAPSHOT_PATH');
+  });
+
+  it('19. POST /api/evidence/parse strictly rejects path traversal and null bytes (400)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/evidence/parse',
+      headers: {
+        authorization: `Bearer ${officerToken}`,
+        'x-org-id': collegeAOrgId,
+      },
+      payload: {
+        filePath: 'src/../../../windows/system32/cmd.exe',
+        source: 'binary',
+      },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().errors[0]).toContain('INVALID_FILE_PATH');
   });
 });

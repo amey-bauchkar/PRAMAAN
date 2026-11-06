@@ -6,30 +6,87 @@ export interface ISourceSnapshotStore {
   getSnapshot(
     repositoryId: string,
     commitSha: string,
-    filePath: string
+    filePath: string,
+    orgId?: string
   ): Promise<SourceSnapshot | undefined> | SourceSnapshot | undefined;
-  getSnapshotByHash(rawFileHash: string): Promise<SourceSnapshot | undefined> | SourceSnapshot | undefined;
+  getSnapshotByHash(
+    rawFileHash: string,
+    orgId?: string
+  ): Promise<SourceSnapshot | undefined> | SourceSnapshot | undefined;
   hasSnapshot(
     repositoryId: string,
     commitSha: string,
-    filePath: string
+    filePath: string,
+    orgId?: string
   ): Promise<boolean> | boolean;
 }
 
+/**
+ * Validates and normalizes repository-relative source file paths.
+ * Enforces canonical representation and rejects traversal, absolute paths, null bytes, and empty paths.
+ */
 export function normalizeFilePath(filePath: string): string {
-  return filePath.replace(/\\/g, '/').replace(/^\/+/, '');
+  if (typeof filePath !== 'string' || filePath.trim().length === 0) {
+    throw new Error('INVALID_FILE_PATH: File path cannot be empty or whitespace');
+  }
+
+  // Reject null bytes
+  if (filePath.includes('\0')) {
+    throw new Error('INVALID_FILE_PATH: File path contains null bytes');
+  }
+
+  // Reject Windows drive paths (e.g. C:, D:)
+  if (/^[a-zA-Z]:/.test(filePath)) {
+    throw new Error('INVALID_FILE_PATH: Absolute Windows drive paths are prohibited');
+  }
+
+  // Reject absolute paths starting with / or \
+  if (filePath.startsWith('/') || filePath.startsWith('\\')) {
+    throw new Error('INVALID_FILE_PATH: Absolute paths are prohibited');
+  }
+
+  // Convert backslashes to forward slashes
+  const unified = filePath.replace(/\\/g, '/');
+
+  // Check for duplicate separators
+  if (unified.includes('//')) {
+    throw new Error('INVALID_FILE_PATH: Duplicate path separators are prohibited');
+  }
+
+  // Check for path traversal components
+  const segments = unified.split('/');
+  for (const seg of segments) {
+    if (seg === '..' || seg === '.') {
+      throw new Error(`INVALID_FILE_PATH: Path traversal segment '${seg}' is prohibited`);
+    }
+    if (seg.trim().length === 0) {
+      throw new Error('INVALID_FILE_PATH: Empty path segments are prohibited');
+    }
+  }
+
+  return unified;
 }
 
 export class InMemorySourceSnapshotStore implements ISourceSnapshotStore {
   private snapshotsByKey = new Map<string, SourceSnapshot>();
   private snapshotsByHash = new Map<string, SourceSnapshot>();
 
-  private makeKey(repositoryId: string, commitSha: string, filePath: string): string {
-    return `${repositoryId}:${commitSha.toLowerCase()}:${normalizeFilePath(filePath)}`;
+  private makeKey(repositoryId: string, commitSha: string, filePath: string, orgId?: string): string {
+    const tenantPrefix = orgId ? `${orgId}:` : '';
+    return `${tenantPrefix}${repositoryId}:${commitSha.toLowerCase()}:${normalizeFilePath(filePath)}`;
   }
 
+  private makeHashKey(rawFileHash: string, orgId?: string): string {
+    const tenantPrefix = orgId ? `${orgId}:` : '';
+    return `${tenantPrefix}${rawFileHash.toLowerCase()}`;
+  }
+
+  /**
+   * Saves a source snapshot with defensive byte copying and immutability checks.
+   */
   public saveSnapshot(snapshot: SourceSnapshot): void {
-    const key = this.makeKey(snapshot.repositoryId, snapshot.commitSha, snapshot.filePath);
+    const canonicalPath = normalizeFilePath(snapshot.filePath);
+    const key = this.makeKey(snapshot.repositoryId, snapshot.commitSha, canonicalPath, snapshot.orgId);
     
     // Verify raw file hash integrity before storage
     const rawBytes =
@@ -55,32 +112,81 @@ export class InMemorySourceSnapshotStore implements ISourceSnapshotStore {
       return; // Idempotent write of identical snapshot
     }
 
-    this.snapshotsByKey.set(key, snapshot);
-    if (!this.snapshotsByHash.has(snapshot.rawFileHash)) {
-      this.snapshotsByHash.set(snapshot.rawFileHash, snapshot);
+    // Defensive byte copying on write to prevent external buffer mutation
+    const clonedBytes = Buffer.from(rawBytes);
+    const immutableSnapshot: SourceSnapshot = {
+      ...snapshot,
+      filePath: canonicalPath,
+      rawBytes: clonedBytes,
+    };
+
+    this.snapshotsByKey.set(key, immutableSnapshot);
+
+    const hashKey = this.makeHashKey(snapshot.rawFileHash, snapshot.orgId);
+    if (!this.snapshotsByHash.has(hashKey)) {
+      this.snapshotsByHash.set(hashKey, immutableSnapshot);
     }
   }
 
+  /**
+   * Retrieves a snapshot with defensive byte copying on read.
+   */
   public getSnapshot(
     repositoryId: string,
     commitSha: string,
-    filePath: string
+    filePath: string,
+    orgId?: string
   ): SourceSnapshot | undefined {
-    const key = this.makeKey(repositoryId, commitSha, filePath);
-    return this.snapshotsByKey.get(key);
+    let canonicalPath: string;
+    try {
+      canonicalPath = normalizeFilePath(filePath);
+    } catch {
+      return undefined;
+    }
+
+    const key = this.makeKey(repositoryId, commitSha, canonicalPath, orgId);
+    let stored = this.snapshotsByKey.get(key);
+
+    // Fallback lookup without tenant prefix if orgId was not specified at storage time
+    if (!stored && orgId) {
+      stored = this.snapshotsByKey.get(this.makeKey(repositoryId, commitSha, canonicalPath));
+    }
+
+    if (!stored) return undefined;
+
+    // Defensive byte copying on read
+    return {
+      ...stored,
+      rawBytes: Buffer.from(stored.rawBytes),
+    };
   }
 
-  public getSnapshotByHash(rawFileHash: string): SourceSnapshot | undefined {
-    return this.snapshotsByHash.get(rawFileHash);
+  /**
+   * Retrieves a snapshot by hash with defensive byte copying on read.
+   */
+  public getSnapshotByHash(rawFileHash: string, orgId?: string): SourceSnapshot | undefined {
+    const hashKey = this.makeHashKey(rawFileHash, orgId);
+    let stored = this.snapshotsByHash.get(hashKey);
+
+    if (!stored && orgId) {
+      stored = this.snapshotsByHash.get(this.makeHashKey(rawFileHash));
+    }
+
+    if (!stored) return undefined;
+
+    return {
+      ...stored,
+      rawBytes: Buffer.from(stored.rawBytes),
+    };
   }
 
   public hasSnapshot(
     repositoryId: string,
     commitSha: string,
-    filePath: string
+    filePath: string,
+    orgId?: string
   ): boolean {
-    const key = this.makeKey(repositoryId, commitSha, filePath);
-    return this.snapshotsByKey.has(key);
+    return this.getSnapshot(repositoryId, commitSha, filePath, orgId) !== undefined;
   }
 
   public clear(): void {
@@ -92,4 +198,5 @@ export class InMemorySourceSnapshotStore implements ISourceSnapshotStore {
     return this.snapshotsByKey.size;
   }
 }
+
 

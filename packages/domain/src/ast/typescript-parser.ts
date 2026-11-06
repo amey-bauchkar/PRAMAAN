@@ -31,7 +31,38 @@ export class TypeScriptAstParser implements ILanguageParser {
   }
 
   public parse(source: Buffer | Uint8Array | string, filePath: string): ParseResult {
-    const sourceText = typeof source === 'string' ? source : Buffer.from(source).toString('utf8');
+    if (!this.supports(filePath)) {
+      return {
+        success: false,
+        parserName: this.parserName,
+        parserVersion: this.parserVersion,
+        grammarVersion: this.grammarVersion,
+        language: this.language,
+        symbols: [],
+        errors: [`UNSUPPORTED_FILE_TYPE: File path '${filePath}' is not supported by ${this.parserName}`],
+      };
+    }
+
+    let sourceText: string;
+    try {
+      if (typeof source === 'string') {
+        sourceText = source;
+      } else {
+        const decoder = new TextDecoder('utf-8', { fatal: true });
+        sourceText = decoder.decode(source);
+      }
+    } catch {
+      return {
+        success: false,
+        parserName: this.parserName,
+        parserVersion: this.parserVersion,
+        grammarVersion: this.grammarVersion,
+        language: this.language,
+        symbols: [],
+        errors: ['MALFORMED_UTF8_SOURCE: Source contains invalid UTF-8 byte sequences'],
+      };
+    }
+
     const scriptKind = this.resolveScriptKind(filePath);
 
     const sourceFile = ts.createSourceFile(

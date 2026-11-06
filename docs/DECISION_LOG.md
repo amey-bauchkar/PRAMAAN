@@ -86,3 +86,21 @@
 - **Decision:** Consent is maintained as an append-only ledger in `consent_grants` with distinct purpose codes (`placement_ops`, `repo_verification`, `recruiter_sharing`, `analytics`). When a student revokes consent for a repository, all stored OAuth tokens are purged from the database and revoked upstream within the same HTTP request.
 - **Consequences:** Prevents unauthorized data reuse. Demonstrates privacy-by-design to institutional auditors and accreditation bodies.
 
+---
+
+## ADR-09: Deterministic Exact Code Anchor Verification & Immutable Content-Addressed Snapshots
+
+- **Status:** Approved
+- **Context:** Trusting live remote Git branches for verification creates non-deterministic results if repositories are force-pushed, renamed, or deleted. Furthermore, character-based line numbers can drift across operating system line endings (`\r\n` vs `\n`) or character encodings.
+- **Decision:** Exact code anchors resolve strictly against immutable, content-addressed source snapshots retained at ingestion. Raw-byte SHA-256 integrity (`hashRawBytes`) is the non-negotiable authoritative gate. UTF-8 byte boundary verification rejects splits of multi-byte characters, and line-ending normalization differences are isolated to diagnostic reporting without overriding raw byte hash mismatch. Inline client snapshots are strictly prohibited from granting authoritative verification status (`UNTRUSTED_CLIENT_SNAPSHOT`).
+- **Consequences:** Complete reproducibility of code evidence verification forever. Tampering with files or anchors immediately yields deterministic rejection. Zero dependence on remote repository availability post-ingestion.
+
+---
+
+## ADR-10: Defensive Snapshot Memory Isolation & Fail-Closed Consent Gates on Repository Evidence
+
+- **Status:** Approved
+- **Context:** Passing shared Buffer instances across service layers in memory risks accidental or adversarial mutation of retained source snapshots. Furthermore, unauthorized users (including placement officers or mentors) could attempt to trigger repository analysis or symbol parsing on student code without explicit consent.
+- **Decision:** `InMemorySourceSnapshotStore` implements defensive buffer copying on both write and read (`Buffer.from(...)`). All snapshot operations and lookups are strictly tenant-scoped (`orgId`). Repository evidence resolution strictly enforces student ownership isolation (`context.userId === anchor.studentId` for students) and requires active purpose consent (`repo_verification`). If consent infrastructure is unavailable, resolution fails closed with `503 CONSENT_SERVICE_UNAVAILABLE`. Production snapshot storage strictly requires durable persistent storage; in-memory stores in production fail closed with `503 DURABLE_STORAGE_REQUIRED`.
+- **Consequences:** In-memory snapshot corruption is physically impossible. Privacy regulations (DPDP Act) are enforced at the API route layer—no staff role can inspect or analyze student repositories without active consent.
+

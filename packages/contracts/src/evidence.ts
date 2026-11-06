@@ -41,6 +41,7 @@ export type AnchorResolutionStatus = z.infer<typeof AnchorResolutionStatusSchema
 
 export const ResolutionDiagnosticSchema = z.object({
   lineEndingMismatch: z.boolean().optional(),
+  whitespaceMismatch: z.boolean().optional(),
   reason: z.string().optional(),
   details: z.record(z.unknown()).optional(),
 });
@@ -49,6 +50,8 @@ export type ResolutionDiagnostic = z.infer<typeof ResolutionDiagnosticSchema>;
 export const ResolutionResultSchema = z.object({
   status: AnchorResolutionStatusSchema,
   valid: z.boolean(),
+  authoritative: z.boolean().optional(),
+  provenance: z.string().optional(),
   anchorId: z.string().uuid().optional(),
   codeSpan: z.string().optional(),
   computedHash: z.string().optional(),
@@ -85,6 +88,7 @@ export type ExactCodeAnchor = z.infer<typeof ExactCodeAnchorSchema>;
 
 export const SourceSnapshotSchema = z.object({
   snapshotId: z.string().uuid(),
+  orgId: z.string().uuid().optional(), // Tenant organization identifier
   repositoryId: z.string().uuid(),
   commitSha: z.string().length(40),
   filePath: z.string().min(1),

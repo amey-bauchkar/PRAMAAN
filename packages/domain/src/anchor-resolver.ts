@@ -119,9 +119,24 @@ export class AnchorResolver {
         };
       }
 
-      // Check file path
-      const expectedPath = normalizeFilePath(exactAnchor.filePath || exactAnchor.path || '');
-      const actualPath = normalizeFilePath(snapshot.filePath);
+      // Check file path with strict canonical validation
+      let expectedPath: string;
+      let actualPath: string;
+      try {
+        expectedPath = normalizeFilePath(exactAnchor.filePath || exactAnchor.path || '');
+        actualPath = normalizeFilePath(snapshot.filePath);
+      } catch (err: any) {
+        return {
+          status: 'ANCHOR_INVALID',
+          valid: false,
+          error: 'INVALID_FILE_PATH',
+          anchorId: exactAnchor.id,
+          diagnostics: {
+            reason: `File path validation failed: ${err.message}`,
+          },
+        };
+      }
+
       if (expectedPath !== actualPath) {
         return {
           status: 'FILE_NOT_FOUND',
@@ -132,6 +147,21 @@ export class AnchorResolver {
             reason: `Anchor file path '${expectedPath}' does not match snapshot file path '${actualPath}'`,
           },
         };
+      }
+
+      // Check Git blob identity if present in both
+      if (exactAnchor.blobSha && snapshot.blobSha) {
+        if (exactAnchor.blobSha.toLowerCase() !== snapshot.blobSha.toLowerCase()) {
+          return {
+            status: 'ANCHOR_INVALID',
+            valid: false,
+            error: 'BLOB_SHA_MISMATCH',
+            anchorId: exactAnchor.id,
+            diagnostics: {
+              reason: `Anchor blobSha (${exactAnchor.blobSha}) does not match snapshot blobSha (${snapshot.blobSha})`,
+            },
+          };
+        }
       }
 
       // 3. Parser version verification
@@ -170,6 +200,20 @@ export class AnchorResolver {
       };
     }
 
+    // Validate UTF-8 encoding of source bytes
+    let fileText: string;
+    try {
+      const decoder = new TextDecoder('utf-8', { fatal: true });
+      fileText = decoder.decode(rawBytes);
+    } catch {
+      return {
+        status: 'ANCHOR_INVALID',
+        valid: false,
+        error: 'MALFORMED_UTF8_SOURCE',
+        diagnostics: { reason: 'Source bytes are malformed UTF-8' },
+      };
+    }
+
     const computedFileHash = this.hashRawBytes(rawBytes);
 
     // If snapshot specifies rawFileHash, verify snapshot integrity
@@ -204,17 +248,52 @@ export class AnchorResolver {
     let extractedSpan: string;
     const exactAnchor = this.isExactAnchor(anchor) ? (anchor as ExactCodeAnchor) : undefined;
 
-    // Prefer byte offsets if provided by AST parser
+    // Detect if file uses CRLF or LF and split lines
+    const hasCRLF = fileText.includes('\r\n');
+    const lines = fileText.split(/\r?\n/);
+
+    // Validate line boundary constraints against total lines
     if (
-      exactAnchor &&
-      exactAnchor.byteStart !== undefined &&
-      exactAnchor.byteEnd !== undefined
+      lineStart < 1 ||
+      lineEnd < lineStart ||
+      lineStart > lines.length ||
+      lineEnd > lines.length
     ) {
-      if (
-        exactAnchor.byteStart < 0 ||
-        exactAnchor.byteEnd < exactAnchor.byteStart ||
-        exactAnchor.byteEnd > rawBytes.length
-      ) {
+      return {
+        status: 'ANCHOR_INVALID',
+        valid: false,
+        error: 'OUT_OF_BOUNDS',
+        anchorId: exactAnchor?.id,
+        computedFileHash,
+        diagnostics: {
+          reason: `Line bounds [${lineStart}, ${lineEnd}] are out of range for total lines ${lines.length}`,
+        },
+      };
+    }
+
+    // Check byte offset presence: Incomplete byte offsets must be rejected
+    const hasByteStart = exactAnchor?.byteStart !== undefined;
+    const hasByteEnd = exactAnchor?.byteEnd !== undefined;
+
+    if (hasByteStart !== hasByteEnd) {
+      return {
+        status: 'ANCHOR_INVALID',
+        valid: false,
+        error: 'INCOMPLETE_BYTE_OFFSETS',
+        anchorId: exactAnchor?.id,
+        computedFileHash,
+        diagnostics: {
+          reason: 'Both byteStart and byteEnd must be provided when byte offsets are specified',
+        },
+      };
+    }
+
+    // Prefer byte offsets if provided by AST parser
+    if (hasByteStart && hasByteEnd && exactAnchor) {
+      const bStart = exactAnchor.byteStart!;
+      const bEnd = exactAnchor.byteEnd!;
+
+      if (bStart < 0 || bEnd < bStart || bEnd > rawBytes.length) {
         return {
           status: 'ANCHOR_INVALID',
           valid: false,
@@ -222,60 +301,97 @@ export class AnchorResolver {
           anchorId: exactAnchor.id,
           computedFileHash,
           diagnostics: {
-            reason: `Byte offset bounds [${exactAnchor.byteStart}, ${exactAnchor.byteEnd}] are out of range for file length ${rawBytes.length}`,
+            reason: `Byte offset bounds [${bStart}, ${bEnd}] are out of range for file length ${rawBytes.length}`,
           },
         };
       }
-      extractedSpan = rawBytes.subarray(exactAnchor.byteStart, exactAnchor.byteEnd).toString('utf8');
-    } else {
-      // Line-based extraction
-      const fileText = rawBytes.toString('utf8');
-      // Detect if file uses CRLF or LF
-      const hasCRLF = fileText.includes('\r\n');
-      const lines = fileText.split(/\r?\n/);
 
-      if (lineStart < 1 || lineEnd < lineStart || lineStart > lines.length) {
+      // Validate UTF-8 boundary integrity: Byte offsets must not split multi-byte characters
+      if (bStart < rawBytes.length && (rawBytes[bStart] & 0xc0) === 0x80) {
         return {
           status: 'ANCHOR_INVALID',
           valid: false,
-          error: 'OUT_OF_BOUNDS',
-          anchorId: exactAnchor?.id,
+          error: 'INVALID_UTF8_BYTE_BOUNDARY',
+          anchorId: exactAnchor.id,
           computedFileHash,
           diagnostics: {
-            reason: `Line bounds [${lineStart}, ${lineEnd}] are out of range for total lines ${lines.length}`,
+            reason: `byteStart (${bStart}) splits a multi-byte UTF-8 sequence (continuation byte)`,
           },
         };
       }
 
+      if (bEnd < rawBytes.length && (rawBytes[bEnd] & 0xc0) === 0x80) {
+        return {
+          status: 'ANCHOR_INVALID',
+          valid: false,
+          error: 'INVALID_UTF8_BYTE_BOUNDARY',
+          anchorId: exactAnchor.id,
+          computedFileHash,
+          diagnostics: {
+            reason: `byteEnd (${bEnd}) splits a multi-byte UTF-8 sequence (continuation byte)`,
+          },
+        };
+      }
+
+      // Verify that line boundaries and byte offsets are consistent
+      const precedingText = rawBytes.subarray(0, bStart).toString('utf8');
+      const computedLineStart = precedingText.split(/\r?\n/).length;
+      extractedSpan = rawBytes.subarray(bStart, bEnd).toString('utf8');
+      const spanLineCount = extractedSpan.split(/\r?\n/).length;
+      const computedLineEnd = computedLineStart + spanLineCount - 1;
+
+      if (lineStart !== computedLineStart || lineEnd !== computedLineEnd) {
+        return {
+          status: 'ANCHOR_INVALID',
+          valid: false,
+          error: 'LINE_BYTE_METADATA_INCONSISTENT',
+          anchorId: exactAnchor.id,
+          computedFileHash,
+          diagnostics: {
+            reason: `Supplied lines [${lineStart}, ${lineEnd}] do not match byte offset lines [${computedLineStart}, ${computedLineEnd}]`,
+          },
+        };
+      }
+    } else {
+      // Line-based extraction
       const spanLines = lines.slice(lineStart - 1, lineEnd);
       // Join preserving newline convention
       extractedSpan = spanLines.join(hasCRLF ? '\r\n' : '\n');
     }
 
     // 6. Verify stored source span hash
-    // We compute both raw hash and normalized hash
     const computedRawHash = this.hashRawBytes(extractedSpan);
-    const computedNormHash = this.hashNormalizedContent(extractedSpan);
+    
+    // Pure line-ending normalization (CRLF -> LF without trimming whitespace)
+    const lfSpan = extractedSpan.replace(/\r\n/g, '\n');
+    const computedLfHash = createHash('sha256').update(Buffer.from(lfSpan, 'utf8')).digest('hex');
+
+    // Whitespace-trimmed normalization
+    const wsSpan = lfSpan.trim();
+    const computedWsHash = createHash('sha256').update(Buffer.from(wsSpan, 'utf8')).digest('hex');
 
     // Is anchor hash matched by raw hash?
     let isHashMatch = computedRawHash === anchor.contentHash;
 
     // For legacy M0 anchors, hashContent was normalized hash
     if (!isHashMatch && !this.isExactAnchor(anchor)) {
-      if (computedNormHash === anchor.contentHash) {
+      if (computedLfHash === anchor.contentHash || computedWsHash === anchor.contentHash) {
         isHashMatch = true;
       }
     }
 
     if (!isHashMatch) {
-      // Diagnostic check: check if it matches normalized hash
-      const isNormalizedMatch = Boolean(
-        computedNormHash === anchor.contentHash ||
-        (exactAnchor?.normalizedContentHash &&
-          computedNormHash === exactAnchor.normalizedContentHash)
+      // Diagnostic check: check if it matches pure line ending normalization
+      const isLineEndingMismatch = Boolean(
+        computedLfHash === anchor.contentHash ||
+        (exactAnchor?.normalizedContentHash && computedLfHash === exactAnchor.normalizedContentHash)
       );
 
-      const isLineEndingMismatch = isNormalizedMatch;
+      // Separate diagnostic check: whitespace alterations
+      const isWhitespaceMismatch = !isLineEndingMismatch && Boolean(
+        computedWsHash === anchor.contentHash ||
+        (exactAnchor?.normalizedContentHash && computedWsHash === exactAnchor.normalizedContentHash)
+      );
 
       return {
         status: 'ANCHOR_INVALID',
@@ -287,8 +403,11 @@ export class AnchorResolver {
         anchorId: exactAnchor?.id,
         diagnostics: {
           lineEndingMismatch: isLineEndingMismatch,
+          whitespaceMismatch: isWhitespaceMismatch,
           reason: isLineEndingMismatch
-            ? 'Source content matches normalized text but failed raw byte integrity check (line-ending/whitespace difference)'
+            ? 'Source content matches normalized text but failed raw byte integrity check (line-ending difference)'
+            : isWhitespaceMismatch
+            ? 'Source content matches trimmed text but failed raw byte integrity check (whitespace difference)'
             : 'Extracted code span hash does not match anchor contentHash',
         },
       };
@@ -312,7 +431,12 @@ export class AnchorResolver {
     anchor: ExactCodeAnchor,
     options: ResolverOptions = {}
   ): Promise<ResolvedAnchorResult> {
-    const snapshot = await store.getSnapshot(anchor.repositoryId, anchor.commitSha, anchor.filePath);
+    const snapshot = await store.getSnapshot(
+      anchor.repositoryId,
+      anchor.commitSha,
+      anchor.filePath,
+      anchor.orgId
+    );
     if (!snapshot) {
       return {
         status: 'SNAPSHOT_NOT_FOUND',

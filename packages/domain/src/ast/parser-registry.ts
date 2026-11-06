@@ -18,13 +18,17 @@ export class ParserRegistry {
   }
 
   public register(parser: ILanguageParser): void {
-    // Avoid duplicate parser registrations
+    // Avoid duplicate parser registrations with exact same name, language, and version
     const existingIndex = this.parsers.findIndex(
-      p => p.parserName === parser.parserName && p.language === parser.language
+      p =>
+        p.parserName === parser.parserName &&
+        p.language === parser.language &&
+        p.parserVersion === parser.parserVersion
     );
     if (existingIndex >= 0) {
       this.parsers[existingIndex] = parser;
     } else {
+      // Retain distinct versions so historical anchors pinned to specific versions remain resolvable
       this.parsers.push(parser);
     }
   }
