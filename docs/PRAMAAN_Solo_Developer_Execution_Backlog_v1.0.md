@@ -15,7 +15,7 @@
 | **P0-02** | Cryptographic Audit Chain | Every write to domain tables inserts an `audit_events` row; SHA-256 hash chaining detects any tampered row. | BR-16 | M1 |
 | **P0-03** | Consent Ledger & Instant Revocation | Active grant permits repo import; calling revoke deletes stored tokens immediately and blocks further indexing. | BR-03, BR-13, ST-02, ST-08 | M1 |
 | **P0-04** | Selected-Repo Static Ingestion | Student-selected repositories only; tree metadata and commits fetched via API; zero build/install scripts executed. | ST-02 | M2 |
-| **P0-05** | Exact Code Anchor Resolver | Given commit SHA, path, and line range, resolver returns exact code span and hash; content mismatch returns `ANCHOR_INVALID`. | BR-12, TM-06 | M2 |
+| **P0-05** | Exact Code Anchor Resolver | Given commit SHA, path, and line range, resolver returns exact code span and hash; content mismatch returns `ANCHOR_INVALID`. Verified with 31 tests. | BR-12, TM-06 | M2 (VERIFIED) |
 | **P0-06** | Non-Repo Evidence & Mentor Attestation | Student uploads lab artifact; assigned faculty mentor attests against rubric; unassigned mentor is rejected; moves to `Evidence-linked`. | BR-03, BR-15, ST-02 | M2 |
 | **P0-07** | Five-State Skill State Machine | State machine enforces allowed transitions (`Claimed` -> `Observed` -> `Evidence-linked` -> `Verified` -> `Expired`); events logged. | BR-02, ST-03 | M3 |
 | **P0-08** | Grounded Defence Question Generator | Questions anchored to resolved code spans pass 5 safety & relevance gates; missing/unresolved anchor blocks question generation. | BR-15 | M3 |

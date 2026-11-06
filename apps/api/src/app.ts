@@ -11,6 +11,8 @@ import { ITenantRepository, InMemoryTenantRepository, PgTenantRepository } from 
 import { IAuditRepository, InMemoryAuditRepository, PgAuditRepository } from './repositories/audit-repository.js';
 import { IConsentRepository, InMemoryConsentRepository, PgConsentRepository } from './repositories/consent-repository.js';
 import { IUserRepository, InMemoryUserRepository, PgUserRepository } from './repositories/user-repository.js';
+import { AnchorService } from './services/anchor-service.js';
+import { ExactCodeAnchorSchema, SourceSnapshotSchema } from '@pramaan/contracts';
 import { getDbPool } from './db/pool.js';
 
 export interface AppOptions {
@@ -20,6 +22,7 @@ export interface AppOptions {
   consentRepository?: IConsentRepository;
   authService?: AuthService;
   userRepository?: IUserRepository;
+  anchorService?: AnchorService;
   // Legacy / convenience options for tests:
   tenantStore?: TenantStore;
   auditService?: AuditService;
@@ -44,7 +47,8 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       opts.tenantRepository ||
       opts.auditRepository ||
       opts.consentRepository ||
-      opts.userRepository
+      opts.userRepository ||
+      opts.anchorService
     ) {
       throw new Error(
         'FATAL: Production mode prohibits injecting custom repositories or mock stores. All production repositories must be constructed internally using the restricted runtime pool.'
@@ -149,6 +153,12 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
   const authService = isProduction
     ? new AuthService({ userRepository: userRepo })
     : (opts.authService ?? new AuthService({ userRepository: userRepo }));
+
+  const anchorService = opts.anchorService ?? new AnchorService({
+    auditRepo,
+    consentRepo,
+  });
+  (app as any).anchorService = anchorService;
 
   app.register(cors, { origin: true });
 
@@ -341,6 +351,119 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     }
 
     return auditRepo.verifyIntegrity(context);
+  });
+
+  // ============================================================================
+  // Milestone M2: Exact Code Anchor & Evidence Routes (P0-05)
+  // ============================================================================
+
+  // Evidence API: Resolve Exact Code Anchor
+  // Positive RBAC: student (own anchors), officer, mentor, recruiter, platform_admin
+  app.post('/api/evidence/anchors/resolve', async (req, reply) => {
+    const context = await resolveSessionContext(req, reply);
+    if (!context) return;
+
+    const allowedRoles: UserRole[] = ['student', 'officer', 'mentor', 'recruiter', 'platform_admin'];
+    if (!allowedRoles.includes(context.role as UserRole)) {
+      return reply.status(403).send({
+        error: `FORBIDDEN_ROLE: Role '${context.role}' cannot resolve code anchors.`
+      });
+    }
+
+    const body = req.body as any;
+    if (!body?.anchor) {
+      return reply.status(400).send({ error: 'Missing required field: anchor' });
+    }
+
+    const parseResult = ExactCodeAnchorSchema.safeParse(body.anchor);
+    if (!parseResult.success) {
+      return reply.status(400).send({
+        error: 'INVALID_ANCHOR_SCHEMA',
+        details: parseResult.error.format()
+      });
+    }
+
+    let snapshot: any = undefined;
+    if (body.snapshot) {
+      const snapParse = SourceSnapshotSchema.safeParse(body.snapshot);
+      if (!snapParse.success) {
+        return reply.status(400).send({
+          error: 'INVALID_SNAPSHOT_SCHEMA',
+          details: snapParse.error.format()
+        });
+      }
+      snapshot = snapParse.data;
+    }
+
+    const result = await anchorService.resolveAnchor(context, parseResult.data, snapshot);
+
+    if (result.error === 'CROSS_TENANT_ACCESS_REJECTED' || result.error === 'FORBIDDEN_STUDENT_ACCESS') {
+      return reply.status(403).send(result);
+    }
+    if (result.status === 'SNAPSHOT_NOT_FOUND' || result.status === 'FILE_NOT_FOUND') {
+      return reply.status(404).send(result);
+    }
+    if (result.status === 'ANCHOR_INVALID' || result.status === 'PARSER_VERSION_UNAVAILABLE') {
+      return reply.status(422).send(result);
+    }
+
+    return reply.status(200).send(result);
+  });
+
+  // Evidence API: Register Immutable Source Snapshot
+  // Positive RBAC: student, officer, platform_admin
+  app.post('/api/evidence/snapshots', async (req, reply) => {
+    const context = await resolveSessionContext(req, reply);
+    if (!context) return;
+
+    const allowedRoles: UserRole[] = ['student', 'officer', 'platform_admin'];
+    if (!allowedRoles.includes(context.role as UserRole)) {
+      return reply.status(403).send({
+        error: `FORBIDDEN_ROLE: Role '${context.role}' cannot register source snapshots.`
+      });
+    }
+
+    const body = req.body as any;
+    if (!body?.snapshot) {
+      return reply.status(400).send({ error: 'Missing required field: snapshot' });
+    }
+
+    const snapParse = SourceSnapshotSchema.safeParse(body.snapshot);
+    if (!snapParse.success) {
+      return reply.status(400).send({
+        error: 'INVALID_SNAPSHOT_SCHEMA',
+        details: snapParse.error.format()
+      });
+    }
+
+    try {
+      const regResult = await anchorService.registerSnapshot(context, snapParse.data);
+      return reply.status(201).send(regResult);
+    } catch (err: any) {
+      return reply.status(400).send({ error: err.message });
+    }
+  });
+
+  // Evidence API: Parse Source via Offline AST Parser
+  // Positive RBAC: student, officer, mentor, platform_admin
+  app.post('/api/evidence/parse', async (req, reply) => {
+    const context = await resolveSessionContext(req, reply);
+    if (!context) return;
+
+    const allowedRoles: UserRole[] = ['student', 'officer', 'mentor', 'platform_admin'];
+    if (!allowedRoles.includes(context.role as UserRole)) {
+      return reply.status(403).send({
+        error: `FORBIDDEN_ROLE: Role '${context.role}' cannot execute static parsing.`
+      });
+    }
+
+    const body = req.body as any;
+    if (!body?.filePath || body?.source === undefined) {
+      return reply.status(400).send({ error: 'Missing required fields: filePath and source' });
+    }
+
+    const parseResult = anchorService.parseSource(body.source, body.filePath);
+    return reply.status(200).send(parseResult);
   });
 
   return app;

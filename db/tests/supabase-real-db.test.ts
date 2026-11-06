@@ -528,6 +528,19 @@ describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariant
     const COLLISION_TENANT_ID = 'e0000000-0000-0000-0000-000000000098';
     const COLLISION_EVENT_ID = 'e9999999-0000-0000-0000-000000000002';
 
+    // Clean up any stale collision event from aborted prior runs
+    try {
+      await safeCleanupTestAuditEvents({
+        orgId: COLLISION_TENANT_ID,
+        seq: TEST_AUDIT_SEQ,
+        action: 'OTHER_TENANT_ACTION',
+        objectType: 'other_record',
+        id: COLLISION_EVENT_ID
+      });
+    } catch {
+      // Ignore if not present
+    }
+
     // 1. Seed collision tenant
     await runQuery(`
       INSERT INTO organizations (id, name, kind)
@@ -550,7 +563,8 @@ describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariant
         'other_record',
         repeat('0', 64),
         repeat('b', 64)
-      );
+      )
+      ON CONFLICT (id) DO NOTHING;
       COMMIT;
     `);
 
