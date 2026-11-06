@@ -5,6 +5,24 @@ export class AuditChain {
   public static readonly GENESIS_HASH = '0'.repeat(64);
 
   /**
+   * Deterministic canonical JSON serialization (RFC 8785) with recursively sorted object keys.
+   * Guarantees identical hashes across in-memory objects and PostgreSQL JSONB normalized columns.
+   */
+  public static canonicalStringify(obj: unknown): string {
+    if (obj === null || typeof obj !== 'object') {
+      return JSON.stringify(obj);
+    }
+    if (Array.isArray(obj)) {
+      return `[${obj.map(item => this.canonicalStringify(item)).join(',')}]`;
+    }
+    const keys = Object.keys(obj as Record<string, unknown>).sort();
+    const entries = keys.map(
+      k => `${JSON.stringify(k)}:${this.canonicalStringify((obj as Record<string, unknown>)[k])}`
+    );
+    return `{${entries.join(',')}}`;
+  }
+
+  /**
    * Generates a SHA-256 hash for an audit event linked to a previous event hash.
    */
   public static calculateHash(event: Omit<AuditEvent, 'hash'>): string {
@@ -16,7 +34,7 @@ export class AuditChain {
       event.action,
       event.objectType,
       event.objectId ?? 'none',
-      JSON.stringify(event.metadata),
+      this.canonicalStringify(event.metadata ?? {}),
       event.prevHash,
       event.occurredAt
     ].join('|');

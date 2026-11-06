@@ -3,7 +3,7 @@ import { AuthService } from '../src/services/auth-service.js';
 import { JwtVerifier } from '../src/services/jwt-verifier.js';
 import { createTestToken, TEST_JWT_SECRET } from '../src/testing/test-jwt-utils.js';
 import { InMemoryUserRepository } from '../src/repositories/user-repository.js';
-import { User, Membership } from '@pramaan/contracts';
+import { User } from '@pramaan/contracts';
 
 describe('AuthService: Genuine Supabase JWT Verification & Membership Derivation', () => {
   let authService: AuthService;

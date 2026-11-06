@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { getDbPool, closeDbPool, withTenantTransaction } from '../src/db/pool.js';
+import { getDbPool, withTenantTransaction } from '../src/db/pool.js';
 import { PgTenantRepository } from '../src/repositories/tenant-repository.js';
 import { runQuery } from '../../../scripts/supabase-runner.mjs';
 import pg from 'pg';

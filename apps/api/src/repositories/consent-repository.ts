@@ -3,9 +3,7 @@ import { randomUUID } from 'crypto';
 import {
   ConsentGrant,
   ConsentPurposeCode,
-  SessionContext,
-  EvidenceItem,
-  StudentSkill
+  SessionContext
 } from '@pramaan/contracts';
 import { withTenantTransaction, getDbPool } from '../db/pool.js';
 import { ConsentService, RevocationResult } from '../services/consent-service.js';
@@ -20,7 +18,11 @@ export interface IConsentRepository {
     scope?: Record<string, unknown>
   ): Promise<ConsentGrant>;
   getGrant(context: SessionContext, grantId: string): Promise<ConsentGrant | null>;
-  hasActiveConsent(studentId: string, purpose: ConsentPurposeCode): Promise<boolean>;
+  hasActiveConsent(
+    context: SessionContext,
+    studentId: string,
+    purpose: ConsentPurposeCode
+  ): Promise<boolean>;
   revokeConsent(
     context: SessionContext,
     grantId: string,
@@ -41,11 +43,15 @@ export class InMemoryConsentRepository implements IConsentRepository {
     return this.service.grantConsent(context, studentId, purpose, noticeVersion, scope);
   }
 
-  public async hasActiveConsent(studentId: string, purpose: ConsentPurposeCode): Promise<boolean> {
+  public async hasActiveConsent(
+    _context: SessionContext,
+    studentId: string,
+    purpose: ConsentPurposeCode
+  ): Promise<boolean> {
     return this.service.hasActiveConsent(studentId, purpose);
   }
 
-  public async getGrant(context: SessionContext, grantId: string): Promise<ConsentGrant | null> {
+  public async getGrant(_context: SessionContext, grantId: string): Promise<ConsentGrant | null> {
     const grant = this.service.getGrant(grantId);
     return grant ?? null;
   }
@@ -107,28 +113,50 @@ export class PgConsentRepository implements IConsentRepository {
       };
 
       if (this.auditRepository) {
-        await this.auditRepository.log(
-          context,
-          'CONSENT_GRANTED',
-          'consent_grant',
-          grant.id,
-          { studentId, purpose, noticeVersion }
-        );
+        if (this.auditRepository.logInTransaction) {
+          await this.auditRepository.logInTransaction(
+            client,
+            context,
+            'CONSENT_GRANTED',
+            'consent_grant',
+            grant.id,
+            { studentId, purpose, noticeVersion }
+          );
+        } else {
+          await this.auditRepository.log(
+            context,
+            'CONSENT_GRANTED',
+            'consent_grant',
+            grant.id,
+            { studentId, purpose, noticeVersion }
+          );
+        }
       }
 
       return grant;
     }, this.pool);
   }
 
-  public async hasActiveConsent(studentId: string, purpose: ConsentPurposeCode): Promise<boolean> {
-    const query = `
-      SELECT id 
-      FROM consent_grants 
-      WHERE student_id = $1 AND purpose = $2 AND revoked_at IS NULL
-      LIMIT 1;
-    `;
-    const res = await this.pool.query(query, [studentId, purpose]);
-    return res.rows.length > 0;
+  /**
+   * Tenant-scoped check whether an active, non-revoked consent grant exists for a student and purpose.
+   * Executes strictly within withTenantTransaction() under the caller's SessionContext and app_api role,
+   * guaranteeing RLS tenant boundaries and preventing cross-tenant leakage.
+   */
+  public async hasActiveConsent(
+    context: SessionContext,
+    studentId: string,
+    purpose: ConsentPurposeCode
+  ): Promise<boolean> {
+    return withTenantTransaction(context, async (client) => {
+      const query = `
+        SELECT id 
+        FROM consent_grants 
+        WHERE student_id = $1 AND purpose = $2 AND revoked_at IS NULL
+        LIMIT 1;
+      `;
+      const res = await client.query(query, [studentId, purpose]);
+      return res.rows.length > 0;
+    }, this.pool);
   }
 
   public async getGrant(context: SessionContext, grantId: string): Promise<ConsentGrant | null> {
@@ -238,21 +266,40 @@ export class PgConsentRepository implements IConsentRepository {
         : 'sandbox_inert';
 
       if (this.auditRepository) {
-        await this.auditRepository.log(
-          context,
-          'CONSENT_REVOKED',
-          'consent_grant',
-          grantId,
-          {
-            studentId: grant.student_id,
-            purpose: grant.purpose,
-            reason,
-            localTokenPurged,
-            providerRevocationStatus,
-            withdrawnEvidenceCount,
-            downgradedSkillsCount
-          }
-        );
+        if (this.auditRepository.logInTransaction) {
+          await this.auditRepository.logInTransaction(
+            client,
+            context,
+            'CONSENT_REVOKED',
+            'consent_grant',
+            grantId,
+            {
+              studentId: grant.student_id,
+              purpose: grant.purpose,
+              reason,
+              localTokenPurged,
+              providerRevocationStatus,
+              withdrawnEvidenceCount,
+              downgradedSkillsCount
+            }
+          );
+        } else {
+          await this.auditRepository.log(
+            context,
+            'CONSENT_REVOKED',
+            'consent_grant',
+            grantId,
+            {
+              studentId: grant.student_id,
+              purpose: grant.purpose,
+              reason,
+              localTokenPurged,
+              providerRevocationStatus,
+              withdrawnEvidenceCount,
+              downgradedSkillsCount
+            }
+          );
+        }
       }
 
       return {
@@ -266,4 +313,3 @@ export class PgConsentRepository implements IConsentRepository {
     }, this.pool);
   }
 }
-

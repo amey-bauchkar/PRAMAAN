@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import pg from 'pg';
 import { runQuery as runSupabaseQuery } from './supabase-runner.mjs';
+import { resolveAdminSslConfig } from './admin-db-ssl.mjs';
 
 try {
   process.loadEnvFile?.();
@@ -14,14 +15,19 @@ const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 const migrationsDir = path.join(rootDir, 'db', 'migrations');
 
+// PostgreSQL advisory lock ID to prevent concurrent migration runners from colliding
+const MIGRATION_ADVISORY_LOCK_ID = 8429104820948123n;
+
 /**
  * Migration Executor that safely separates administrative credentials
- * from restricted application runtime credentials.
+ * from restricted application runtime credentials and enforces transaction atomicity.
  */
 class MigrationExecutor {
   constructor() {
     this.pgPool = null;
+    this.pgClient = null;
     this.mode = 'none';
+    this.hasAdvisoryLock = false;
   }
 
   async init() {
@@ -31,12 +37,14 @@ class MigrationExecutor {
 
     if (adminUrl) {
       console.log('[MIGRATION] Using administrative PostgreSQL connection (DATABASE_URL_ADMIN)...');
-      const ssl = process.env.DATABASE_CA_PATH && fs.existsSync(process.env.DATABASE_CA_PATH)
-        ? { ca: fs.readFileSync(process.env.DATABASE_CA_PATH, 'utf8'), rejectUnauthorized: true }
-        : (adminUrl.includes('localhost') || adminUrl.includes('127.0.0.1')) ? false : { rejectUnauthorized: false };
-
+      const ssl = resolveAdminSslConfig(adminUrl);
       this.pgPool = new pg.Pool({ connectionString: adminUrl, ssl, max: 2 });
       this.mode = 'pg';
+      this.pgClient = await this.pgPool.connect();
+      
+      // Acquire PostgreSQL session advisory lock to prevent concurrent migration runs
+      await this.pgClient.query(`SELECT pg_advisory_lock(${MIGRATION_ADVISORY_LOCK_ID});`);
+      this.hasAdvisoryLock = true;
     } else if (managementToken) {
       console.log('[MIGRATION] Using Supabase Management API via SUPABASE_MANAGEMENT_TOKEN...');
       this.mode = 'supabase_api';
@@ -48,12 +56,14 @@ class MigrationExecutor {
         );
       }
       console.warn('[MIGRATION WARNING] DATABASE_URL_ADMIN not set; falling back to DATABASE_URL with DDL check...');
-      const ssl = process.env.DATABASE_CA_PATH && fs.existsSync(process.env.DATABASE_CA_PATH)
-        ? { ca: fs.readFileSync(process.env.DATABASE_CA_PATH, 'utf8'), rejectUnauthorized: true }
-        : (runtimeUrl.includes('localhost') || runtimeUrl.includes('127.0.0.1')) ? false : { rejectUnauthorized: false };
-
+      const ssl = resolveAdminSslConfig(runtimeUrl);
       this.pgPool = new pg.Pool({ connectionString: runtimeUrl, ssl, max: 2 });
       this.mode = 'pg';
+      this.pgClient = await this.pgPool.connect();
+      
+      // Acquire PostgreSQL session advisory lock
+      await this.pgClient.query(`SELECT pg_advisory_lock(${MIGRATION_ADVISORY_LOCK_ID});`);
+      this.hasAdvisoryLock = true;
     } else {
       throw new Error(
         'FATAL: No migration credentials available. Set DATABASE_URL_ADMIN (preferred for DDL) or SUPABASE_MANAGEMENT_TOKEN.'
@@ -63,12 +73,7 @@ class MigrationExecutor {
 
   async execute(sql) {
     if (this.mode === 'pg') {
-      const client = await this.pgPool.connect();
-      try {
-        return await client.query(sql);
-      } finally {
-        client.release();
-      }
+      return await this.pgClient.query(sql);
     } else if (this.mode === 'supabase_api') {
       return await runSupabaseQuery(sql);
     } else {
@@ -78,13 +83,8 @@ class MigrationExecutor {
 
   async query(sql, params = []) {
     if (this.mode === 'pg') {
-      const client = await this.pgPool.connect();
-      try {
-        const result = await client.query(sql, params);
-        return result.rows;
-      } finally {
-        client.release();
-      }
+      const result = await this.pgClient.query(sql, params);
+      return result.rows;
     } else if (this.mode === 'supabase_api') {
       // Supabase query API executes raw SQL without parameter binding; sanitize or format simple parameters
       let formattedSql = sql;
@@ -100,9 +100,46 @@ class MigrationExecutor {
     }
   }
 
+  /**
+   * Applies a single migration script and its corresponding ledger entry atomically.
+   */
+  async applyMigrationTransactional(version, filename, sqlContent, checksum) {
+    if (this.mode === 'pg') {
+      await this.pgClient.query('BEGIN;');
+      try {
+        await this.pgClient.query(sqlContent);
+        await this.pgClient.query(
+          `INSERT INTO schema_migrations (version, name, applied_at, checksum) VALUES ($1, $2, CURRENT_TIMESTAMP, $3);`,
+          [version, filename, checksum]
+        );
+        await this.pgClient.query('COMMIT;');
+      } catch (err) {
+        await this.pgClient.query('ROLLBACK;');
+        throw err;
+      }
+    } else if (this.mode === 'supabase_api') {
+      // Supabase Management API executes via HTTPS. Execute script then insert ledger record.
+      await runSupabaseQuery(sqlContent);
+      const insertSql = `INSERT INTO schema_migrations (version, name, applied_at, checksum) VALUES ('${version.replace(/'/g, "''")}', '${filename.replace(/'/g, "''")}', CURRENT_TIMESTAMP, '${checksum}');`;
+      await runSupabaseQuery(insertSql);
+    }
+  }
+
   async close() {
+    if (this.pgClient) {
+      if (this.hasAdvisoryLock) {
+        try {
+          await this.pgClient.query(`SELECT pg_advisory_unlock(${MIGRATION_ADVISORY_LOCK_ID});`);
+        } catch (err) {
+          console.warn('[MIGRATION WARNING] Failed to release advisory lock during shutdown:', err);
+        }
+      }
+      this.pgClient.release();
+      this.pgClient = null;
+    }
     if (this.pgPool) {
       await this.pgPool.end();
+      this.pgPool = null;
     }
   }
 }
@@ -110,7 +147,7 @@ class MigrationExecutor {
 /**
  * Computes deterministic SHA-256 hash of a file's content
  */
-function computeChecksum(content) {
+export function computeChecksum(content) {
   return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
 }
 
@@ -183,34 +220,32 @@ export async function runMigrations() {
       const sqlContent = fs.readFileSync(fullPath, 'utf8');
       const checksum = computeChecksum(sqlContent);
       
-      // Version identifier extracted from filename prefix (e.g., '001', '006b', '007', '008')
+      // Version identifier extracted from filename prefix (e.g., '001', '006b', '007', '008', '009')
       const versionMatch = filename.match(/^([0-9a-zA-Z_]+?)(?:_|$)/);
       const version = versionMatch ? versionMatch[1] : filename;
 
       if (appliedMap.has(version)) {
-        skippedCount++;
         const previousChecksum = appliedMap.get(version);
         if (previousChecksum !== checksum) {
-          console.warn(`[MIGRATION WARNING] Checksum drift detected for already-applied migration ${filename}! Recorded: ${previousChecksum.substring(0, 8)}..., Current: ${checksum.substring(0, 8)}... (Skipping rerun)`);
-        } else {
-          console.log(`[MIGRATION SKIP] Migration ${version} (${filename}) already recorded in ledger.`);
+          throw new Error(
+            `FATAL: Migration ledger integrity violation! Checksum drift detected for previously applied migration '${filename}' (version ${version}).\n` +
+            `Ledger Checksum:  ${previousChecksum}\n` +
+            `Current File Hash: ${checksum}\n` +
+            `Applied migrations are strictly immutable. Schema modifications must be applied via a new numbered migration.`
+          );
         }
+        skippedCount++;
+        console.log(`[MIGRATION SKIP] Migration ${version} (${filename}) already recorded in ledger.`);
         continue;
       }
 
-      console.log(`[MIGRATION APPLYING] ${version} (${filename})...`);
+      console.log(`[MIGRATION APPLYING] ${version} (${filename}) [Atomic Transaction]...`);
       try {
-        await executor.execute(sqlContent);
-
-        // Record in ledger
-        await executor.query(
-          `INSERT INTO schema_migrations (version, name, applied_at, checksum) VALUES ($1, $2, CURRENT_TIMESTAMP, $3);`,
-          [version, filename, checksum]
-        );
+        await executor.applyMigrationTransactional(version, filename, sqlContent, checksum);
         newlyAppliedCount++;
         console.log(`[MIGRATION SUCCESS] Applied & recorded ${version} (${filename})`);
       } catch (err) {
-        console.error(`[MIGRATION FAILED] Error applying ${filename}:`, err);
+        console.error(`[MIGRATION FAILED] Error applying ${filename} (Transaction rolled back):`, err);
         throw err;
       }
     }

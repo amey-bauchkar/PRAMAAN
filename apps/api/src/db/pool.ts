@@ -22,7 +22,8 @@ export function resolveSslConfig(connectionString?: string): boolean | pg.Connec
         ca = fs.readFileSync(process.env.DATABASE_CA_PATH, 'utf8');
       } catch (err: any) {
         throw new Error(
-          `DATABASE_CA_PATH is configured ('${process.env.DATABASE_CA_PATH}') but could not be read: ${err.message}`
+          `DATABASE_CA_PATH is configured ('${process.env.DATABASE_CA_PATH}') but could not be read: ${err.message}`,
+          { cause: err }
         );
       }
     } else {

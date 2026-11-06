@@ -26,7 +26,7 @@ export class AnchorResolver {
     }
 
     const lines = fileContent.replace(/\r\n/g, '\n').split('\n');
-    const { lineStart, lineEnd, contentHash } = anchor;
+    const { lineStart, lineEnd } = anchor;
 
     // Line numbers are 1-indexed
     if (lineStart < 1 || lineEnd < lineStart || lineStart > lines.length) {

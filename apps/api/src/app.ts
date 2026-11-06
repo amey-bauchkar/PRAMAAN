@@ -48,6 +48,11 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     ) {
       throw new Error('FATAL: Production mode prohibits in-memory repositories or mock stores.');
     }
+    if (opts.authService) {
+      throw new Error(
+        'FATAL: Production mode prohibits injecting custom authService. Production authentication must use internally constructed AuthService with verified PostgreSQL repository and Supabase JWKS configuration.'
+      );
+    }
     if (!process.env.SUPABASE_URL && !process.env.SUPABASE_JWKS_URI && !process.env.SUPABASE_JWT_SECRET) {
       throw new Error('FATAL: Production mode requires Supabase JWT configuration (SUPABASE_URL, SUPABASE_JWKS_URI, or SUPABASE_JWT_SECRET).');
     }
@@ -130,7 +135,9 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     userRepo = new InMemoryUserRepository();
   }
 
-  const authService = opts.authService ?? new AuthService({ userRepository: userRepo });
+  const authService = isProduction
+    ? new AuthService({ userRepository: userRepo })
+    : (opts.authService ?? new AuthService({ userRepository: userRepo }));
 
   app.register(cors, { origin: true });
 

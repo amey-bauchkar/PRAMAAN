@@ -190,4 +190,57 @@ describe('Production Mode Fail-Closed Invariants (P1-7)', () => {
       await pool.end();
     }
   });
+
+  it('9. Fails startup in production when custom AuthService is injected (P0-1)', async () => {
+    setEnv('NODE_ENV', 'production');
+    process.env.DATABASE_URL = 'postgresql://pramaan_app_user:secret@localhost:5432/pramaan';
+    process.env.SUPABASE_URL = 'https://qshujrddrzoemlzmleru.supabase.co';
+
+    const { AuthService } = await import('../src/services/auth-service.js');
+    const { JwtVerifier } = await import('../src/services/jwt-verifier.js');
+    const { TEST_JWT_SECRET } = await import('../src/testing/test-jwt-utils.js');
+
+    const customAuth = new AuthService({
+      jwtVerifier: new JwtVerifier(TEST_JWT_SECRET)
+    });
+
+    expect(() => {
+      buildApp({ authService: customAuth });
+    }).toThrow(/FATAL: Production mode prohibits injecting custom authService/);
+  });
+
+  it('10. Prevents weak symmetric test JWT verifier injection in production mode (P0-1)', async () => {
+    setEnv('NODE_ENV', 'production');
+    process.env.DATABASE_URL = 'postgresql://pramaan_app_user:secret@localhost:5432/pramaan';
+    process.env.SUPABASE_URL = 'https://qshujrddrzoemlzmleru.supabase.co';
+
+    const { AuthService } = await import('../src/services/auth-service.js');
+    const { JwtVerifier } = await import('../src/services/jwt-verifier.js');
+
+    const weakAuthService = new AuthService({
+      jwtVerifier: new JwtVerifier({ jwtSecret: 'weak-test-secret-at-least-32-chars!' })
+    });
+
+    expect(() => {
+      buildApp({ authService: weakAuthService });
+    }).toThrow(/FATAL: Production mode prohibits injecting custom authService/);
+  });
+
+  it('11. Allows custom AuthService injection in test / development mode (P0-1)', async () => {
+    setEnv('NODE_ENV', 'test');
+    process.env.SUPABASE_URL = 'https://qshujrddrzoemlzmleru.supabase.co';
+
+    const { AuthService } = await import('../src/services/auth-service.js');
+    const { JwtVerifier } = await import('../src/services/jwt-verifier.js');
+    const { TEST_JWT_SECRET } = await import('../src/testing/test-jwt-utils.js');
+
+    const customAuth = new AuthService({
+      jwtVerifier: new JwtVerifier(TEST_JWT_SECRET)
+    });
+
+    const testApp = buildApp({ authService: customAuth, persistenceMode: 'in-memory' });
+    expect(testApp).toBeDefined();
+    const res = await testApp.inject({ method: 'GET', url: '/health' });
+    expect(res.statusCode).toBe(200);
+  });
 });

@@ -72,12 +72,12 @@ describe('API Route Positive RBAC Matrix & Tenant Sanitization (P0-4, P0-6)', ()
   };
 
   let student1Token: string;
-  let student2Token: string;
+  let _student2Token: string;
   let officerToken: string;
   let mentorToken: string;
   let recruiterToken: string;
   let universityAdminToken: string;
-  let platformAdminToken: string;
+  let _platformAdminToken: string;
 
   beforeEach(async () => {
     jwtVerifier = new JwtVerifier(TEST_JWT_SECRET);
@@ -140,12 +140,12 @@ describe('API Route Positive RBAC Matrix & Tenant Sanitization (P0-4, P0-6)', ()
     );
 
     student1Token = await createTestToken({ sub: studentUser1.authSubject, email: studentUser1.email });
-    student2Token = await createTestToken({ sub: studentUser2.authSubject, email: studentUser2.email });
+    _student2Token = await createTestToken({ sub: studentUser2.authSubject, email: studentUser2.email });
     officerToken = await createTestToken({ sub: officerUser.authSubject, email: officerUser.email });
     mentorToken = await createTestToken({ sub: mentorUser.authSubject, email: mentorUser.email });
     recruiterToken = await createTestToken({ sub: recruiterUser.authSubject, email: recruiterUser.email });
     universityAdminToken = await createTestToken({ sub: universityAdminUser.authSubject, email: universityAdminUser.email });
-    platformAdminToken = await createTestToken({ sub: platformAdminUser.authSubject, email: platformAdminUser.email });
+    _platformAdminToken = await createTestToken({ sub: platformAdminUser.authSubject, email: platformAdminUser.email });
 
     app = buildApp({
       authService,

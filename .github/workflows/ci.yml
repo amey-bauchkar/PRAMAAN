@@ -7,8 +7,8 @@ on:
     branches: [ main ]
 
 jobs:
-  build-and-test:
-    name: Build, Strict Typecheck & Unit/Contract Tests
+  build-and-unit-tests:
+    name: Build, Lint, Strict Typecheck & DB-Independent Unit Tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -23,13 +23,16 @@ jobs:
       - name: Install Dependencies (Frozen Lockfile)
         run: npm ci
 
-      - name: Strict TypeScript Compilation Check
-        run: npx tsc --noEmit
+      - name: Quality Gate 1 — ESLint Static Code Analysis
+        run: npm run lint
 
-      - name: Monorepo Production Build
+      - name: Quality Gate 2 — Strict TypeScript Compilation Check
+        run: npm run typecheck
+
+      - name: Quality Gate 3 — Monorepo Production Build
         run: npm run build
 
-      - name: Run Domain, Contract & Fastify API Route Tests
+      - name: Quality Gate 4 — DB-Independent Domain, Contract, API Route & Security Tests
         run: |
           npx vitest run \
             packages/domain/tests/ \
@@ -41,13 +44,13 @@ jobs:
             apps/api/tests/m1-consent-ledger.test.ts \
             apps/api/tests/m1-tenancy-rls.test.ts \
             apps/api/tests/prod-fail-closed.test.ts \
-            apps/api/tests/consent-adversarial.test.ts
+            db/tests/admin-tls-and-ledger.test.ts
         env:
           NODE_ENV: test
           SUPABASE_URL: https://qshujrddrzoemlzmleru.supabase.co
 
   isolated-postgres-integration:
-    name: Isolated PostgreSQL 17 RLS & Migration Verification
+    name: Isolated PostgreSQL 17 RLS & Integration Verification
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -87,6 +90,15 @@ jobs:
         env:
           DATABASE_URL_ADMIN: postgresql://postgres:ci_test_admin_password@localhost:5432/pramaan_test
 
+      - name: Provision Restricted Runtime Role Password
+        run: |
+          node -e "
+            import pg from 'pg';
+            const pool = new pg.Pool({ connectionString: 'postgresql://postgres:ci_test_admin_password@localhost:5432/pramaan_test' });
+            await pool.query(\"ALTER ROLE pramaan_app_user WITH PASSWORD 'ci_runtime_password';\");
+            await pool.end();
+          "
+
       - name: Apply Deterministic Multi-Tenant Seed
         run: node scripts/seed-demo.mjs
         env:
@@ -96,3 +108,58 @@ jobs:
         run: npx vitest run db/tests/migration-runner.test.ts
         env:
           DATABASE_URL_ADMIN: postgresql://postgres:ci_test_admin_password@localhost:5432/pramaan_test
+
+      - name: Run Audit Chain Concurrency & Tenant Consent Tests (P1-4, P1-5)
+        run: npx vitest run apps/api/tests/audit-concurrency-and-consent.test.ts
+        env:
+          DATABASE_URL: postgresql://pramaan_app_user:ci_runtime_password@localhost:5432/pramaan_test
+          DATABASE_URL_ADMIN: postgresql://postgres:ci_test_admin_password@localhost:5432/pramaan_test
+
+      - name: Run Consent Adversarial & Transaction Purge Tests
+        run: npx vitest run apps/api/tests/consent-adversarial.test.ts
+        env:
+          DATABASE_URL: postgresql://pramaan_app_user:ci_runtime_password@localhost:5432/pramaan_test
+          DATABASE_URL_ADMIN: postgresql://postgres:ci_test_admin_password@localhost:5432/pramaan_test
+
+      - name: Run Restricted Runtime Role & RLS Multi-Tenant Tests
+        run: npx vitest run apps/api/tests/restricted-runtime-user.test.ts
+        env:
+          DATABASE_URL: postgresql://pramaan_app_user:ci_runtime_password@localhost:5432/pramaan_test
+          DATABASE_URL_ADMIN: postgresql://postgres:ci_test_admin_password@localhost:5432/pramaan_test
+
+      - name: Run Connection Pool Reuse & Context Isolation Tests
+        run: npx vitest run db/tests/connection-pool-reuse.test.ts
+        env:
+          DATABASE_URL: postgresql://pramaan_app_user:ci_runtime_password@localhost:5432/pramaan_test
+
+      - name: Run Comprehensive PostgreSQL 17 RLS & Verification Invariants Suite
+        run: npx vitest run db/tests/supabase-real-db.test.ts
+        env:
+          DATABASE_URL_ADMIN: postgresql://postgres:ci_test_admin_password@localhost:5432/pramaan_test
+
+  live-supabase-verification:
+    name: Remote Live Supabase Verification (Environment-Dependent Gate)
+    runs-on: ubuntu-latest
+    if: ${{ secrets.SUPABASE_MANAGEMENT_TOKEN != '' && secrets.SUPABASE_JWT_SECRET != '' }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install Dependencies (Frozen Lockfile)
+        run: npm ci
+
+      - name: Run Genuine Supabase JWT, ES256 & Auth Membership Tests
+        run: |
+          npx vitest run \
+            apps/api/tests/real-supabase-jwt.test.ts \
+            apps/api/tests/pg-auth-integration.test.ts
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_JWT_SECRET: ${{ secrets.SUPABASE_JWT_SECRET }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

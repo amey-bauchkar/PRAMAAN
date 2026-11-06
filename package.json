@@ -12,7 +12,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "lint": "tsc --noEmit",
+    "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "migrate": "node scripts/migrate-supabase.mjs",
     "seed": "node scripts/seed-demo.mjs",
@@ -21,9 +21,12 @@
     "dev:runner": "npm run dev --workspace=@pramaan/runner"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^22.10.2",
     "@types/pg": "^8.23.1",
+    "eslint": "^10.14.0",
     "typescript": "^5.7.2",
+    "typescript-eslint": "^8.72.1",
     "vitest": "^2.1.8"
   },
   "dependencies": {

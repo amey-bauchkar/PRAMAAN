@@ -4,7 +4,7 @@ import { FastifyInstance } from 'fastify';
 import { InMemoryTenantRepository } from '../src/repositories/tenant-repository.js';
 import { InMemoryConsentRepository, PgConsentRepository } from '../src/repositories/consent-repository.js';
 import { InMemoryAuditRepository, PgAuditRepository } from '../src/repositories/audit-repository.js';
-import { InMemoryUserRepository, PgUserRepository } from '../src/repositories/user-repository.js';
+import { InMemoryUserRepository } from '../src/repositories/user-repository.js';
 import { TenantStore } from '../src/services/tenant-store.js';
 import { ConsentService } from '../src/services/consent-service.js';
 import { AuditService } from '../src/services/audit-service.js';
@@ -55,7 +55,7 @@ describe('Consent Security, Adversarial Boundaries & Deletion Invariants (Area 4
   };
 
   let studentAToken: string;
-  let studentBToken: string;
+  let _studentBToken: string;
   let officerToken: string;
 
   beforeEach(async () => {
@@ -136,7 +136,7 @@ describe('Consent Security, Adversarial Boundaries & Deletion Invariants (Area 4
     await app.ready();
 
     studentAToken = await createTestToken({ sub: studentAUser.sub, email: studentAUser.email, role: 'authenticated' });
-    studentBToken = await createTestToken({ sub: studentBUser.sub, email: studentBUser.email, role: 'authenticated' });
+    _studentBToken = await createTestToken({ sub: studentBUser.sub, email: studentBUser.email, role: 'authenticated' });
     officerToken = await createTestToken({ sub: officerUser.sub, email: officerUser.email, role: 'authenticated' });
   });
 
@@ -353,7 +353,7 @@ describe('Consent Security, Adversarial Boundaries & Deletion Invariants (Area 4
 
   it('7. Real PostgreSQL: PgConsentRepository enforces credential purge and evidence withdrawal in transaction', async () => {
     const dbUrl = process.env.DATABASE_URL;
-    if (!dbUrl || dbUrl.includes('localhost')) return;
+    if (!dbUrl) return;
 
     const pool = getDbPool();
     const pgAudit = new PgAuditRepository(pool);

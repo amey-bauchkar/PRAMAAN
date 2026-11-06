@@ -3,6 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import pg from 'pg';
 import { runQuery as runSupabaseQuery } from './supabase-runner.mjs';
+import { resolveAdminSslConfig } from './admin-db-ssl.mjs';
 
 try {
   process.loadEnvFile?.();
@@ -22,9 +23,7 @@ async function seed() {
   const adminUrl = process.env.DATABASE_URL_ADMIN || process.env.DATABASE_URL;
   if (adminUrl) {
     console.log('[SEED] Executing seed via PostgreSQL connection...');
-    const ssl = process.env.DATABASE_CA_PATH && fs.existsSync(process.env.DATABASE_CA_PATH)
-      ? { ca: fs.readFileSync(process.env.DATABASE_CA_PATH, 'utf8'), rejectUnauthorized: true }
-      : (adminUrl.includes('localhost') || adminUrl.includes('127.0.0.1')) ? false : { rejectUnauthorized: false };
+    const ssl = resolveAdminSslConfig(adminUrl);
 
     const pool = new pg.Pool({ connectionString: adminUrl, ssl, max: 1 });
     try {
