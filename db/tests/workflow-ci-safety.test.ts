@@ -6,6 +6,7 @@ import {
   DEFAULT_APPROVED_SUPABASE_PROJECT_REFS,
   isApprovedTestDatabase,
   assertSafeTestEnvironment,
+  assertApprovedDatabaseTarget,
   isProductionDatabaseTarget,
 } from '../../scripts/supabase-runner.mjs';
 
@@ -74,9 +75,25 @@ describe('CI Live Supabase Workflow Safety-Gate & Configuration Invariants', () 
     expect(isProductionDatabaseTarget(prodUrl)).toBe(true);
     expect(isApprovedTestDatabase(prodUrl)).toBe(false);
 
+    // assertApprovedDatabaseTarget directly validates target without needing opt-in flag
     expect(() => {
-      assertSafeTestEnvironment('Destructive test execution', prodUrl);
+      assertApprovedDatabaseTarget(prodUrl, 'Destructive test execution');
     }).toThrow(/production/i);
+
+    // When opt-in is enabled, assertSafeTestEnvironment must STILL reject production target
+    const prev = process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    try {
+      process.env.ALLOW_DESTRUCTIVE_DB_TESTS = 'true';
+      expect(() => {
+        assertSafeTestEnvironment('Destructive test execution', prodUrl);
+      }).toThrow(/production/i);
+    } finally {
+      if (prev !== undefined) {
+        process.env.ALLOW_DESTRUCTIVE_DB_TESTS = prev;
+      } else {
+        delete process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+      }
+    }
   });
 
   it('8. Safety guard strictly throws when ALLOW_DESTRUCTIVE_DB_TESTS is absent or false', () => {
