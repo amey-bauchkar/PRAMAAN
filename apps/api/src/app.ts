@@ -60,6 +60,8 @@ export interface AppOptions {
   githubAccountService?: GitHubAccountService;
   staticRepoIngestionService?: StaticRepoIngestionService;
   ingestionJobRepository?: IIngestionJobRepository;
+  githubOAuthRedirectUri?: string;
+  githubOAuthRedirectAllowlist?: string[];
   // Legacy / convenience options for tests:
   tenantStore?: TenantStore;
   auditService?: AuditService;
@@ -78,8 +80,8 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       throw new Error('FATAL: Production mode requires a valid DATABASE_URL. In-memory storage is prohibited.');
     }
     if (
-      opts.tenantStore || 
-      opts.auditService || 
+      opts.tenantStore ||
+      opts.auditService ||
       opts.consentService ||
       opts.tenantRepository ||
       opts.auditRepository ||
@@ -107,6 +109,15 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     if (!process.env.SUPABASE_URL && !process.env.SUPABASE_JWKS_URI && !process.env.SUPABASE_JWT_SECRET) {
       throw new Error('FATAL: Production mode requires Supabase JWT configuration (SUPABASE_URL, SUPABASE_JWKS_URI, or SUPABASE_JWT_SECRET).');
     }
+    if (!process.env.GITHUB_CLIENT_ID || process.env.GITHUB_CLIENT_ID === 'pramaan_client_id') {
+      throw new Error('FATAL: Production mode requires a valid GITHUB_CLIENT_ID.');
+    }
+    if (!process.env.GITHUB_CLIENT_SECRET || process.env.GITHUB_CLIENT_SECRET === 'pramaan_client_secret') {
+      throw new Error('FATAL: Production mode requires a valid GITHUB_CLIENT_SECRET.');
+    }
+    if (!process.env.GITHUB_OAUTH_REDIRECT_URI || process.env.GITHUB_OAUTH_REDIRECT_URI.includes('example.com')) {
+      throw new Error('FATAL: Production mode requires a valid GITHUB_OAUTH_REDIRECT_URI.');
+    }
   }
 
   // Explicit persistence mode selection
@@ -121,8 +132,8 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
   } else if (opts.persistenceMode) {
     activePersistenceMode = opts.persistenceMode;
   } else if (
-    opts.tenantStore || 
-    opts.auditService || 
+    opts.tenantStore ||
+    opts.auditService ||
     opts.consentService ||
     opts.tenantRepository instanceof InMemoryTenantRepository ||
     opts.auditRepository instanceof InMemoryAuditRepository ||
@@ -304,6 +315,22 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
   (app as any).githubClient = githubClient;
   (app as any).githubAccountService = githubAccountService;
   (app as any).staticRepoIngestionService = staticRepoIngestionService;
+
+  const canonicalRedirectUri =
+    opts.githubOAuthRedirectUri ||
+    process.env.GITHUB_OAUTH_REDIRECT_URI ||
+    'http://localhost:3000/api/integrations/github/callback';
+
+  const configuredAllowlist =
+    opts.githubOAuthRedirectAllowlist ||
+    (process.env.GITHUB_OAUTH_REDIRECT_ALLOWLIST
+      ? process.env.GITHUB_OAUTH_REDIRECT_ALLOWLIST.split(',')
+      : []);
+
+  const allowedRedirectUris = new Set<string>([
+    canonicalRedirectUri,
+    ...configuredAllowlist.map((u) => u.trim()),
+  ]);
 
   app.register(cors, { origin: true });
 
@@ -697,13 +724,21 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       });
     }
 
-    const redirectUri = query?.redirect_uri || `${req.protocol}://${req.hostname}/api/integrations/github/callback`;
+    let redirectUri = canonicalRedirectUri;
+    if (query?.redirect_uri) {
+      if (!allowedRedirectUris.has(query.redirect_uri)) {
+        return reply.status(400).send({
+          error: 'INVALID_REDIRECT_URI: Requested redirect_uri is not in the server-configured allowlist.',
+        });
+      }
+      redirectUri = query.redirect_uri;
+    }
 
     try {
       const initRes = await githubAccountService.initiateConnection(context, targetStudentId, redirectUri);
       return reply.status(200).send(initRes);
     } catch (err: any) {
-      if (err.message.startsWith('TENANT_CONTEXT_REQUIRED')) {
+      if (err.message.startsWith('TENANT_CONTEXT_REQUIRED') || err.message.startsWith('INVALID_GITHUB_SCOPE')) {
         return reply.status(400).send({ error: err.message });
       }
       if (err.message.startsWith('FORBIDDEN_STUDENT_ACCESS')) {
@@ -739,6 +774,9 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     } catch (err: any) {
       if (err.message.startsWith('INVALID_OR_EXPIRED_OAUTH_STATE')) {
         return reply.status(400).send({ error: err.message });
+      }
+      if (err.message.startsWith('INSUFFICIENT_GITHUB_PERMISSIONS')) {
+        return reply.status(403).send({ error: err.message });
       }
       if (err.message.startsWith('CROSS_TENANT_OAUTH_REJECTED') || err.message.startsWith('FORBIDDEN_STUDENT_ACCESS')) {
         return reply.status(403).send({ error: err.message });
@@ -797,6 +835,10 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
   });
 
   // Static GitHub Repository Ingestion Pipeline
+  // Request Lifecycle Note: This route executes repository ingestion synchronously within the HTTP request lifecycle,
+  // bounded by standard gateway/request timeouts, while durably tracking state transitions ('queued', 'resolving',
+  // 'fetching', 'verifying', 'persisted', 'completed', or 'failed') in the relational `ingestion_jobs` table.
+  // This provides immediate feedback, reliable progress auditability, and foundation for a future background daemon.
   // Enforces consent-before-fetch, raw Git blob SHA verification, and authoritative snapshot registration
   app.post('/api/evidence/repositories/ingest', async (req, reply) => {
     const context = await resolveSessionContext(req, reply);

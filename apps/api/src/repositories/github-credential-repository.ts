@@ -30,6 +30,7 @@ export interface IGitHubCredentialRepository {
   ): Promise<void>;
 
   consumeOAuthState(
+    context: SessionContext,
     state: string
   ): Promise<{ codeVerifier: string; studentId: string; orgId: string; redirectUri: string } | null>;
 
@@ -100,10 +101,12 @@ export class InMemoryGitHubCredentialRepository implements IGitHubCredentialRepo
   }
 
   public async consumeOAuthState(
+    context: SessionContext,
     state: string
   ): Promise<{ codeVerifier: string; studentId: string; orgId: string; redirectUri: string } | null> {
     const item = this.states.get(state);
     if (!item) return null;
+    if (context.orgId && item.orgId !== context.orgId) return null;
     if (item.used || Date.now() > item.expiresAt) {
       this.states.delete(state);
       return null;
@@ -209,35 +212,36 @@ export class PgGitHubCredentialRepository implements IGitHubCredentialRepository
   }
 
   public async consumeOAuthState(
+    context: SessionContext,
     state: string
   ): Promise<{ codeVerifier: string; studentId: string; orgId: string; redirectUri: string } | null> {
-    // In order to look up by state without pre-knowing orgId, we use the pool directly with an atomic DELETE
-    const client = await this.pool.connect();
-    try {
-      await client.query('BEGIN;');
+    return withTenantTransaction(context, async (client) => {
       const selectQuery = `
         SELECT state, code_verifier, student_id, org_id, redirect_uri, expires_at, used_at
         FROM github_oauth_states
-        WHERE state = $1
+        WHERE state = $1 AND org_id = current_app_org_id()
         FOR UPDATE;
       `;
       const res = await client.query(selectQuery, [state]);
       if (res.rows.length === 0) {
-        await client.query('ROLLBACK;');
         return null;
       }
       const row = res.rows[0];
 
       // Check if expired or already used
       if (row.used_at || new Date(row.expires_at).getTime() < Date.now()) {
-        await client.query('DELETE FROM github_oauth_states WHERE state = $1;', [state]);
-        await client.query('COMMIT;');
+        await client.query(
+          'UPDATE github_oauth_states SET used_at = CURRENT_TIMESTAMP WHERE state = $1 AND org_id = current_app_org_id();',
+          [state]
+        );
         return null;
       }
 
-      // Mark used / delete to prevent replay
-      await client.query('DELETE FROM github_oauth_states WHERE state = $1;', [state]);
-      await client.query('COMMIT;');
+      // Mark used atomically under tenant RLS to prevent replay
+      await client.query(
+        'UPDATE github_oauth_states SET used_at = CURRENT_TIMESTAMP WHERE state = $1 AND org_id = current_app_org_id();',
+        [state]
+      );
 
       return {
         codeVerifier: row.code_verifier,
@@ -245,12 +249,7 @@ export class PgGitHubCredentialRepository implements IGitHubCredentialRepository
         orgId: row.org_id,
         redirectUri: row.redirect_uri,
       };
-    } catch (err) {
-      await client.query('ROLLBACK;').catch(() => {});
-      throw err;
-    } finally {
-      client.release();
-    }
+    }, this.pool);
   }
 
   public async saveConnectedAccount(

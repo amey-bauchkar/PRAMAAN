@@ -356,7 +356,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
       });
       const { state } = initRes.json();
 
-      // Attempt to redeem from College B
+      // Attempt to redeem from College B -> Tenant isolation renders state invisible/null
       const crossRes = await app.inject({
         method: 'GET',
         url: `/api/integrations/github/callback?code=mock-code-123&state=${state}`,
@@ -365,8 +365,8 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
           'x-org-id': collegeBOrgId,
         },
       });
-      expect(crossRes.statusCode).toBe(403);
-      expect(crossRes.json().error).toContain('CROSS_TENANT_OAUTH_REJECTED');
+      expect(crossRes.statusCode).toBe(400);
+      expect(crossRes.json().error).toContain('INVALID_OR_EXPIRED_OAUTH_STATE');
     });
 
     it('1.7. Student 2 cannot redeem OAuth state initiated by Student 1', async () => {
@@ -431,11 +431,208 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
       const parts = enc.serialized.split(':');
       // Tamper ciphertext
       const tamperedCiphertext = `${parts[0]}:${parts[1]}:${parts[2]}:ffffffff`;
-      expect(() => tokenCipher.decrypt(tamperedCiphertext)).toThrow();
+      expect(() => tokenCipher.decrypt(tamperedCiphertext)).toThrow(/AUTHENTICATED_DECRYPTION_FAILED/);
 
       // Tamper auth tag
       const tamperedTag = `${parts[0]}:${parts[1]}:00000000000000000000000000000000:${parts[3]}`;
-      expect(() => tokenCipher.decrypt(tamperedTag)).toThrow();
+      expect(() => tokenCipher.decrypt(tamperedTag)).toThrow(/AUTHENTICATED_DECRYPTION_FAILED/);
+    });
+
+    it('1.10. Authorization URL generation uses default read-only scope "read:user" and rejects "repo:read"', async () => {
+      const initRes = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/github/connect',
+        headers: {
+          authorization: `Bearer ${student1Token}`,
+          'x-org-id': collegeAOrgId,
+        },
+      });
+
+      expect(initRes.statusCode).toBe(200);
+      const url = new URL(initRes.json().url);
+      expect(url.searchParams.get('scope')).toBe('read:user');
+      expect(url.searchParams.get('scope')).not.toContain('repo:read');
+    });
+
+    it('1.11. Service allows configured allowed scopes and rejects invalid/excessive scopes', async () => {
+      const sessionCtx = { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' as const };
+
+      // Valid custom scopes
+      const customRes = await githubAccountService.initiateConnection(
+        sessionCtx,
+        studentUser1.id,
+        'http://localhost:3000/api/integrations/github/callback',
+        ['read:user', 'public_repo']
+      );
+      const customUrl = new URL(customRes.url);
+      expect(customUrl.searchParams.get('scope')).toBe('read:user,public_repo');
+
+      // Invalid scope 'repo:read' rejected
+      await expect(
+        githubAccountService.initiateConnection(
+          sessionCtx,
+          studentUser1.id,
+          'http://localhost:3000/api/integrations/github/callback',
+          ['repo:read']
+        )
+      ).rejects.toThrow(/INVALID_GITHUB_SCOPE/);
+
+      // Excessive scope 'delete_repo' rejected
+      await expect(
+        githubAccountService.initiateConnection(
+          sessionCtx,
+          studentUser1.id,
+          'http://localhost:3000/api/integrations/github/callback',
+          ['read:user', 'delete_repo']
+        )
+      ).rejects.toThrow(/INVALID_GITHUB_SCOPE/);
+    });
+
+    it('1.12. Callback fails closed with 403 when granted permissions are insufficient', async () => {
+      const initRes = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/github/connect',
+        headers: {
+          authorization: `Bearer ${student1Token}`,
+          'x-org-id': collegeAOrgId,
+        },
+      });
+      const { state } = initRes.json();
+
+      // Configure mock client to return only 'gist' scope (missing read:user / repo)
+      mockGitHubClient.mockScopeOverride = 'gist';
+
+      const cbRes = await app.inject({
+        method: 'GET',
+        url: `/api/integrations/github/callback?code=mock-code-insufficient&state=${state}`,
+        headers: {
+          authorization: `Bearer ${student1Token}`,
+          'x-org-id': collegeAOrgId,
+        },
+      });
+
+      expect(cbRes.statusCode).toBe(403);
+      expect(cbRes.json().error).toContain('INSUFFICIENT_GITHUB_PERMISSIONS');
+
+      // Reset mock client
+      mockGitHubClient.mockScopeOverride = undefined;
+    });
+
+    it('1.13. Hostile client redirect_uri is rejected with 400 Bad Request', async () => {
+      const hostileRes = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/github/connect?redirect_uri=https://attacker.com/steal-code',
+        headers: {
+          authorization: `Bearer ${student1Token}`,
+          'x-org-id': collegeAOrgId,
+        },
+      });
+
+      expect(hostileRes.statusCode).toBe(400);
+      expect(hostileRes.json().error).toContain('INVALID_REDIRECT_URI');
+    });
+
+    it('1.14. Spoofed Host header has no effect; canonical configured URI is used', async () => {
+      const spoofedRes = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/github/connect',
+        headers: {
+          authorization: `Bearer ${student1Token}`,
+          'x-org-id': collegeAOrgId,
+          host: 'evil-attacker.example.com',
+          'x-forwarded-host': 'evil-attacker.example.com',
+        },
+      });
+
+      expect(spoofedRes.statusCode).toBe(200);
+      const url = new URL(spoofedRes.json().url);
+      const redirectUri = url.searchParams.get('redirect_uri');
+      expect(redirectUri).toBe('http://localhost:3000/api/integrations/github/callback');
+      expect(redirectUri).not.toContain('evil-attacker');
+    });
+
+    it('1.15. Production mode fails closed when GitHub OAuth credentials or redirect URI are missing or placeholder', () => {
+      const originalEnv = { ...process.env };
+      try {
+        (process.env as any).NODE_ENV = 'production';
+        process.env.DATABASE_URL = 'postgresql://fake:fake@localhost:5432/fake';
+        process.env.SUPABASE_JWT_SECRET = 'super-secret-jwt-secret-at-least-32-chars-long';
+
+        // Placeholder client ID
+        process.env.GITHUB_CLIENT_ID = 'pramaan_client_id';
+        process.env.GITHUB_CLIENT_SECRET = 'some-real-secret';
+        process.env.GITHUB_OAUTH_REDIRECT_URI = 'https://pramaan.ac.in/callback';
+        expect(() => buildApp()).toThrow(/FATAL: Production mode requires a valid GITHUB_CLIENT_ID/);
+
+        // Placeholder client secret
+        process.env.GITHUB_CLIENT_ID = 'valid-client-id';
+        process.env.GITHUB_CLIENT_SECRET = 'pramaan_client_secret';
+        expect(() => buildApp()).toThrow(/FATAL: Production mode requires a valid GITHUB_CLIENT_SECRET/);
+
+        // Missing redirect URI
+        process.env.GITHUB_CLIENT_SECRET = 'valid-client-secret';
+        delete process.env.GITHUB_OAUTH_REDIRECT_URI;
+        expect(() => buildApp()).toThrow(/FATAL: Production mode requires a valid GITHUB_OAUTH_REDIRECT_URI/);
+      } finally {
+        process.env = originalEnv;
+      }
+    });
+
+    it('1.16. Token cipher supports zero-downtime key rotation with versioned keyring', () => {
+      const keyV1 = '1111111111111111111111111111111111111111111111111111111111111111';
+      const keyV2 = '2222222222222222222222222222222222222222222222222222222222222222';
+
+      // Phase 1: v1 is active key
+      const cipherV1 = new AesGcmTokenCipher({
+        encryptionKey: keyV1,
+        keyVersion: 'v1',
+      });
+      const token = 'gho_alice_token_12345';
+      const encV1 = cipherV1.encrypt(token);
+      expect(encV1.serialized.startsWith('v1:')).toBe(true);
+
+      // Phase 2: Key rotation to v2, v1 retained in keyring
+      const cipherV2 = new AesGcmTokenCipher({
+        keyRing: {
+          v1: keyV1,
+          v2: keyV2,
+        },
+        activeKeyVersion: 'v2',
+      });
+
+      // Existing token encrypted with v1 decrypts cleanly under rotated cipher
+      expect(cipherV2.decrypt(encV1.serialized)).toBe(token);
+
+      // New token encrypts with v2
+      const encV2 = cipherV2.encrypt('gho_bob_token_67890');
+      expect(encV2.serialized.startsWith('v2:')).toBe(true);
+      expect(cipherV2.decrypt(encV2.serialized)).toBe('gho_bob_token_67890');
+    });
+
+    it('1.17. Token cipher fails closed when encountering unknown key version', () => {
+      const key = '1111111111111111111111111111111111111111111111111111111111111111';
+      const cipher = new AesGcmTokenCipher({ encryptionKey: key, keyVersion: 'v1' });
+      const enc = cipher.encrypt('some-token');
+
+      // Tamper key version to v99
+      const tamperedVersion = enc.serialized.replace(/^v1:/, 'v99:');
+      expect(() => cipher.decrypt(tamperedVersion)).toThrow(/UNKNOWN_KEY_VERSION/);
+    });
+
+    it('1.18. Token cipher enforces strict 64-hex key validation in production mode', () => {
+      const originalEnv = process.env.NODE_ENV;
+      try {
+        (process.env as any).NODE_ENV = 'production';
+
+        // Non-hex string fails
+        expect(() => new AesGcmTokenCipher({ encryptionKey: 'short-key' })).toThrow(/64-character hexadecimal string/);
+        // 63 chars fails
+        expect(() => new AesGcmTokenCipher({ encryptionKey: 'a'.repeat(63) })).toThrow(/64-character hexadecimal string/);
+        // Valid 64 hex succeeds
+        expect(() => new AesGcmTokenCipher({ encryptionKey: 'a'.repeat(64) })).not.toThrow();
+      } finally {
+        (process.env as any).NODE_ENV = originalEnv;
+      }
     });
   });
 
@@ -1081,6 +1278,255 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
         headers: { authorization: `Bearer ${officerToken}`, 'x-org-id': collegeAOrgId },
       });
       expect(getResOfficer.statusCode).toBe(200);
+    });
+  });
+
+  // =========================================================================
+  // 6. INGESTION LIMITS & RESOURCE BOUNDARIES
+  // =========================================================================
+
+  describe('6. Ingestion Limits & Resource Boundaries', () => {
+    beforeEach(async () => {
+      // Connect GitHub & grant consent for student1
+      const initRes = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/github/connect',
+        headers: { authorization: `Bearer ${student1Token}`, 'x-org-id': collegeAOrgId },
+      });
+      await app.inject({
+        method: 'GET',
+        url: `/api/integrations/github/callback?code=mock-code-123&state=${initRes.json().state}`,
+        headers: { authorization: `Bearer ${student1Token}`, 'x-org-id': collegeAOrgId },
+      });
+      const ctx = { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' as const };
+      await consentRepo.grantConsent(ctx, studentUser1.id, 'repo_verification');
+    });
+
+    it('6.1. Repository with 200 eligible files succeeds within the 200-file limit', async () => {
+      const commitSha = '3333333333333333333333333333333333333333';
+      const treeSha = '4444444444444444444444444444444444444444';
+      mockGitHubClient.seedCommit('alice', 'repo-200-files', 'main', { sha: commitSha, treeSha });
+
+      const entries: any[] = [];
+      for (let i = 0; i < 200; i++) {
+        const content = `// file ${i}\nexport const x${i} = ${i};`;
+        const blobSha = computeGitBlobSha(Buffer.from(content, 'utf8'));
+        mockGitHubClient.seedBlob(blobSha, content);
+        entries.push({
+          path: `src/file_${i}.ts`,
+          mode: '100644',
+          type: 'blob',
+          sha: blobSha,
+          size: Buffer.byteLength(content),
+        });
+      }
+      mockGitHubClient.seedTree('alice', 'repo-200-files', treeSha, entries);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/evidence/repositories/ingest',
+        headers: { authorization: `Bearer ${student1Token}`, 'x-org-id': collegeAOrgId },
+        payload: { owner: 'alice', repo: 'repo-200-files', ref: 'main' },
+      });
+
+      expect(res.statusCode).toBe(201);
+      const data = res.json();
+      expect(data.fileCount).toBe(200);
+      expect(data.registeredSnapshotsCount).toBe(200);
+
+      // Verify job record
+      const job = await ingestionJobRepo.getJob(
+        { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+        data.ingestionId
+      );
+      expect(job?.status).toBe('completed');
+      expect(job?.fileCount).toBe(200);
+    });
+
+    it('6.2. Repository with 201 eligible files fails closed with FILE_COUNT_LIMIT_EXCEEDED', async () => {
+      const commitSha = '5555555555555555555555555555555555555555';
+      const treeSha = '6666666666666666666666666666666666666666';
+      mockGitHubClient.seedCommit('alice', 'repo-201-files', 'main', { sha: commitSha, treeSha });
+
+      const entries: any[] = [];
+      for (let i = 0; i < 201; i++) {
+        entries.push({
+          path: `src/file_${i}.ts`,
+          mode: '100644',
+          type: 'blob',
+          sha: `sha_${i}`,
+          size: 100,
+        });
+      }
+      mockGitHubClient.seedTree('alice', 'repo-201-files', treeSha, entries);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/evidence/repositories/ingest',
+        headers: { authorization: `Bearer ${student1Token}`, 'x-org-id': collegeAOrgId },
+        payload: { owner: 'alice', repo: 'repo-201-files', ref: 'main' },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toContain('FILE_COUNT_LIMIT_EXCEEDED');
+      expect(res.json().error).toContain('exceeding limit of 200');
+    });
+
+    it('6.3. Oversized entry with declared size > 512 KB is rejected BEFORE blob download', async () => {
+      const commitSha = '7777777777777777777777777777777777777777';
+      const treeSha = '8888888888888888888888888888888888888888';
+      mockGitHubClient.seedCommit('alice', 'repo-oversized-declared', 'main', { sha: commitSha, treeSha });
+
+      const normalContent = 'export const valid = true;';
+      const normalSha = computeGitBlobSha(Buffer.from(normalContent, 'utf8'));
+      mockGitHubClient.seedBlob(normalSha, normalContent);
+
+      const oversizedSha = '0123456789abcdef0123456789abcdef01234567';
+      // DO NOT seed oversized blob into mock client: if getBlob is called, it would throw!
+
+      mockGitHubClient.seedTree('alice', 'repo-oversized-declared', treeSha, [
+        {
+          path: 'src/valid.ts',
+          mode: '100644',
+          type: 'blob',
+          sha: normalSha,
+          size: 30,
+        },
+        {
+          path: 'src/huge-bundle.js',
+          mode: '100644',
+          type: 'blob',
+          sha: oversizedSha,
+          size: 512 * 1024 + 1, // Exceeds 512 KB limit!
+        },
+      ]);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/evidence/repositories/ingest',
+        headers: { authorization: `Bearer ${student1Token}`, 'x-org-id': collegeAOrgId },
+        payload: { owner: 'alice', repo: 'repo-oversized-declared', ref: 'main' },
+      });
+
+      // Ingestion succeeds for valid file, oversized file was safely skipped before download
+      expect(res.statusCode).toBe(201);
+      const data = res.json();
+      expect(data.fileCount).toBe(1);
+      expect(data.diagnostics.excludedCount).toBe(1);
+    });
+
+    it('6.4. Oversized entry without declared size is rejected AFTER download and not persisted', async () => {
+      const commitSha = '9999999999999999999999999999999999999999';
+      const treeSha = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      mockGitHubClient.seedCommit('alice', 'repo-oversized-undeclared', 'main', { sha: commitSha, treeSha });
+
+      // Create 513 KB content
+      const bigContent = 'x'.repeat(512 * 1024 + 10);
+      const bigSha = computeGitBlobSha(Buffer.from(bigContent, 'utf8'));
+      mockGitHubClient.seedBlob(bigSha, bigContent);
+
+      mockGitHubClient.seedTree('alice', 'repo-oversized-undeclared', treeSha, [
+        {
+          path: 'src/big.ts',
+          mode: '100644',
+          type: 'blob',
+          sha: bigSha,
+          // size omitted to test post-download check
+        },
+      ]);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/evidence/repositories/ingest',
+        headers: { authorization: `Bearer ${student1Token}`, 'x-org-id': collegeAOrgId },
+        payload: { owner: 'alice', repo: 'repo-oversized-undeclared', ref: 'main' },
+      });
+
+      expect(res.statusCode).toBe(201);
+      const data = res.json();
+      expect(data.fileCount).toBe(0);
+      expect(data.diagnostics.excludedCount).toBe(1);
+    });
+
+    it('6.5. Aggregate repository size exceeding 10 MB fails with TOTAL_SIZE_LIMIT_EXCEEDED and marks job failed', async () => {
+      // Create custom service with low aggregate limit for testing
+      const customService = new StaticRepoIngestionService({
+        githubClient: mockGitHubClient,
+        githubAccountService,
+        consentRepo,
+        trustedIngestionStore,
+        snapshotStore,
+        anchorService,
+        ingestionJobRepo,
+        limits: {
+          maxFiles: 200,
+          maxFileSizeBytes: 512 * 1024,
+          maxTotalBytes: 1024, // 1 KB limit to test boundary easily
+        },
+      });
+
+      const customApp = buildApp({
+        persistenceMode: 'in-memory',
+        authService,
+        userRepository: userRepo,
+        consentRepository: consentRepo,
+        auditRepository: auditRepo,
+        snapshotStore,
+        trustedIngestionStore,
+        githubCredentialRepository: githubCredentialRepo,
+        ingestionJobRepository: ingestionJobRepo,
+        tokenCipher,
+        githubClient: mockGitHubClient,
+        githubAccountService,
+        staticRepoIngestionService: customService,
+        anchorService,
+      });
+
+      const commitSha = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+      const treeSha = 'cccccccccccccccccccccccccccccccccccccccc';
+      mockGitHubClient.seedCommit('alice', 'repo-over-aggregate', 'main', { sha: commitSha, treeSha });
+
+      // 2 files of 600 bytes = 1200 bytes > 1024 limit
+      const content1 = 'a'.repeat(600);
+      const sha1 = computeGitBlobSha(Buffer.from(content1, 'utf8'));
+      mockGitHubClient.seedBlob(sha1, content1);
+
+      const content2 = 'b'.repeat(600);
+      const sha2 = computeGitBlobSha(Buffer.from(content2, 'utf8'));
+      mockGitHubClient.seedBlob(sha2, content2);
+
+      mockGitHubClient.seedTree('alice', 'repo-over-aggregate', treeSha, [
+        { path: 'src/f1.ts', mode: '100644', type: 'blob', sha: sha1, size: 600 },
+        { path: 'src/f2.ts', mode: '100644', type: 'blob', sha: sha2, size: 600 },
+      ]);
+
+      const res = await customApp.inject({
+        method: 'POST',
+        url: '/api/evidence/repositories/ingest',
+        headers: { authorization: `Bearer ${student1Token}`, 'x-org-id': collegeAOrgId },
+        payload: { owner: 'alice', repo: 'repo-over-aggregate', ref: 'main' },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toContain('TOTAL_SIZE_LIMIT_EXCEEDED');
+
+      // Verify zero snapshots persisted
+      const hasSnap1 = await snapshotStore.hasSnapshot(
+        'alice/repo-over-aggregate',
+        commitSha,
+        'src/f1.ts',
+        collegeAOrgId,
+        studentUser1.id
+      );
+      const hasSnap2 = await snapshotStore.hasSnapshot(
+        'alice/repo-over-aggregate',
+        commitSha,
+        'src/f2.ts',
+        collegeAOrgId,
+        studentUser1.id
+      );
+      expect(hasSnap1).toBe(false);
+      expect(hasSnap2).toBe(false);
     });
   });
 });

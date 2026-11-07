@@ -368,6 +368,7 @@ export class MockGitHubClient implements IGitHubClient {
   public totalCallCount = 0;
   public metadataCallCount = 0;
   public contentCallCount = 0;
+  public mockScopeOverride?: string;
 
   public mockUsers = new Map<string, GitHubUserResponse>();
   public mockRepos = new Map<string, GitHubRepoAccessResponse>();
@@ -390,7 +391,7 @@ export class MockGitHubClient implements IGitHubClient {
     return {
       accessToken: `gho_mock_token_for_${code}`,
       tokenType: 'bearer',
-      scope: 'repo:read,read:user',
+      scope: this.mockScopeOverride ?? 'read:user',
       expiresIn: 28800,
     };
   }
@@ -523,11 +524,20 @@ export class MockGitHubClient implements IGitHubClient {
    * Helper to seed a blob into the mock client.
    */
   public seedBlob(
-    _owner: string,
-    _repo: string,
-    blobSha: string,
-    content: Buffer | string
+    arg1: string,
+    arg2: string,
+    arg3?: string | Buffer,
+    arg4?: string | Buffer
   ): void {
+    let blobSha: string;
+    let content: Buffer | string;
+    if (arg3 === undefined && arg4 === undefined) {
+      blobSha = arg1;
+      content = arg2;
+    } else {
+      blobSha = arg3 as string;
+      content = arg4!;
+    }
     const rawBytes = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8');
     this.mockBlobs.set(blobSha.toLowerCase(), {
       sha: blobSha.toLowerCase(),

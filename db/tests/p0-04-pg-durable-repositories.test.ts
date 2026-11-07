@@ -142,9 +142,14 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
   // =========================================================================
 
   describe('1. PgGitHubCredentialRepository (OAuth states and credentials)', () => {
-    it('1.1. Saves single-use OAuth state, consumes it once, and rejects replay', async () => {
+    it('1.1. Saves single-use OAuth state, consumes it once under tenant context, and rejects replay', async () => {
       const state = crypto.randomBytes(32).toString('hex');
       const verifier = crypto.randomBytes(32).toString('base64url');
+      const ctxA: SessionContext = {
+        orgId: COLLEGE_A,
+        userId: STUDENT_A,
+        role: 'student',
+      };
 
       await credentialRepo.saveOAuthState(
         state,
@@ -155,19 +160,76 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
         600
       );
 
-      // First consumption succeeds
-      const consumed = await credentialRepo.consumeOAuthState(state);
+      // First consumption succeeds for correct tenant
+      const consumed = await credentialRepo.consumeOAuthState(ctxA, state);
       expect(consumed).not.toBeNull();
       expect(consumed?.studentId).toBe(STUDENT_A);
       expect(consumed?.orgId).toBe(COLLEGE_A);
       expect(consumed?.codeVerifier).toBe(verifier);
 
-      // Second consumption fails (already consumed)
-      const replayed = await credentialRepo.consumeOAuthState(state);
+      // Second consumption fails (already consumed - single use)
+      const replayed = await credentialRepo.consumeOAuthState(ctxA, state);
       expect(replayed).toBeNull();
     });
 
-    it('1.2. Saves encrypted connected account, retrieves it, and revokes it cleanly', async () => {
+    it('1.2. Cross-tenant state consumption is strictly rejected via PostgreSQL RLS', async () => {
+      const state = crypto.randomBytes(32).toString('hex');
+      const verifier = crypto.randomBytes(32).toString('base64url');
+      const ctxB: SessionContext = {
+        orgId: COLLEGE_B,
+        userId: STUDENT_B,
+        role: 'student',
+      };
+
+      // State created for COLLEGE_A
+      await credentialRepo.saveOAuthState(
+        state,
+        verifier,
+        STUDENT_A,
+        COLLEGE_A,
+        'https://app.pramaan.edu/callback',
+        600
+      );
+
+      // COLLEGE_B attempts to consume COLLEGE_A state -> RLS renders it completely invisible (null)
+      const crossConsumed = await credentialRepo.consumeOAuthState(ctxB, state);
+      expect(crossConsumed).toBeNull();
+
+      // State remains unconsumed for COLLEGE_A
+      const ctxA: SessionContext = {
+        orgId: COLLEGE_A,
+        userId: STUDENT_A,
+        role: 'student',
+      };
+      const validConsumed = await credentialRepo.consumeOAuthState(ctxA, state);
+      expect(validConsumed).not.toBeNull();
+      expect(validConsumed?.studentId).toBe(STUDENT_A);
+    });
+
+    it('1.3. Expired OAuth state is rejected fail-closed', async () => {
+      const state = crypto.randomBytes(32).toString('hex');
+      const verifier = crypto.randomBytes(32).toString('base64url');
+      const ctxA: SessionContext = {
+        orgId: COLLEGE_A,
+        userId: STUDENT_A,
+        role: 'student',
+      };
+
+      // Save state with -10 second expiry (already expired)
+      await credentialRepo.saveOAuthState(
+        state,
+        verifier,
+        STUDENT_A,
+        COLLEGE_A,
+        'https://app.pramaan.edu/callback',
+        -10
+      );
+
+      const expiredConsumed = await credentialRepo.consumeOAuthState(ctxA, state);
+      expect(expiredConsumed).toBeNull();
+    });
+
+    it('1.4. Saves encrypted connected account, retrieves it, and revokes it cleanly', async () => {
       const ctx: SessionContext = {
         orgId: COLLEGE_A,
         userId: STUDENT_A,

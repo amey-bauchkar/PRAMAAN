@@ -74,16 +74,19 @@
 - **Acceptance Criteria:** 100% of displayed code anchors resolve to exact file lines and raw byte spans; tampered code yields `ANCHOR_INVALID`; mentor attestation moves lab evidence to `Evidence-linked`.
 - **Status (P0-04 & P0-05):** Fully implemented, hardened, and verified end-to-end.
   - **P0-05 (Exact Anchor Resolver & AST Analysis):** Fully implemented, hardened, corrective-patched, and formally frozen with 139 dedicated tests (59 domain, 80 API/RBAC), achieving 100% pass rate. Cross-tenant and intra-tenant cross-student isolation, fail-closed consent enforcement across all roles prior to repository data retention, buffer mutation immunity, path traversal prevention, mutex-serialized registration with safe conditional rollback and leak-free queue draining, mandatory Git blob SHA validation, write-once ingestion record immutability, separation of ingestion record creation from snapshot registration, explicit registration commit state lifecycle, and Git file-level manifest provenance boundaries verified. Zero untrusted code execution.
-  - **P0-04 (Trusted Static GitHub Repository Ingestion):** Fully implemented and verified end-to-end. Includes:
-    1. GitHub OAuth 2.0 with PKCE S256 challenge, single-use state verification, and authenticated AES-256-GCM token cipher (`GITHUB_TOKEN_ENCRYPTION_KEY`) with IV, auth tag, and key rotation.
-    2. Strict fail-closed Consent-Before-Fetch boundary: queries `repo_verification` consent before initiating ANY GitHub API call (0 API calls if consent missing/revoked); re-checks consent prior to durable persistence.
-    3. Static repository ingestion engine: fetches commit SHA, traverses Git trees with recursive `truncated: true` fallback to iterative directory walking, applies strict file filtering (source extensions only; rejects symlinks `120000`, submodules `160000`, binary files, vendor/build dirs, secret/env files, path traversals), and enforces hard limits (file count, max file size, total byte limits).
-    4. Exact Git object verification: canonical Git blob formatting (`blob ${byteLength}\0${rawBytes}`), Git blob SHA-1 computation matching remote tree SHA, and raw SHA-256 content hashing.
-    5. Canonical manifest generation (`TrustedIngestionRecordSchema`) and durable write-once storage.
-    6. Durable PostgreSQL repositories: `PgSourceSnapshotStore`, `PgTrustedIngestionStore`, `PgGitHubCredentialRepository`, and `PgIngestionJobRepository` backed by Migration 011 with RLS enabled and forced across all tables.
-    7. Fastify API route endpoints (`/api/integrations/github/connect`, `/api/integrations/github/callback`, `/api/integrations/github/status`, `/api/integrations/github/connection` [DELETE], `/api/evidence/repositories/ingest` [POST], `/api/evidence/repositories/ingest/:ingestionId` [GET]).
-    8. Production fail-closed application composition in `buildApp()`.
-    9. 100% passing test coverage: 20 comprehensive unit/integration tests in `apps/api/tests/p0-04-github-ingestion.test.ts` and 9 real PostgreSQL tests in `db/tests/p0-04-pg-durable-repositories.test.ts`. Zero untrusted code execution.
+  - **P0-04 (Trusted Static GitHub Repository Ingestion):** Fully implemented, independently security-reviewed, remediated, and verified end-to-end. Includes:
+    1. GitHub OAuth 2.0 with PKCE S256 challenge, single-use state verification, and authenticated AES-256-GCM versioned key ring (`GITHUB_TOKEN_ENCRYPTION_KEY`) with format `version:iv:tag:ciphertext` and zero-downtime key rotation.
+    2. GitHub Authorization Scope Hardening: Eliminates invalid scopes (`repo:read`). Establishes fine-grained GitHub Apps (`contents:read`, `metadata:read`) as primary standard and minimal read-only OAuth scopes (`read:user`, `user:email`, `public_repo`), with explicit warnings on broad `repo` scope and callback enforcement fail-closed (`INSUFFICIENT_GITHUB_PERMISSIONS`, 403).
+    3. Tenant-Safe OAuth State Consumption: Executed within `withTenantTransaction(context, ...)` under restricted `app_api` role, enforcing PostgreSQL RLS isolation, atomic single-use locking (`FOR UPDATE`), and replay rejection.
+    4. Strict fail-closed Consent-Before-Fetch boundary: queries `repo_verification` consent before initiating ANY GitHub API call (0 API calls if consent missing/revoked); re-checks consent prior to durable persistence.
+    5. Static repository ingestion engine & resource bounds: fetches commit SHA, traverses Git trees with recursive `truncated: true` fallback, applies strict file filtering (source extensions only; rejects symlinks, submodules, binaries, vendor/build dirs, secret/env files, path traversals), and enforces operational limits (200 files maximum, 512 KB per file with pre-download tree size check, and 10 MB aggregate retained bytes).
+    6. Exact Git object verification: canonical Git blob formatting (`blob ${byteLength}\0${rawBytes}`), Git blob SHA-1 computation matching remote tree SHA, and raw SHA-256 content hashing.
+    7. Canonical manifest generation (`TrustedIngestionRecordSchema`) and durable write-once storage.
+    8. Durable PostgreSQL repositories: `PgSourceSnapshotStore`, `PgTrustedIngestionStore`, `PgGitHubCredentialRepository`, and `PgIngestionJobRepository` backed by Migration 011 with RLS enabled and forced across all tables.
+    9. Fixed OAuth callback URI & Host header protection: server-configured canonical `GITHUB_OAUTH_REDIRECT_URI` and strict allowlist validation; host headers and client parameters are never trusted.
+    10. Fastify API route endpoints with documented synchronous request lifecycle and durable relational progress tracking in `ingestion_jobs`.
+    11. Production fail-closed application composition in `buildApp()`.
+    12. 100% passing test coverage: 34 comprehensive unit/integration tests in `apps/api/tests/p0-04-github-ingestion.test.ts` and 11 real PostgreSQL tests in `db/tests/p0-04-pg-durable-repositories.test.ts`. Zero untrusted code execution.
 
 ---
 

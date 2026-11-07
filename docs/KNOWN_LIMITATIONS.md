@@ -116,12 +116,19 @@
 3. **Hard Ingestion Size & Resource Limits:**
    To defend against repository zip-bombs and denial-of-service payloads:
    - Maximum file count: 200 files.
-   - Maximum individual file size: 512 KB (524,288 bytes).
+   - Maximum individual file size: 512 KB (524,288 bytes). Tree entries declaring size > 512 KB are rejected prior to blob download, and undeclared blobs exceeding 512 KB are excluded post-download.
    - Maximum aggregate retained payload: 10 MB (10,485,760 bytes).
-   Exceeding any limit aborts ingestion with fail-closed error.
-4. **Token Encryption Key Confidentiality:**
-   GitHub OAuth access tokens are encrypted using AES-256-GCM under `GITHUB_TOKEN_ENCRYPTION_KEY`. The 32-byte hex key must be securely provided via secret management. In production, missing or malformed keys halt startup (`503`). Plaintext tokens are strictly forbidden from appearing in API responses, logs, or error diagnostics.
-5. **Fail-Closed Consent Boundary:**
-   GitHub API calls are NEVER executed unless active DPDP `repo_verification` consent is confirmed in `IConsentRepository`. If consent is missing, revoked, or expired, zero API calls are made (`callCount === 0`). Ingestion jobs fail closed with `CONSENT_REVOKED` or `CONSENT_REQUIRED_OR_REVOKED`.
-6. **Single-Node Process vs Clustered Worker Architecture:**
-   The current P0-04 ingestion engine runs jobs synchronously/asynchronously within the API process backed by `ingestion_jobs`. In multi-instance clustered production environments, background repository ingestion should be decoupled into a dedicated asynchronous worker pool (e.g., BullMQ or temporal-style workflow orchestrator) consuming from `ingestion_jobs`.
+   Exceeding any limit aborts ingestion fail-closed with error details recorded in `ingestion_jobs`. No oversized content is ever persisted.
+4. **GitHub Authorization Scope Architecture:**
+   - Production Standard: GitHub Apps with fine-grained read-only permissions (`contents:read`, `metadata:read`).
+   - Legacy OAuth Fallback: Minimal read-only scopes (`read:user`, `user:email`, `public_repo`). The broad `repo` scope emits an explicit warning. Invalid scopes (e.g., `repo:read`) are strictly rejected. Callback verifies granted permissions fail-closed (`INSUFFICIENT_GITHUB_PERMISSIONS`, 403).
+5. **Tenant-Safe OAuth State Consumption:**
+   OAuth state consumption runs strictly within `withTenantTransaction(context, ...)` under the restricted `app_api` role with `SET LOCAL app.current_org_id`. PostgreSQL RLS policies on `github_oauth_states` enforce physical tenant isolation, preventing cross-tenant state visibility. Consumption is atomic (`FOR UPDATE`) with immediate single-use invalidation (`used_at = CURRENT_TIMESTAMP`).
+6. **Versioned AES-256-GCM Key Ring & Zero-Downtime Rotation:**
+   Tokens are encrypted using AES-256-GCM with versioned format `version:iv:tag:ciphertext`. Key rotation maintains past keys in `keyRing: Record<string, string>` allowing existing tokens to decrypt while new tokens use `activeKeyVersion`. Unknown key versions fail closed (`UNKNOWN_KEY_VERSION`), and production mode strictly enforces 64-hex key formatting.
+7. **Fixed OAuth Callback URI & Host Header Protection:**
+   The server enforces a canonical `GITHUB_OAUTH_REDIRECT_URI` and strict allowlist validation. Client-supplied `redirect_uri` outside the allowlist fails with 400 `INVALID_REDIRECT_URI`. Host headers (`req.headers.host`) and client parameters are never trusted. Production startup fails closed if GitHub credentials or redirect URIs are missing or placeholders.
+8. **Request Lifecycle & Durable Tracking:**
+   Repository ingestion is executed synchronously within the Fastify HTTP request lifecycle, bounded by HTTP gateway timeouts, while durably tracking state transitions ('queued', 'resolving', 'fetching', 'verifying', 'persisted', 'completed', or 'failed') in the relational `ingestion_jobs` table. This provides immediate client feedback, progress auditability via `GET /api/evidence/repositories/ingest/:id`, and the architectural foundation for a future asynchronous background worker daemon.
+9. **Fail-Closed Consent Boundary:**
+   GitHub API calls are NEVER executed unless active DPDP `repo_verification` consent is confirmed in `IConsentRepository`. If consent is missing, revoked, or expired, zero API calls are made (`callCount === 0`). Ingestion jobs fail closed with `CONSENT_REVOKED` or `CONSENT_REQUIRED_OR_REVOKED`. Consent is re-checked immediately prior to durable persistence.

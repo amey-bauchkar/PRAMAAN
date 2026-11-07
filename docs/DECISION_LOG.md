@@ -212,6 +212,21 @@
   9. **Production Application Composition:** In `buildApp()` (`apps/api/src/app.ts`), production mode wires these durable PostgreSQL adapters and fails closed if in-memory adapters are configured.
 - **Consequences:** Establishes complete end-to-end trusted static repository ingestion with zero untrusted code execution, cryptographic Git provenance, and durable PostgreSQL storage. P0-04 is completely verified and operational.
 
+---
+
+## ADR-17: Remediation of GitHub OAuth Scopes, Tenant State Isolation, Ingestion Resource Boundaries, Key Ring Versioning, and Callback Security
+
+- **Status:** Approved
+- **Context:** An independent security review of PR #2 identified gaps in authorization scopes, OAuth state tenant isolation, ingestion resource enforcement, cipher key validation/rotation, callback URI validation, and request lifecycle description.
+- **Decision:**
+  1. **GitHub Authorization Scope Hardening:** Discarded invalid scope token `repo:read`. Defined GitHub Apps with fine-grained read-only permissions (`contents:read`, `metadata:read`) as the primary production standard. Supported legacy OAuth App read-only scopes (`read:user`, `user:email`, `public_repo`), while emitting explicit warnings if monolithic `repo` scope is configured. Callback verifies granted scopes fail-closed with `INSUFFICIENT_GITHUB_PERMISSIONS` (403).
+  2. **Tenant-Safe OAuth State Consumption:** State consumption executes inside `withTenantTransaction(context, ...)` under the restricted `app_api` role. PostgreSQL RLS policies on `github_oauth_states` physically prevent any cross-tenant state visibility. Consumption is atomic (`FOR UPDATE`) with immediate single-use invalidation (`used_at = CURRENT_TIMESTAMP`). Cross-tenant consumption attempts return null.
+  3. **Strict Ingestion Limit Enforcement:** Production defaults are aligned with operational claims: 200 files maximum, 512 KB per file, 10 MB aggregate retained bytes. Entries with declared size > 512 KB in the Git tree are rejected prior to blob download. Undeclared blobs exceeding 512 KB are excluded post-download. Aggregate retained bytes exceeding 10 MB trigger `TOTAL_SIZE_LIMIT_EXCEEDED`. No oversized content is persisted, and all limit failures are durably recorded in `ingestion_jobs`.
+  4. **Versioned AES-256-GCM Key Ring & Zero-Downtime Rotation:** Enhanced `AesGcmTokenCipher` with a versioned key ring (`Record<string, string>`) and active key versioning. Ciphertext format is `version:iv:tag:ciphertext`. Tokens encrypted under prior keys (e.g. `v1`) decrypt seamlessly while new tokens encrypt with `v2`. Unknown key versions fail closed (`UNKNOWN_KEY_VERSION`), and production mode strictly enforces 64-hex key formatting.
+  5. **Fixed OAuth Callback URI & Host Header Protection:** The server enforces a canonical `GITHUB_OAUTH_REDIRECT_URI` and strict allowlist validation. Client-supplied `redirect_uri` outside the allowlist fails with 400 `INVALID_REDIRECT_URI`. Host headers (`req.headers.host`) and client parameters are never trusted. Production startup fails closed if GitHub credentials or redirect URIs are missing or placeholders.
+  6. **Synchronous Request Lifecycle Documentation:** Accurately documented the request lifecycle as synchronous execution within HTTP timeout boundaries with durable relational tracking in `ingestion_jobs`, providing auditability, idempotent status polling via `GET /api/evidence/repositories/ingest/:id`, and the architectural foundation for a future decoupled daemon.
+- **Consequences:** Eliminates OAuth scope confusion, closes cross-tenant OAuth state exposure, prevents DoS/zip-bomb attacks via pre-download tree size filtering, enables zero-downtime token key rotation, and secures OAuth callback redirection against spoofing.
+
 
 
 
