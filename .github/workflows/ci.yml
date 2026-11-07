@@ -47,7 +47,8 @@ jobs:
             apps/api/tests/m1-tenancy-rls.test.ts \
             apps/api/tests/prod-fail-closed.test.ts \
             db/tests/admin-tls-and-ledger.test.ts \
-            db/tests/test-safety-guard.test.ts
+            db/tests/test-safety-guard.test.ts \
+            db/tests/workflow-ci-safety.test.ts
         env:
           NODE_ENV: test
           SUPABASE_URL: https://qshujrddrzoemlzmleru.supabase.co
