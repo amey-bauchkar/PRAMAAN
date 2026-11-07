@@ -149,6 +149,21 @@ export class AnchorResolver {
         };
       }
 
+      // Require Git blob SHA for trusted ingestion snapshots
+      if (snapshot.provenance === 'trusted_ingestion_pipeline') {
+        if (!snapshot.blobSha || !/^[0-9a-fA-F]{40}$/.test(snapshot.blobSha)) {
+          return {
+            status: 'ANCHOR_INVALID',
+            valid: false,
+            error: 'BLOB_SHA_REQUIRED',
+            anchorId: exactAnchor.id,
+            diagnostics: {
+              reason: 'Trusted ingestion snapshots require a valid 40-character Git blobSha',
+            },
+          };
+        }
+      }
+
       // Check Git blob identity if present in both
       if (exactAnchor.blobSha && snapshot.blobSha) {
         if (exactAnchor.blobSha.toLowerCase() !== snapshot.blobSha.toLowerCase()) {

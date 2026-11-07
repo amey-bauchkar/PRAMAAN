@@ -1,5 +1,7 @@
-import { SourceSnapshot } from '@pramaan/contracts';
+import { SourceSnapshot, normalizeFilePath } from '@pramaan/contracts';
 import { createHash } from 'crypto';
+
+export { normalizeFilePath };
 
 export interface ISourceSnapshotStore {
   saveSnapshot(snapshot: SourceSnapshot): Promise<void> | void;
@@ -30,52 +32,6 @@ export interface ISourceSnapshotStore {
     studentId?: string,
     expectedSnapshotId?: string
   ): Promise<boolean> | boolean;
-}
-
-/**
- * Validates and normalizes repository-relative source file paths.
- * Enforces canonical representation and rejects traversal, absolute paths, null bytes, and empty paths.
- */
-export function normalizeFilePath(filePath: string): string {
-  if (typeof filePath !== 'string' || filePath.trim().length === 0) {
-    throw new Error('INVALID_FILE_PATH: File path cannot be empty or whitespace');
-  }
-
-  // Reject null bytes
-  if (filePath.includes('\0')) {
-    throw new Error('INVALID_FILE_PATH: File path contains null bytes');
-  }
-
-  // Reject Windows drive paths (e.g. C:, D:)
-  if (/^[a-zA-Z]:/.test(filePath)) {
-    throw new Error('INVALID_FILE_PATH: Absolute Windows drive paths are prohibited');
-  }
-
-  // Reject absolute paths starting with / or \
-  if (filePath.startsWith('/') || filePath.startsWith('\\')) {
-    throw new Error('INVALID_FILE_PATH: Absolute paths are prohibited');
-  }
-
-  // Convert backslashes to forward slashes
-  const unified = filePath.replace(/\\/g, '/');
-
-  // Check for duplicate separators
-  if (unified.includes('//')) {
-    throw new Error('INVALID_FILE_PATH: Duplicate path separators are prohibited');
-  }
-
-  // Check for path traversal components
-  const segments = unified.split('/');
-  for (const seg of segments) {
-    if (seg === '..' || seg === '.') {
-      throw new Error(`INVALID_FILE_PATH: Path traversal segment '${seg}' is prohibited`);
-    }
-    if (seg.trim().length === 0) {
-      throw new Error('INVALID_FILE_PATH: Empty path segments are prohibited');
-    }
-  }
-
-  return unified;
 }
 
 export class InMemorySourceSnapshotStore implements ISourceSnapshotStore {

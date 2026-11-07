@@ -1601,6 +1601,7 @@ export function greetCandidate(naam: string): string {
           filePath: 'src/index.ts',
           blobSha,
           rawFileHash: rawHash,
+          byteSize: 100,
         },
       ],
     };
@@ -1640,6 +1641,7 @@ export function greetCandidate(naam: string): string {
           filePath: 'src/index.ts',
           blobSha,
           rawFileHash: rawHash,
+          byteSize: 100,
         },
       ],
     };
@@ -1683,5 +1685,305 @@ export function greetCandidate(naam: string): string {
     );
     expect(resBadHash.valid).toBe(false);
     expect(resBadHash.reason).toContain('RAW_HASH_MISMATCH');
+  });
+
+  it('52. AnchorResolver.resolve rejects trusted snapshot missing blobSha (BLOB_SHA_REQUIRED)', () => {
+    const studentId = '30000000-0000-0000-0000-000000000001';
+    const snapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      orgId: sampleOrgId,
+      studentId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/calc.ts',
+      rawBytes: sampleTypeScriptContent,
+      rawFileHash,
+      capturedAt: new Date().toISOString(),
+      provenance: 'trusted_ingestion_pipeline',
+      ingestionId: randomUUID(),
+      // blobSha omitted!
+    };
+
+    const anchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: sampleOrgId,
+      studentId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/calc.ts',
+      lineStart: 1,
+      lineEnd: 3,
+      byteStart: 0,
+      byteEnd: Buffer.byteLength(sampleTypeScriptContent.split('\n').slice(0, 3).join('\n'), 'utf8'),
+      rawFileHash,
+      contentHash: createHash('sha256').update(sampleTypeScriptContent.split('\n').slice(0, 3).join('\n')).digest('hex'),
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const res = AnchorResolver.resolve(snapshot, anchor);
+    expect(res.valid).toBe(false);
+    expect(res.status).toBe('ANCHOR_INVALID');
+    expect(res.error).toBe('BLOB_SHA_REQUIRED');
+  });
+
+  it('53. AnchorResolver.resolve rejects trusted snapshot with malformed blobSha', () => {
+    const studentId = '30000000-0000-0000-0000-000000000001';
+    const snapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      orgId: sampleOrgId,
+      studentId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/calc.ts',
+      rawBytes: sampleTypeScriptContent,
+      rawFileHash,
+      blobSha: 'not-a-valid-40-hex-sha',
+      capturedAt: new Date().toISOString(),
+      provenance: 'trusted_ingestion_pipeline',
+      ingestionId: randomUUID(),
+    };
+
+    const anchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: sampleOrgId,
+      studentId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/calc.ts',
+      lineStart: 1,
+      lineEnd: 3,
+      byteStart: 0,
+      byteEnd: Buffer.byteLength(sampleTypeScriptContent.split('\n').slice(0, 3).join('\n'), 'utf8'),
+      rawFileHash,
+      contentHash: createHash('sha256').update(sampleTypeScriptContent.split('\n').slice(0, 3).join('\n')).digest('hex'),
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const res = AnchorResolver.resolve(snapshot, anchor);
+    expect(res.valid).toBe(false);
+    expect(res.status).toBe('ANCHOR_INVALID');
+    expect(res.error).toBe('BLOB_SHA_REQUIRED');
+  });
+
+  it('54. InMemoryTrustedIngestionStore.saveRecord allows idempotent exact duplicate save', () => {
+    const store = new InMemoryTrustedIngestionStore();
+    const studentId = '30000000-0000-0000-0000-000000000001';
+    const record: TrustedIngestionRecord = {
+      ingestionId: randomUUID(),
+      orgId: sampleOrgId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      treeSha: 'a'.repeat(40),
+      studentId,
+      verifiedAt: new Date().toISOString(),
+      provenance: 'trusted_ingestion_pipeline',
+      manifest: [
+        {
+          filePath: 'src/index.ts',
+          blobSha: 'b'.repeat(40),
+          rawFileHash: 'c'.repeat(64),
+          byteSize: 100,
+        },
+      ],
+    };
+
+    store.saveRecord(record);
+    // Saving exact duplicate must succeed idempotently without error
+    expect(() => store.saveRecord(record)).not.toThrow();
+    expect(store.hasRecord(sampleOrgId, sampleRepoId, sampleCommitSha, studentId)).toBe(true);
+  });
+
+  it('55. InMemoryTrustedIngestionStore.saveRecord rejects replacing existing record with different treeSha', () => {
+    const store = new InMemoryTrustedIngestionStore();
+    const studentId = '30000000-0000-0000-0000-000000000001';
+    const record: TrustedIngestionRecord = {
+      ingestionId: randomUUID(),
+      orgId: sampleOrgId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      treeSha: 'a'.repeat(40),
+      studentId,
+      verifiedAt: new Date().toISOString(),
+      provenance: 'trusted_ingestion_pipeline',
+      manifest: [
+        {
+          filePath: 'src/index.ts',
+          blobSha: 'b'.repeat(40),
+          rawFileHash: 'c'.repeat(64),
+          byteSize: 100,
+        },
+      ],
+    };
+
+    store.saveRecord(record);
+
+    // Attempting to overwrite with divergent treeSha must be rejected
+    const modifiedRecord = {
+      ...record,
+      treeSha: 'f'.repeat(40),
+    };
+
+    expect(() => store.saveRecord(modifiedRecord)).toThrow(
+      /IMMUTABLE_INGESTION_RECORD_MUTATION_REJECTED/
+    );
+  });
+
+  it('56. InMemoryTrustedIngestionStore.saveRecord rejects replacing existing record with different ingestionId', () => {
+    const store = new InMemoryTrustedIngestionStore();
+    const studentId = '30000000-0000-0000-0000-000000000001';
+    const record: TrustedIngestionRecord = {
+      ingestionId: randomUUID(),
+      orgId: sampleOrgId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      treeSha: 'a'.repeat(40),
+      studentId,
+      verifiedAt: new Date().toISOString(),
+      provenance: 'trusted_ingestion_pipeline',
+      manifest: [
+        {
+          filePath: 'src/index.ts',
+          blobSha: 'b'.repeat(40),
+          rawFileHash: 'c'.repeat(64),
+          byteSize: 100,
+        },
+      ],
+    };
+
+    store.saveRecord(record);
+
+    const modifiedRecord = {
+      ...record,
+      ingestionId: randomUUID(), // Different ingestionId
+    };
+
+    expect(() => store.saveRecord(modifiedRecord)).toThrow(
+      /IMMUTABLE_INGESTION_RECORD_MUTATION_REJECTED/
+    );
+  });
+
+  it('57. InMemoryTrustedIngestionStore.saveRecord rejects replacing existing record with different manifest', () => {
+    const store = new InMemoryTrustedIngestionStore();
+    const studentId = '30000000-0000-0000-0000-000000000001';
+    const record: TrustedIngestionRecord = {
+      ingestionId: randomUUID(),
+      orgId: sampleOrgId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      treeSha: 'a'.repeat(40),
+      studentId,
+      verifiedAt: new Date().toISOString(),
+      provenance: 'trusted_ingestion_pipeline',
+      manifest: [
+        {
+          filePath: 'src/index.ts',
+          blobSha: 'b'.repeat(40),
+          rawFileHash: 'c'.repeat(64),
+          byteSize: 100,
+        },
+      ],
+    };
+
+    store.saveRecord(record);
+
+    const modifiedRecord: TrustedIngestionRecord = {
+      ...record,
+      manifest: [
+        {
+          filePath: 'src/index.ts',
+          blobSha: 'd'.repeat(40), // Modified blobSha
+          rawFileHash: 'c'.repeat(64),
+          byteSize: 100,
+        },
+      ],
+    };
+
+    expect(() => store.saveRecord(modifiedRecord)).toThrow(
+      /IMMUTABLE_INGESTION_RECORD_MUTATION_REJECTED/
+    );
+  });
+
+  it('58. InMemoryTrustedIngestionStore.saveRecord rejects manifest containing duplicate canonical file paths', () => {
+    const store = new InMemoryTrustedIngestionStore();
+    const studentId = '30000000-0000-0000-0000-000000000001';
+    const record: TrustedIngestionRecord = {
+      ingestionId: randomUUID(),
+      orgId: sampleOrgId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      treeSha: 'a'.repeat(40),
+      studentId,
+      verifiedAt: new Date().toISOString(),
+      provenance: 'trusted_ingestion_pipeline',
+      manifest: [
+        {
+          filePath: 'src/calc.ts',
+          blobSha: 'b'.repeat(40),
+          rawFileHash: 'c'.repeat(64),
+          byteSize: 100,
+        },
+        {
+          filePath: 'src//calc.ts', // Duplicate canonical path
+          blobSha: 'b'.repeat(40),
+          rawFileHash: 'c'.repeat(64),
+          byteSize: 100,
+        },
+      ],
+    };
+
+    expect(() => store.saveRecord(record)).toThrow();
+  });
+
+  it('59. InMemoryTrustedIngestionStore.saveRecord rejects manifest entry with invalid blobSha or negative byteSize', () => {
+    const store = new InMemoryTrustedIngestionStore();
+    const studentId = '30000000-0000-0000-0000-000000000001';
+
+    // 1. Invalid blobSha
+    const badBlobRecord: any = {
+      ingestionId: randomUUID(),
+      orgId: sampleOrgId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      treeSha: 'a'.repeat(40),
+      studentId,
+      verifiedAt: new Date().toISOString(),
+      provenance: 'trusted_ingestion_pipeline',
+      manifest: [
+        {
+          filePath: 'src/calc.ts',
+          blobSha: 'short',
+          rawFileHash: 'c'.repeat(64),
+          byteSize: 100,
+        },
+      ],
+    };
+    expect(() => store.saveRecord(badBlobRecord)).toThrow();
+
+    // 2. Negative byteSize
+    const badByteSizeRecord: any = {
+      ingestionId: randomUUID(),
+      orgId: sampleOrgId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      treeSha: 'a'.repeat(40),
+      studentId,
+      verifiedAt: new Date().toISOString(),
+      provenance: 'trusted_ingestion_pipeline',
+      manifest: [
+        {
+          filePath: 'src/calc.ts',
+          blobSha: 'b'.repeat(40),
+          rawFileHash: 'c'.repeat(64),
+          byteSize: -5,
+        },
+      ],
+    };
+    expect(() => store.saveRecord(badByteSizeRecord)).toThrow();
   });
 });

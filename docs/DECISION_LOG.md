@@ -137,4 +137,30 @@
   3. **File-Level Trusted Ingestion Manifest Binding:** Extended `TrustedIngestionRecord` to include `treeSha: string` (40-char Git tree SHA) and `manifest: TrustedFileManifestEntry[]` (`filePath`, `blobSha`, `rawFileHash`, `byteSize`). Client registrations are permanently marked `provenance: 'unverified_client_input'` and `ingestionId: undefined`. Server-controlled P0-04 static ingestion calls `registerTrustedSnapshot()`. Authoritative resolution strictly requires that the target file exists in the server-verified ingestion manifest, matches the Git `blobSha`, and matches the `rawFileHash`.
 - **Consequences:** Eliminates intra-tenant cross-student data leakage, guarantees race-free snapshot registration and safe audit rollback, and binds authoritative evidence provenance strictly to verified Git file manifests. P0-05 deterministic anchor resolver core is formally complete and frozen.
 
+---
+
+## ADR-13: Registration Mutex Cleanup Guarantee, Mandatory Git Blob SHA for Trusted Provenance, and Write-Once Ingestion Record Immutability
+
+- **Status:** Approved
+- **Context:** An independent source review of commit `ca17be9` identified three remaining edge-case implementation gaps before formally freezing P0-05:
+  1. *Registration Mutex Cleanup Memory Leak:* `AnchorService.runWithLock()` stored a chained promise created via `currentQueue.then(() => nextInQueue, () => nextInQueue)` in `registrationQueues`, but compared against `nextInQueue` in the `finally` block. Because `nextInQueue !== queuedPromise`, completed lock entries were never deleted from the map, resulting in unbounded memory accumulation.
+  2. *Missing Git Blob SHA on Trusted Snapshots:* `SourceSnapshotSchema` allowed `blobSha` to be optional even for snapshots tagged `trusted_ingestion_pipeline`. A trusted snapshot lacking its blob SHA could bypass manifest blob verification.
+  3. *Ingestion Record Mutability Risk:* `InMemoryTrustedIngestionStore.saveRecord()` unconditionally overwrote stored records via `Map.set()`, leaving ingestion records mutable in memory and vulnerable to race conditions or duplicate file paths in manifests.
+- **Decision:**
+  1. **Leak-Free Mutex Cleanup:** `runWithLock` assigns `queuedPromise` to a local variable and stores that exact reference in `registrationQueues.set(key, queuedPromise)`. In `finally`, `this.registrationQueues.get(key) === queuedPromise` is evaluated; if true, the key is cleanly removed from the map. When multiple requests queue for the same key, earlier requests leave the map intact for subsequent waiters until the queue is fully drained. Verified via `getRegistrationQueuesSize() === 0`.
+  2. **Mandatory 40-Character Git Blob SHA for Trusted Provenance:**
+     - `SourceSnapshotSchema` superRefine enforces that when `provenance === 'trusted_ingestion_pipeline'`, `blobSha` must be defined and match `/^[0-9a-fA-F]{40}$/`.
+     - `AnchorService.registerTrustedSnapshot()` strictly rejects snapshots without a valid 40-character Git `blobSha` (`TRUSTED_SNAPSHOT_BLOB_SHA_REQUIRED`).
+     - `AnchorService.resolveAnchor()` fails closed (`UNTRUSTED_CLIENT_SNAPSHOT`) if authoritative resolution is requested for a trusted snapshot lacking its Git `blobSha`.
+     - Optional `blobSha` is preserved exclusively for non-authoritative client/legacy snapshots.
+  3. **Write-Once Immutability for Ingestion Records:**
+     - `InMemoryTrustedIngestionStore.saveRecord()` validates records against `TrustedIngestionRecordSchema`.
+     - Manifest paths are canonicalized via `normalizeFilePath()`, and duplicate canonical file paths are rejected (`DUPLICATE_MANIFEST_PATH`). Manifest entries require non-negative `byteSize` metadata.
+     - Saving an exact duplicate record is treated as an idempotent no-op.
+     - Any attempt to replace an existing record with a different ingestion ID, tree SHA, owner, or manifest throws `IMMUTABLE_INGESTION_RECORD_MUTATION_REJECTED`.
+     - `AnchorService.registerTrustedSnapshot()` verifies that snapshot `orgId`, `studentId`, `repositoryId`, `commitSha`, `filePath`, `blobSha`, and `rawFileHash` agree with the persisted server-controlled record and its manifest entry.
+  4. **Explicit P0-04 Production Boundary:** The application composition root (`buildApp()`) will wire durable snapshot and trusted ingestion storage adapters under ticket P0-04. The current development configuration is not claimed to provide durable authoritative ingestion until P0-04 is implemented.
+- **Consequences:** Eliminates memory leak vectors in concurrent registration, establishes cryptographic file-level Git blob binding for authoritative verification, and enforces strict write-once semantics for ingestion manifests. P0-05 deterministic anchor resolver core is formally frozen.
+
+
 

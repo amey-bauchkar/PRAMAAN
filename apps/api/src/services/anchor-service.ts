@@ -5,6 +5,7 @@ import {
   SessionContext,
   ParseResult,
   TrustedIngestionRecord,
+  TrustedIngestionRecordSchema,
 } from '@pramaan/contracts';
 import {
   AnchorResolver,
@@ -59,6 +60,8 @@ export class AnchorService {
 
   /**
    * Serializes operations per key to guarantee atomic execution across concurrent requests.
+   * Stores the exact queued promise so that map cleanup safely removes the entry
+   * when all waiters in the queue have completed, without race conditions or memory leaks.
    */
   private async runWithLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
     const currentQueue = this.registrationQueues.get(key) || Promise.resolve();
@@ -67,20 +70,25 @@ export class AnchorService {
       release = resolve;
     });
 
-    this.registrationQueues.set(
-      key,
-      currentQueue.then(() => nextInQueue, () => nextInQueue)
+    const queuedPromise = currentQueue.then(
+      () => nextInQueue,
+      () => nextInQueue
     );
+    this.registrationQueues.set(key, queuedPromise);
 
     await currentQueue;
     try {
       return await fn();
     } finally {
       release();
-      if (this.registrationQueues.get(key) === nextInQueue) {
+      if (this.registrationQueues.get(key) === queuedPromise) {
         this.registrationQueues.delete(key);
       }
     }
+  }
+
+  public getRegistrationQueuesSize(): number {
+    return this.registrationQueues.size;
   }
 
   /**
@@ -227,7 +235,7 @@ export class AnchorService {
    * Registers a verified source snapshot originating from the server-controlled
    * trusted ingestion pipeline (P0-04).
    * Validates that the file exists in the ingestion manifest, matches blobSha and rawFileHash,
-   * and tags the snapshot as authoritative with provenance 'trusted_ingestion_pipeline'.
+   * enforces snapshot-record agreement, write-once semantics, and tags the snapshot as authoritative with provenance 'trusted_ingestion_pipeline'.
    */
   public async registerTrustedSnapshot(
     context: SessionContext,
@@ -243,6 +251,79 @@ export class AnchorService {
       throw new Error('TRUSTED_INGESTION_STORE_NOT_CONFIGURED: Trusted ingestion store is required.');
     }
 
+    // 1. Context tenant isolation and ownership check
+    if (context.orgId !== ingestionRecord.orgId) {
+      throw new Error('CROSS_TENANT_ACCESS_REJECTED: Context orgId does not match ingestion record orgId');
+    }
+    if (context.role === 'student' && context.userId !== ingestionRecord.studentId) {
+      throw new Error('FORBIDDEN_STUDENT_ACCESS: Student cannot register trusted snapshot for another student');
+    }
+
+    // 2. Validate ingestion record against schema and save/verify in store (write-once)
+    const parsedRecord = TrustedIngestionRecordSchema.parse(ingestionRecord);
+
+    const existingRecord = await this.trustedIngestionStore.getRecord(
+      parsedRecord.orgId,
+      parsedRecord.repositoryId,
+      parsedRecord.commitSha,
+      parsedRecord.studentId
+    );
+
+    if (existingRecord) {
+      // Must not overwrite an already trusted ingestion record with different data
+      if (existingRecord.ingestionId !== parsedRecord.ingestionId) {
+        throw new Error(
+          `INGESTION_RECORD_MISMATCH: Supplied ingestionId '${parsedRecord.ingestionId}' does not match persisted record '${existingRecord.ingestionId}'`
+        );
+      }
+      if (existingRecord.treeSha.toLowerCase() !== parsedRecord.treeSha.toLowerCase()) {
+        throw new Error(
+          `INGESTION_RECORD_MISMATCH: Supplied treeSha '${parsedRecord.treeSha}' does not match persisted record '${existingRecord.treeSha}'`
+        );
+      }
+      // saveRecord enforces write-once semantics and allows idempotent duplicates
+      await this.trustedIngestionStore.saveRecord(parsedRecord);
+    } else {
+      await this.trustedIngestionStore.saveRecord(parsedRecord);
+    }
+
+    const trustedRecord = (await this.trustedIngestionStore.getRecord(
+      parsedRecord.orgId,
+      parsedRecord.repositoryId,
+      parsedRecord.commitSha,
+      parsedRecord.studentId
+    ))!;
+
+    // 3. Ensure snapshot attributes agree with ingestion record
+    if (snapshot.orgId && snapshot.orgId !== trustedRecord.orgId) {
+      throw new Error(
+        `SNAPSHOT_RECORD_MISMATCH: Snapshot orgId '${snapshot.orgId}' does not match ingestion record orgId '${trustedRecord.orgId}'`
+      );
+    }
+    if (snapshot.studentId && snapshot.studentId !== trustedRecord.studentId) {
+      throw new Error(
+        `SNAPSHOT_RECORD_MISMATCH: Snapshot studentId '${snapshot.studentId}' does not match ingestion record studentId '${trustedRecord.studentId}'`
+      );
+    }
+    if (snapshot.repositoryId !== trustedRecord.repositoryId) {
+      throw new Error(
+        `SNAPSHOT_RECORD_MISMATCH: Snapshot repositoryId '${snapshot.repositoryId}' does not match ingestion record repositoryId '${trustedRecord.repositoryId}'`
+      );
+    }
+    if (snapshot.commitSha.toLowerCase() !== trustedRecord.commitSha.toLowerCase()) {
+      throw new Error(
+        `SNAPSHOT_RECORD_MISMATCH: Snapshot commitSha '${snapshot.commitSha}' does not match ingestion record commitSha '${trustedRecord.commitSha}'`
+      );
+    }
+
+    // 4. Require Git blob SHA for trusted snapshots
+    if (!snapshot.blobSha || !/^[0-9a-fA-F]{40}$/.test(snapshot.blobSha)) {
+      throw new Error(
+        'TRUSTED_SNAPSHOT_BLOB_SHA_REQUIRED: Trusted ingestion snapshots must specify a valid 40-character Git blobSha.'
+      );
+    }
+
+    // 5. Canonicalize snapshot file path
     let canonicalPath: string;
     try {
       canonicalPath = normalizeFilePath(snapshot.filePath);
@@ -250,12 +331,12 @@ export class AnchorService {
       throw new Error(`INVALID_SNAPSHOT_PATH: ${err.message}`, { cause: err });
     }
 
-    // Verify file against ingestion manifest
+    // 6. Verify file against ingestion manifest (path, blobSha, rawFileHash)
     const manifestResult = await this.trustedIngestionStore.verifyFileManifest(
-      ingestionRecord.orgId,
-      ingestionRecord.repositoryId,
-      ingestionRecord.commitSha,
-      ingestionRecord.studentId,
+      trustedRecord.orgId,
+      trustedRecord.repositoryId,
+      trustedRecord.commitSha,
+      trustedRecord.studentId,
       canonicalPath,
       snapshot.blobSha,
       snapshot.rawFileHash
@@ -265,33 +346,34 @@ export class AnchorService {
       throw new Error(`TRUSTED_INGESTION_MANIFEST_VIOLATION: ${manifestResult.reason}`);
     }
 
-    // Save or ensure ingestion record is stored
-    await this.trustedIngestionStore.saveRecord(ingestionRecord);
-
+    // 7. Store trusted snapshot
     const trustedSnapshot: SourceSnapshot = {
       ...snapshot,
-      orgId: ingestionRecord.orgId,
-      studentId: ingestionRecord.studentId,
+      orgId: trustedRecord.orgId,
+      studentId: trustedRecord.studentId,
       filePath: canonicalPath,
+      blobSha: snapshot.blobSha.toLowerCase(),
+      rawFileHash: snapshot.rawFileHash.toLowerCase(),
       provenance: 'trusted_ingestion_pipeline',
-      ingestionId: ingestionRecord.ingestionId,
+      ingestionId: trustedRecord.ingestionId,
     };
 
     await this.snapshotStore.saveSnapshot(trustedSnapshot);
 
+    // 8. Log audit event
     await this.auditRepo.log(
       context,
       'TRUSTED_SNAPSHOT_INGESTED',
       'evidence',
       snapshot.snapshotId,
       {
-        ingestionId: ingestionRecord.ingestionId,
-        repositoryId: ingestionRecord.repositoryId,
-        commitSha: ingestionRecord.commitSha,
+        ingestionId: trustedRecord.ingestionId,
+        repositoryId: trustedRecord.repositoryId,
+        commitSha: trustedRecord.commitSha,
         filePath: canonicalPath,
         rawFileHash: snapshot.rawFileHash,
         blobSha: snapshot.blobSha,
-        studentId: ingestionRecord.studentId,
+        studentId: trustedRecord.studentId,
       }
     );
 
@@ -518,7 +600,24 @@ export class AnchorService {
         }
       } else {
         // Snapshot claims trusted_ingestion_pipeline with ingestionId
-        if (!this.trustedIngestionStore) {
+        if (!snapshot.blobSha || !/^[0-9a-fA-F]{40}$/.test(snapshot.blobSha)) {
+          isAuthoritative = false;
+          provenance = 'retained_snapshot_store';
+
+          if (options.authoritative) {
+            return {
+              status: 'ANCHOR_INVALID',
+              valid: false,
+              authoritative: false,
+              provenance: 'retained_snapshot_store',
+              error: 'UNTRUSTED_CLIENT_SNAPSHOT',
+              anchorId: anchor.id,
+              diagnostics: {
+                reason: 'Authoritative resolution requires a trusted snapshot with a valid 40-character Git blobSha.',
+              },
+            };
+          }
+        } else if (!this.trustedIngestionStore) {
           return {
             status: 'ANCHOR_INVALID',
             valid: false,
@@ -528,14 +627,13 @@ export class AnchorService {
             anchorId: anchor.id,
             diagnostics: { reason: 'Trusted ingestion store is not configured on server' },
           };
-        }
-
-        const record = await this.trustedIngestionStore.getRecord(
-          context.orgId,
-          anchor.repositoryId,
-          anchor.commitSha,
-          anchor.studentId
-        );
+        } else {
+          const record = await this.trustedIngestionStore.getRecord(
+            context.orgId,
+            anchor.repositoryId,
+            anchor.commitSha,
+            anchor.studentId
+          );
 
         if (!record || record.ingestionId !== snapshot.ingestionId) {
           isAuthoritative = false;
@@ -574,9 +672,11 @@ export class AnchorService {
                 valid: false,
                 authoritative: false,
                 provenance: 'retained_snapshot_store',
-                error: manifestCheck.reason?.split(':')[0] || 'MANIFEST_VERIFICATION_FAILED',
+                error: manifestCheck.reason?.split(':')[0] || 'UNTRUSTED_CLIENT_SNAPSHOT',
                 anchorId: anchor.id,
-                diagnostics: { reason: manifestCheck.reason },
+                diagnostics: {
+                  reason: `Snapshot failed trusted manifest verification: ${manifestCheck.reason}`,
+                },
               };
             }
           } else {
@@ -586,6 +686,7 @@ export class AnchorService {
         }
       }
     }
+  }
 
     // 5. Deterministic Resolution
     const result = AnchorResolver.resolve(snapshot, anchor, {

@@ -86,6 +86,64 @@ export const ExactCodeAnchorSchema = z.object({
 });
 export type ExactCodeAnchor = z.infer<typeof ExactCodeAnchorSchema>;
 
+/**
+ * Validates and normalizes repository-relative source file paths.
+ * Enforces canonical representation and rejects traversal, absolute paths, null bytes, and empty paths.
+ */
+export function normalizeFilePath(filePath: string): string {
+  if (typeof filePath !== 'string' || filePath.trim().length === 0) {
+    throw new Error('INVALID_FILE_PATH: File path cannot be empty or whitespace');
+  }
+
+  // Reject null bytes
+  if (filePath.includes('\0')) {
+    throw new Error('INVALID_FILE_PATH: File path contains null bytes');
+  }
+
+  // Reject Windows drive paths (e.g. C:, D:)
+  if (/^[a-zA-Z]:/.test(filePath)) {
+    throw new Error('INVALID_FILE_PATH: Absolute Windows drive paths are prohibited');
+  }
+
+  // Reject absolute paths starting with / or \
+  if (filePath.startsWith('/') || filePath.startsWith('\\')) {
+    throw new Error('INVALID_FILE_PATH: Absolute paths are prohibited');
+  }
+
+  // Convert backslashes to forward slashes
+  const unified = filePath.replace(/\\/g, '/');
+
+  // Check for duplicate separators
+  if (unified.includes('//')) {
+    throw new Error('INVALID_FILE_PATH: Duplicate path separators are prohibited');
+  }
+
+  // Check for path traversal components
+  const segments = unified.split('/');
+  for (const seg of segments) {
+    if (seg === '..' || seg === '.') {
+      throw new Error(`INVALID_FILE_PATH: Path traversal segment '${seg}' is prohibited`);
+    }
+    if (seg.trim().length === 0) {
+      throw new Error('INVALID_FILE_PATH: Empty path segments are prohibited');
+    }
+  }
+
+  return unified;
+}
+
+export const CanonicalFilePathSchema = z.string().min(1).refine(
+  (val) => {
+    try {
+      normalizeFilePath(val);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  { message: 'filePath must be a valid canonical repository-relative path without traversal sequences' }
+);
+
 export const SourceSnapshotSchema = z.object({
   snapshotId: z.string().uuid(),
   orgId: z.string().uuid().optional(), // Tenant organization identifier
@@ -102,14 +160,24 @@ export const SourceSnapshotSchema = z.object({
   capturedAt: z.string().datetime(),
   provenance: z.enum(['unverified_client_input', 'trusted_ingestion_pipeline']).default('unverified_client_input').optional(),
   ingestionId: z.string().uuid().optional(),
+}).superRefine((val, ctx) => {
+  if (val.provenance === 'trusted_ingestion_pipeline') {
+    if (!val.blobSha || !/^[0-9a-fA-F]{40}$/.test(val.blobSha)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'blobSha is required and must be a 40-character Git SHA for trusted ingestion pipeline snapshots',
+        path: ['blobSha'],
+      });
+    }
+  }
 });
 export type SourceSnapshot = z.infer<typeof SourceSnapshotSchema>;
 
 export const TrustedFileManifestEntrySchema = z.object({
-  filePath: z.string().min(1),
-  blobSha: z.string().length(40),
-  rawFileHash: z.string().length(64), // SHA-256
-  byteSize: z.number().int().nonnegative().optional(),
+  filePath: CanonicalFilePathSchema,
+  blobSha: z.string().regex(/^[0-9a-fA-F]{40}$/, 'blobSha must be a 40-character hex string'),
+  rawFileHash: z.string().regex(/^[0-9a-fA-F]{64}$/, 'rawFileHash must be a 64-character SHA-256 hex string'),
+  byteSize: z.number().int().nonnegative(),
 });
 export type TrustedFileManifestEntry = z.infer<typeof TrustedFileManifestEntrySchema>;
 
@@ -117,12 +185,34 @@ export const TrustedIngestionRecordSchema = z.object({
   ingestionId: z.string().uuid(),
   orgId: z.string().uuid(),
   repositoryId: z.string().uuid(),
-  commitSha: z.string().length(40),
-  treeSha: z.string().length(40),
+  commitSha: z.string().regex(/^[0-9a-fA-F]{40}$/, 'commitSha must be a 40-character hex string'),
+  treeSha: z.string().regex(/^[0-9a-fA-F]{40}$/, 'treeSha must be a 40-character hex string'),
   studentId: z.string().uuid(),
   verifiedAt: z.string().datetime(),
   provenance: z.literal('trusted_ingestion_pipeline').default('trusted_ingestion_pipeline'),
   manifest: z.array(TrustedFileManifestEntrySchema).default([]),
+}).superRefine((record, ctx) => {
+  const seenPaths = new Set<string>();
+  for (let i = 0; i < record.manifest.length; i++) {
+    const entry = record.manifest[i];
+    try {
+      const canonical = normalizeFilePath(entry.filePath);
+      if (seenPaths.has(canonical)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Duplicate canonical file path in manifest: '${canonical}'`,
+          path: ['manifest', i, 'filePath'],
+        });
+      }
+      seenPaths.add(canonical);
+    } catch (err: any) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Invalid manifest file path: ${err.message}`,
+        path: ['manifest', i, 'filePath'],
+      });
+    }
+  }
 });
 export type TrustedIngestionRecord = z.infer<typeof TrustedIngestionRecordSchema>;
 
