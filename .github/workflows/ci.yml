@@ -146,6 +146,8 @@ jobs:
   live-supabase-verification:
     name: Remote Live Supabase Verification (Environment-Dependent Gate)
     runs-on: ubuntu-latest
+    env:
+      ALLOW_DESTRUCTIVE_DB_TESTS: "true"
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -183,6 +185,7 @@ jobs:
             apps/api/tests/real-supabase-jwt.test.ts \
             apps/api/tests/pg-auth-integration.test.ts
         env:
+          ALLOW_DESTRUCTIVE_DB_TESTS: "true"
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
