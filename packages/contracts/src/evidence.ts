@@ -89,6 +89,7 @@ export type ExactCodeAnchor = z.infer<typeof ExactCodeAnchorSchema>;
 export const SourceSnapshotSchema = z.object({
   snapshotId: z.string().uuid(),
   orgId: z.string().uuid().optional(), // Tenant organization identifier
+  studentId: z.string().uuid().optional(), // Student owner identifier where applicable
   repositoryId: z.string().uuid(),
   commitSha: z.string().length(40),
   filePath: z.string().min(1),
@@ -101,6 +102,18 @@ export const SourceSnapshotSchema = z.object({
   capturedAt: z.string().datetime(),
 });
 export type SourceSnapshot = z.infer<typeof SourceSnapshotSchema>;
+
+export const TrustedIngestionRecordSchema = z.object({
+  ingestionId: z.string().uuid(),
+  orgId: z.string().uuid(),
+  repositoryId: z.string().uuid(),
+  commitSha: z.string().length(40),
+  studentId: z.string().uuid(),
+  treeSha: z.string().optional(),
+  verifiedAt: z.string().datetime(),
+  provenance: z.literal('trusted_ingestion_pipeline').default('trusted_ingestion_pipeline'),
+});
+export type TrustedIngestionRecord = z.infer<typeof TrustedIngestionRecordSchema>;
 
 export const CodeSymbolLocationSchema = z.object({
   name: z.string(),

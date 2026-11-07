@@ -19,6 +19,12 @@ export interface ISourceSnapshotStore {
     filePath: string,
     orgId?: string
   ): Promise<boolean> | boolean;
+  deleteSnapshot?(
+    repositoryId: string,
+    commitSha: string,
+    filePath: string,
+    orgId?: string
+  ): Promise<boolean> | boolean;
 }
 
 /**
@@ -130,6 +136,8 @@ export class InMemorySourceSnapshotStore implements ISourceSnapshotStore {
 
   /**
    * Retrieves a snapshot with defensive byte copying on read.
+   * If orgId is supplied, retrieves only a snapshot explicitly stored under that exact tenant.
+   * Never falls back to an unscoped snapshot for a tenant-scoped lookup.
    */
   public getSnapshot(
     repositoryId: string,
@@ -145,12 +153,7 @@ export class InMemorySourceSnapshotStore implements ISourceSnapshotStore {
     }
 
     const key = this.makeKey(repositoryId, commitSha, canonicalPath, orgId);
-    let stored = this.snapshotsByKey.get(key);
-
-    // Fallback lookup without tenant prefix if orgId was not specified at storage time
-    if (!stored && orgId) {
-      stored = this.snapshotsByKey.get(this.makeKey(repositoryId, commitSha, canonicalPath));
-    }
+    const stored = this.snapshotsByKey.get(key);
 
     if (!stored) return undefined;
 
@@ -163,14 +166,12 @@ export class InMemorySourceSnapshotStore implements ISourceSnapshotStore {
 
   /**
    * Retrieves a snapshot by hash with defensive byte copying on read.
+   * If orgId is supplied, retrieves only a snapshot explicitly stored under that exact tenant.
+   * Never falls back to an unscoped snapshot for a tenant-scoped lookup.
    */
   public getSnapshotByHash(rawFileHash: string, orgId?: string): SourceSnapshot | undefined {
     const hashKey = this.makeHashKey(rawFileHash, orgId);
-    let stored = this.snapshotsByHash.get(hashKey);
-
-    if (!stored && orgId) {
-      stored = this.snapshotsByHash.get(this.makeHashKey(rawFileHash));
-    }
+    const stored = this.snapshotsByHash.get(hashKey);
 
     if (!stored) return undefined;
 
@@ -178,6 +179,37 @@ export class InMemorySourceSnapshotStore implements ISourceSnapshotStore {
       ...stored,
       rawBytes: Buffer.from(stored.rawBytes),
     };
+  }
+
+  /**
+   * Deletes a snapshot from storage (used for compensating rollback on failure).
+   * Returns true if the snapshot existed and was removed, false otherwise.
+   */
+  public deleteSnapshot(
+    repositoryId: string,
+    commitSha: string,
+    filePath: string,
+    orgId?: string
+  ): boolean {
+    let canonicalPath: string;
+    try {
+      canonicalPath = normalizeFilePath(filePath);
+    } catch {
+      return false;
+    }
+
+    const key = this.makeKey(repositoryId, commitSha, canonicalPath, orgId);
+    const existing = this.snapshotsByKey.get(key);
+    if (!existing) return false;
+
+    this.snapshotsByKey.delete(key);
+
+    const hashKey = this.makeHashKey(existing.rawFileHash, orgId);
+    if (this.snapshotsByHash.get(hashKey)?.snapshotId === existing.snapshotId) {
+      this.snapshotsByHash.delete(hashKey);
+    }
+
+    return true;
   }
 
   public hasSnapshot(

@@ -1,7 +1,7 @@
 # PRAMAAN — Project Status
 
 **Last Updated:** 2026-11-07  
-**Stage:** Stage A (Completed) → Milestone M0, M1 & M2 Phase 1 (P0-05 Anchor Resolver) (ENGINEERING VERIFIED, SECURITY HARDENED & AUDITED)  
+**Stage:** Stage A (Completed) → Milestone M0, M1 & M2 Phase 1 (P0-05 Anchor Resolver) (CORRECTIVE PATCH APPLIED, SECURITY HARDENED & AUDITED)  
 **Lead Engineer:** Solo Developer Partner  
 **Target Event:** QUASAR 5.0 (EdTech Domain)  
 
@@ -12,13 +12,15 @@
 PRAMAAN is an evidence-based placement intelligence platform built for colleges, students, placement officers (TPOs), and recruiters. Its core thesis is:
 $$\text{Evidence} \rightarrow \text{Observed Skill} \rightarrow \text{Verification} \rightarrow \text{Verified Skill} \rightarrow \text{Skill Passport} \rightarrow \text{Eligibility} \rightarrow \text{Placement Decision}$$
 
-Following the M0 monorepo foundation and M1 multi-tenancy/security hardening, **Milestone M2 Phase 1: Exact Code Anchor Resolver (P0-05)** has been implemented, hardened against adversarial attacks, and rigorously verified:
-- **Exact Code Anchor Contract:** Standardized `ExactCodeAnchor`, `SourceSnapshot`, `CodeSymbolLocation`, `ResolutionResult`, and `AnchorResolutionStatus` contracts in `@pramaan/contracts` with strict SHA-256 hash validation, UTF-8 byte offsets, blob identity, authoritative provenance flags, and snapshot metadata.
+Following the M0 monorepo foundation and M1 multi-tenancy/security hardening, **Milestone M2 Phase 1: Exact Code Anchor Resolver (P0-05)** has been implemented, hardened against adversarial attacks, and refined with a comprehensive corrective patch addressing all source review findings:
+- **Exact Code Anchor Contract:** Standardized `ExactCodeAnchor`, `SourceSnapshot`, `CodeSymbolLocation`, `ResolutionResult`, `AnchorResolutionStatus`, and `TrustedIngestionRecord` contracts in `@pramaan/contracts` with strict SHA-256 hash validation, UTF-8 byte offsets, blob identity, authoritative provenance flags, and snapshot metadata.
 - **Deterministic Offline Anchor Resolver:** Built `AnchorResolver` in `@pramaan/domain` enforcing authoritative raw-byte integrity (`hashRawBytes`), content-addressed snapshot matching, commit SHA verification, canonical file path verification, and line/byte-boundary span hashing. Validates UTF-8 character boundaries (rejecting offsets splitting multi-byte runes), enforces line/byte metadata consistency, detects line-ending drift (`\r\n` vs `\n`) separately from whitespace alterations, and verifies Git `blobSha` when present. Normalized hashing is computed purely as a diagnostic indicator and never overrides raw integrity failure.
 - **Offline AST Symbol Parsing:** Implemented `TypeScriptAstParser` using the pinned `typescript` compiler API (`ts.createSourceFile`). Handles syntax errors gracefully, validates UTF-8 decoding strictly, extracts functions, methods, classes, and interfaces with exact UTF-8 byte ranges (converting from UTF-16 character indices), with zero untrusted code execution. Extensible via singleton `ParserRegistry` keyed on `(parserName, language, parserVersion)` to prevent historical parser replacement.
-- **Defensive Content-Addressed Snapshot Storage:** Created `ISourceSnapshotStore` and `InMemorySourceSnapshotStore` with defensive byte copying on read and write, tenant isolation (`orgId` scoped), path traversal immunity, and immutable overwrite rejection (`IMMUTABLE_SNAPSHOT_MUTATION_REJECTED`).
-- **Tenant-Isolated API Service & Security Boundaries:** Built `AnchorService` and mounted authenticated Fastify routes (`POST /api/evidence/anchors/resolve`, `POST /api/evidence/snapshots`, `POST /api/evidence/parse`) enforcing tenant isolation, student ownership isolation, fail-closed DPDP purpose consent (`repo_verification`), authoritative provenance separation, production durable storage enforcement (503 fail-closed), and SHA-256 audit chaining.
-- **100% Test Success Across Full Suite:** All 284 tests pass across 25 test files (including 34 pure domain anchor resolver tests, 19 API & RBAC tests, and 78 live Supabase PostgreSQL 17 security tests).
+- **Defensive Content-Addressed Snapshot Storage:** Created `ISourceSnapshotStore` and `InMemorySourceSnapshotStore` with defensive byte copying on read and write, strict tenant isolation (`orgId` scoped with zero unscoped fallback), path traversal immunity, immutable overwrite rejection (`IMMUTABLE_SNAPSHOT_MUTATION_REJECTED`), and compensating rollback capability (`deleteSnapshot`).
+- **Server-Controlled Ingestion Provenance & Consent Gates:** Created `ITrustedIngestionStore` and `InMemoryTrustedIngestionStore` replacing global mutable flags. Authoritative status (`authoritative: true`, `provenance: 'trusted_ingestion_pipeline'`) requires matching server-side ingestion records keyed by `(orgId, repositoryId, commitSha, studentId)`. Client-supplied snapshots remain permanently non-authoritative (`unverified_client_input`).
+- **Universal Student Ownership & DPDP Consent Enforcement:** Universal enforcement of trusted student ownership and active DPDP `repo_verification` consent across ALL caller roles (student, placement officer, system administrator) before storing snapshots or executing AST parsing. Parse endpoint `/api/evidence/parse` is strictly diagnostic (`diagnosticOnly: true, authoritative: false, provenance: 'diagnostic_parser'`).
+- **Atomic Registration with Compensating Rollback:** Snapshot registration in `AnchorService` implements failure-safe compensating rollback: if audit logging fails after storing a new snapshot, the snapshot is atomically deleted from storage before failing closed, preventing orphaned un-audited evidence.
+- **100% Test Success Across Full Suite:** All 313 tests pass across 25 test files (including 41 pure domain anchor resolver tests, 41 API & RBAC tests, and 78 live Supabase PostgreSQL 17 security tests).
 
 ---
 
@@ -26,19 +28,19 @@ Following the M0 monorepo foundation and M1 multi-tenancy/security hardening, **
 
 | Tier | Description | Files / Tests | Status |
 | :--- | :--- | :--- | :--- |
-| **Pure Unit Tests** | Pure domain logic: state machine, anchor hashing, exact code anchor resolver, offline AST parsing, audit hash chaining, eligibility rules, 4/5ths fairness math. | 6 files, 75 tests | `UNIT_TESTED` (Passing in ~3s) |
-| **API, RBAC & Adversarial Tests** | Fastify HTTP endpoints, positive RBAC matrix, anchor resolution API, snapshot registration, email takeover prevention, fail-closed startup, strict claims validation, JWT test utilities, consent adversarial boundaries, audit concurrency & tenant consent, and administrative TLS/ledger integrity. | 14 files, 131 tests | `INTEGRATION_TESTED` (Passing in ~42s) |
+| **Pure Unit Tests** | Pure domain logic: state machine, anchor hashing, exact code anchor resolver, offline AST parsing, audit hash chaining, eligibility rules, 4/5ths fairness math. | 6 files, 82 tests | `UNIT_TESTED` (Passing in ~3s) |
+| **API, RBAC & Adversarial Tests** | Fastify HTTP endpoints, positive RBAC matrix, anchor resolution API, snapshot registration, server-controlled provenance, compensating rollback, student ownership/consent gates, email takeover prevention, fail-closed startup, strict claims validation, JWT test utilities, consent adversarial boundaries, audit concurrency & tenant consent, and administrative TLS/ledger integrity. | 14 files, 153 tests | `INTEGRATION_TESTED` (Passing in ~42s) |
 | **Live Database Tests** | Real PostgreSQL 17 on Supabase: RLS isolation, cross-tenant mutation rejection, triggers, constraints, DCL permissions, physical connection reuse via backend PID, restricted runtime user (`pramaan_app_user`), parent university discovery isolation, migration ledger idempotency, test safety guards, and genuine Supabase ES256 JWKS token validation. | 5 files, 78 tests | `SECURITY_VERIFIED` (Passing on live Supabase DB) |
-| **Total Suite** | Full monorepo test pack running under Vitest. | **25 files, 284 tests** | **100% Passing** |
+| **Total Suite** | Full monorepo test pack running under Vitest. | **25 files, 313 tests** | **100% Passing** |
 
-### Complete Test Inventory (25 Files, 284 Tests)
-1. `packages/domain/tests/exact-anchor-resolver.test.ts` (34 tests)
+### Complete Test Inventory (25 Files, 313 Tests)
+1. `packages/domain/tests/exact-anchor-resolver.test.ts` (41 tests)
 2. `packages/domain/tests/skill-state-machine.test.ts` (8 tests)
 3. `packages/domain/tests/anchor-resolver.test.ts` (4 tests)
 4. `packages/domain/tests/audit-chain.test.ts` (19 tests)
 5. `packages/domain/tests/eligibility-evaluator.test.ts` (5 tests)
 6. `packages/domain/tests/fairness-calculator.test.ts` (5 tests)
-7. `apps/api/tests/anchor-service-and-api.test.ts` (19 tests)
+7. `apps/api/tests/anchor-service-and-api.test.ts` (41 tests)
 8. `apps/api/tests/m1-tenancy-rls.test.ts` (5 tests)
 9. `apps/api/tests/m1-audit-chain.test.ts` (3 tests)
 10. `apps/api/tests/m1-consent-ledger.test.ts` (3 tests)

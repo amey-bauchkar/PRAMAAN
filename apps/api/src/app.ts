@@ -452,11 +452,23 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       if (err.message.startsWith('DURABLE_STORAGE_REQUIRED')) {
         return reply.status(503).send({ error: err.message });
       }
-      if (err.message.startsWith('CONSENT_REQUIRED_OR_REVOKED') || err.message.startsWith('CONSENT_SERVICE_UNAVAILABLE')) {
+      if (err.message.startsWith('CONSENT_SERVICE_UNAVAILABLE')) {
+        return reply.status(503).send({ error: err.message });
+      }
+      if (err.message.startsWith('FORBIDDEN_STUDENT_ACCESS')) {
+        return reply.status(403).send({ error: err.message });
+      }
+      if (
+        err.message.startsWith('STUDENT_OWNERSHIP_REQUIRED') ||
+        err.message.startsWith('CONSENT_REQUIRED_OR_REVOKED')
+      ) {
         return reply.status(422).send({ error: err.message });
       }
       if (err.message.startsWith('INVALID_SNAPSHOT_PATH')) {
         return reply.status(400).send({ error: err.message });
+      }
+      if (err.message.startsWith('SNAPSHOT_REGISTRATION_FAILED')) {
+        return reply.status(500).send({ error: err.message });
       }
       return reply.status(400).send({ error: err.message });
     }
@@ -480,12 +492,34 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       return reply.status(400).send({ error: 'Missing required fields: filePath and source' });
     }
 
-    const parseResult = anchorService.parseSource(body.source, body.filePath);
-    if (!parseResult.success && parseResult.errors.some(e => e.startsWith('INVALID_FILE_PATH') || e.startsWith('UNSUPPORTED_FILE_TYPE'))) {
-      return reply.status(400).send(parseResult);
-    }
+    try {
+      const parseResult = await anchorService.parseSourceWithConsent(
+        context,
+        body.source,
+        body.filePath,
+        body.studentId
+      );
 
-    return reply.status(200).send(parseResult);
+      if (!parseResult.success && parseResult.errors.some(e => e.startsWith('INVALID_FILE_PATH') || e.startsWith('UNSUPPORTED_FILE_TYPE'))) {
+        return reply.status(400).send(parseResult);
+      }
+
+      return reply.status(200).send(parseResult);
+    } catch (err: any) {
+      if (err.message.startsWith('FORBIDDEN_STUDENT_ACCESS')) {
+        return reply.status(403).send({ error: err.message });
+      }
+      if (
+        err.message.startsWith('STUDENT_OWNERSHIP_REQUIRED') ||
+        err.message.startsWith('CONSENT_REQUIRED_OR_REVOKED')
+      ) {
+        return reply.status(422).send({ error: err.message });
+      }
+      if (err.message.startsWith('CONSENT_SERVICE_UNAVAILABLE')) {
+        return reply.status(503).send({ error: err.message });
+      }
+      return reply.status(400).send({ error: err.message });
+    }
   });
 
   return app;

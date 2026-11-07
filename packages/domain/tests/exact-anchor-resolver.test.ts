@@ -61,6 +61,7 @@ export class DistributionAnalyzer {
 
     sampleSnapshot = {
       snapshotId: randomUUID(),
+      orgId: sampleOrgId,
       repositoryId: sampleRepoId,
       commitSha: sampleCommitSha,
       filePath: sampleFilePath,
@@ -1095,7 +1096,29 @@ export function greetCandidate(naam: string): string {
     expect(retrievedAgain!.rawBytes.toString('utf8')).toBe('console.log("immutable");');
   });
 
-  it('34. Tenant isolation in snapshot store prevents cross-tenant snapshot retrieval', () => {
+  it('34. Tenant A retrieves its own snapshot from store', () => {
+    const store = new InMemorySourceSnapshotStore();
+    const collegeA = '00000000-0000-0000-0000-000000000001';
+
+    const snapA: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      orgId: collegeA,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/secretA.ts',
+      rawBytes: Buffer.from('college A secret', 'utf8'),
+      rawFileHash: createHash('sha256').update('college A secret').digest('hex'),
+      capturedAt: new Date().toISOString(),
+    };
+
+    store.saveSnapshot(snapA);
+    const retrieved = store.getSnapshot(sampleRepoId, sampleCommitSha, 'src/secretA.ts', collegeA);
+    expect(retrieved).toBeDefined();
+    expect(retrieved!.orgId).toBe(collegeA);
+    expect(store.hasSnapshot(sampleRepoId, sampleCommitSha, 'src/secretA.ts', collegeA)).toBe(true);
+  });
+
+  it('35. Tenant B cannot retrieve Tenant A snapshot (cross-tenant isolation)', () => {
     const store = new InMemorySourceSnapshotStore();
     const collegeA = '00000000-0000-0000-0000-000000000001';
     const collegeB = '00000000-0000-0000-0000-000000000002';
@@ -1105,18 +1128,174 @@ export function greetCandidate(naam: string): string {
       orgId: collegeA,
       repositoryId: sampleRepoId,
       commitSha: sampleCommitSha,
-      filePath: 'src/secret.ts',
+      filePath: 'src/secretA.ts',
       rawBytes: Buffer.from('college A secret', 'utf8'),
       rawFileHash: createHash('sha256').update('college A secret').digest('hex'),
       capturedAt: new Date().toISOString(),
     };
 
     store.saveSnapshot(snapA);
+    expect(store.getSnapshot(sampleRepoId, sampleCommitSha, 'src/secretA.ts', collegeB)).toBeUndefined();
+    expect(store.hasSnapshot(sampleRepoId, sampleCommitSha, 'src/secretA.ts', collegeB)).toBe(false);
+  });
 
-    // College A retrieves their own snapshot -> Found
-    expect(store.getSnapshot(sampleRepoId, sampleCommitSha, 'src/secret.ts', collegeA)).toBeDefined();
+  it('36. Tenant A cannot retrieve Tenant B snapshot (bidirectional isolation)', () => {
+    const store = new InMemorySourceSnapshotStore();
+    const collegeA = '00000000-0000-0000-0000-000000000001';
+    const collegeB = '00000000-0000-0000-0000-000000000002';
 
-    // College B tries to retrieve College A's snapshot with their orgId -> Returns undefined!
-    expect(store.getSnapshot(sampleRepoId, sampleCommitSha, 'src/secret.ts', collegeB)).toBeUndefined();
+    const snapB: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      orgId: collegeB,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/secretB.ts',
+      rawBytes: Buffer.from('college B secret', 'utf8'),
+      rawFileHash: createHash('sha256').update('college B secret').digest('hex'),
+      capturedAt: new Date().toISOString(),
+    };
+
+    store.saveSnapshot(snapB);
+    expect(store.getSnapshot(sampleRepoId, sampleCommitSha, 'src/secretB.ts', collegeA)).toBeUndefined();
+    expect(store.hasSnapshot(sampleRepoId, sampleCommitSha, 'src/secretB.ts', collegeA)).toBe(false);
+  });
+
+  it('37. Tenant A cannot retrieve an unscoped snapshot (no silent fallback to unscoped)', () => {
+    const store = new InMemorySourceSnapshotStore();
+    const collegeA = '00000000-0000-0000-0000-000000000001';
+
+    const unscopedSnap: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      orgId: undefined, // Unscoped!
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/unscoped.ts',
+      rawBytes: Buffer.from('unscoped legacy code', 'utf8'),
+      rawFileHash: createHash('sha256').update('unscoped legacy code').digest('hex'),
+      capturedAt: new Date().toISOString(),
+    };
+
+    store.saveSnapshot(unscopedSnap);
+
+    // Tenant-scoped query MUST NOT fall back to unscoped snapshot
+    expect(store.getSnapshot(sampleRepoId, sampleCommitSha, 'src/unscoped.ts', collegeA)).toBeUndefined();
+    expect(store.hasSnapshot(sampleRepoId, sampleCommitSha, 'src/unscoped.ts', collegeA)).toBe(false);
+  });
+
+  it('38. Tenant B cannot retrieve an unscoped snapshot (no silent fallback to unscoped)', () => {
+    const store = new InMemorySourceSnapshotStore();
+    const collegeB = '00000000-0000-0000-0000-000000000002';
+
+    const unscopedSnap: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      orgId: undefined,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/unscoped2.ts',
+      rawBytes: Buffer.from('unscoped code 2', 'utf8'),
+      rawFileHash: createHash('sha256').update('unscoped code 2').digest('hex'),
+      capturedAt: new Date().toISOString(),
+    };
+
+    store.saveSnapshot(unscopedSnap);
+
+    expect(store.getSnapshot(sampleRepoId, sampleCommitSha, 'src/unscoped2.ts', collegeB)).toBeUndefined();
+    expect(store.hasSnapshot(sampleRepoId, sampleCommitSha, 'src/unscoped2.ts', collegeB)).toBe(false);
+  });
+
+  it('39. Hash-based lookup cannot bypass tenant isolation', () => {
+    const store = new InMemorySourceSnapshotStore();
+    const collegeA = '00000000-0000-0000-0000-000000000001';
+    const collegeB = '00000000-0000-0000-0000-000000000002';
+
+    const bytesA = Buffer.from('hash test content A', 'utf8');
+    const hashA = createHash('sha256').update(bytesA).digest('hex');
+
+    const snapA: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      orgId: collegeA,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/hashA.ts',
+      rawBytes: bytesA,
+      rawFileHash: hashA,
+      capturedAt: new Date().toISOString(),
+    };
+    store.saveSnapshot(snapA);
+
+    // Tenant A finds by hash with its orgId
+    expect(store.getSnapshotByHash(hashA, collegeA)).toBeDefined();
+
+    // Tenant B cannot find Tenant A's snapshot by hash
+    expect(store.getSnapshotByHash(hashA, collegeB)).toBeUndefined();
+
+    // Unscoped snapshot by hash
+    const bytesUnscoped = Buffer.from('unscoped hash content', 'utf8');
+    const hashUnscoped = createHash('sha256').update(bytesUnscoped).digest('hex');
+    const unscopedSnap: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      orgId: undefined,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/unscopedHash.ts',
+      rawBytes: bytesUnscoped,
+      rawFileHash: hashUnscoped,
+      capturedAt: new Date().toISOString(),
+    };
+    store.saveSnapshot(unscopedSnap);
+
+    // Tenant A cannot find unscoped snapshot by hash (no fallback)
+    expect(store.getSnapshotByHash(hashUnscoped, collegeA)).toBeUndefined();
+    // Explicitly unscoped lookup finds it
+    expect(store.getSnapshotByHash(hashUnscoped, undefined)).toBeDefined();
+  });
+
+  it('40. Unscoped lookup only works through explicitly unscoped path and never leaks tenant snapshots', () => {
+    const store = new InMemorySourceSnapshotStore();
+    const collegeA = '00000000-0000-0000-0000-000000000001';
+
+    const tenantSnap: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      orgId: collegeA,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/scoped.ts',
+      rawBytes: Buffer.from('scoped content', 'utf8'),
+      rawFileHash: createHash('sha256').update('scoped content').digest('hex'),
+      capturedAt: new Date().toISOString(),
+    };
+    store.saveSnapshot(tenantSnap);
+
+    // Unscoped query (orgId: undefined) must NOT return Tenant A's scoped snapshot
+    expect(store.getSnapshot(sampleRepoId, sampleCommitSha, 'src/scoped.ts', undefined)).toBeUndefined();
+    expect(store.hasSnapshot(sampleRepoId, sampleCommitSha, 'src/scoped.ts', undefined)).toBe(false);
+  });
+
+  it('41. deleteSnapshot removes newly added snapshot and preserves existing snapshots during rollback', () => {
+    const store = new InMemorySourceSnapshotStore();
+    const collegeA = '00000000-0000-0000-0000-000000000001';
+
+    const snap: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      orgId: collegeA,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/temp.ts',
+      rawBytes: Buffer.from('temporary bytes', 'utf8'),
+      rawFileHash: createHash('sha256').update('temporary bytes').digest('hex'),
+      capturedAt: new Date().toISOString(),
+    };
+
+    store.saveSnapshot(snap);
+    expect(store.hasSnapshot(sampleRepoId, sampleCommitSha, 'src/temp.ts', collegeA)).toBe(true);
+
+    // Rollback deletes the newly added snapshot
+    const deleted = store.deleteSnapshot(sampleRepoId, sampleCommitSha, 'src/temp.ts', collegeA);
+    expect(deleted).toBe(true);
+    expect(store.hasSnapshot(sampleRepoId, sampleCommitSha, 'src/temp.ts', collegeA)).toBe(false);
+    expect(store.getSnapshot(sampleRepoId, sampleCommitSha, 'src/temp.ts', collegeA)).toBeUndefined();
+
+    // Deleting again returns false (idempotent / non-destructive)
+    expect(store.deleteSnapshot(sampleRepoId, sampleCommitSha, 'src/temp.ts', collegeA)).toBe(false);
   });
 });

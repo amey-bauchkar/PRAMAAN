@@ -15,6 +15,7 @@ import {
   ExactCodeAnchor,
   SourceSnapshot,
   TypeScriptAstParser,
+  InMemoryTrustedIngestionStore,
 } from '@pramaan/domain';
 
 describe('Anchor Service & Evidence Endpoints (M2 — P0-05)', () => {
@@ -62,6 +63,14 @@ describe('Anchor Service & Evidence Endpoints (M2 — P0-05)', () => {
     createdAt: new Date().toISOString(),
   };
 
+  const adminUser = {
+    id: '20000000-0000-0000-0000-000000000009',
+    authSubject: 'sub-admin',
+    email: 'admin@apex.edu',
+    fullName: 'Platform Admin',
+    createdAt: new Date().toISOString(),
+  };
+
   const sampleTypeScriptCode = `export function addNumbers(a: number, b: number): number {
   return a + b;
 }
@@ -83,6 +92,7 @@ export class MathOperations {
   let student2Token: string;
   let officerToken: string;
   let mentorToken: string;
+  let adminToken: string;
   let collegeBSessionToken: string;
 
   beforeEach(async () => {
@@ -97,6 +107,7 @@ export class MathOperations {
       { user: studentUser2, role: 'student' as const },
       { user: officerUser, role: 'officer' as const },
       { user: mentorUser, role: 'mentor' as const },
+      { user: adminUser, role: 'platform_admin' as const },
     ]) {
       await userRepo.registerUser(user);
       await userRepo.addMembership({
@@ -160,6 +171,11 @@ export class MathOperations {
       email: mentorUser.email,
     });
 
+    adminToken = await createTestToken({
+      sub: adminUser.authSubject,
+      email: adminUser.email,
+    });
+
     // Token for College B student
     collegeBSessionToken = await createTestToken({
       sub: 'sub-college-b-student',
@@ -172,8 +188,17 @@ export class MathOperations {
   // --------------------------------------------------------------------------
 
   it('1. POST /api/evidence/snapshots registers immutable snapshot and logs audit event', async () => {
+    // Student 1 grants purpose consent
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
     const snapshot: SourceSnapshot = {
       snapshotId: randomUUID(),
+      studentId: studentUser1.id,
       repositoryId: sampleRepoId,
       commitSha: sampleCommitSha,
       filePath: sampleFilePath,
@@ -214,8 +239,16 @@ export class MathOperations {
   });
 
   it('2. POST /api/evidence/snapshots rejects snapshot with corrupted hash', async () => {
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
     const corruptedSnapshot: SourceSnapshot = {
       snapshotId: randomUUID(),
+      studentId: studentUser1.id,
       repositoryId: sampleRepoId,
       commitSha: sampleCommitSha,
       filePath: sampleFilePath,
@@ -243,9 +276,18 @@ export class MathOperations {
   // --------------------------------------------------------------------------
 
   it('3. POST /api/evidence/anchors/resolve resolves valid anchor against snapshot', async () => {
-    // 1. Register snapshot
+    // 1. Student 1 grants purpose consent
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
+    // 2. Register snapshot with trusted student owner
     const snapshot: SourceSnapshot = {
       snapshotId: randomUUID(),
+      studentId: studentUser1.id,
       repositoryId: sampleRepoId,
       commitSha: sampleCommitSha,
       filePath: sampleFilePath,
@@ -254,7 +296,7 @@ export class MathOperations {
       capturedAt: new Date().toISOString(),
     };
 
-    await app.inject({
+    const snapRes = await app.inject({
       method: 'POST',
       url: '/api/evidence/snapshots',
       headers: {
@@ -263,14 +305,7 @@ export class MathOperations {
       },
       payload: { snapshot },
     });
-
-    // 2. Student 1 grants purpose consent
-    await consentService.grantConsent(
-      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
-      studentUser1.id,
-      'repo_verification',
-      1
-    );
+    expect(snapRes.statusCode).toBe(201);
 
     // 3. Create anchor for lines 1 to 3 (addNumbers)
     const lines = sampleTypeScriptCode.split('\n');
@@ -543,6 +578,14 @@ export class MathOperations {
   // --------------------------------------------------------------------------
 
   it('8. POST /api/evidence/parse extracts code symbols without executing untrusted code', async () => {
+    // Student 1 grants purpose consent
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
     const res = await app.inject({
       method: 'POST',
       url: '/api/evidence/parse',
@@ -551,6 +594,7 @@ export class MathOperations {
         'x-org-id': collegeAOrgId,
       },
       payload: {
+        studentId: studentUser1.id,
         filePath: 'src/math.ts',
         source: sampleTypeScriptCode,
       },
@@ -560,6 +604,8 @@ export class MathOperations {
     const body = res.json();
     expect(body.success).toBe(true);
     expect(body.parserName).toBe('typescript-ast');
+    expect(body.diagnosticOnly).toBe(true);
+    expect(body.authoritative).toBe(false);
     expect(body.symbols.length).toBeGreaterThanOrEqual(3);
 
     const funcSymbol = body.symbols.find((s: any) => s.name === 'addNumbers');
@@ -583,9 +629,18 @@ export class MathOperations {
   // --------------------------------------------------------------------------
 
   it('9. Cryptographic Audit Chain confirms SHA-256 integrity of all anchor transactions', async () => {
+    // Ensure Student 1 has active consent
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
     // Execute a series of snapshot registrations and anchor resolutions
     const snapshot: SourceSnapshot = {
       snapshotId: randomUUID(),
+      studentId: studentUser1.id,
       repositoryId: sampleRepoId,
       commitSha: sampleCommitSha,
       filePath: sampleFilePath,
@@ -898,6 +953,13 @@ export class MathOperations {
   });
 
   it('17. POST /api/evidence/snapshots fails closed in production mode with in-memory store (503)', async () => {
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
     const { AnchorService } = await import('../src/services/anchor-service.js');
     const prodService = new AnchorService({
       auditRepo: new InMemoryAuditRepository(auditService),
@@ -913,6 +975,7 @@ export class MathOperations {
 
     const snapshot: SourceSnapshot = {
       snapshotId: randomUUID(),
+      studentId: studentUser1.id,
       repositoryId: sampleRepoId,
       commitSha: sampleCommitSha,
       filePath: sampleFilePath,
@@ -936,8 +999,16 @@ export class MathOperations {
   });
 
   it('18. POST /api/evidence/snapshots strictly rejects path traversal and null bytes (400)', async () => {
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
     const maliciousSnapshot: SourceSnapshot = {
       snapshotId: randomUUID(),
+      studentId: studentUser1.id,
       repositoryId: sampleRepoId,
       commitSha: sampleCommitSha,
       filePath: '../../etc/passwd', // Path traversal!
@@ -961,6 +1032,13 @@ export class MathOperations {
   });
 
   it('19. POST /api/evidence/parse strictly rejects path traversal and null bytes (400)', async () => {
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
     const res = await app.inject({
       method: 'POST',
       url: '/api/evidence/parse',
@@ -969,6 +1047,7 @@ export class MathOperations {
         'x-org-id': collegeAOrgId,
       },
       payload: {
+        studentId: studentUser1.id,
         filePath: 'src/../../../windows/system32/cmd.exe',
         source: 'binary',
       },
@@ -976,5 +1055,863 @@ export class MathOperations {
 
     expect(res.statusCode).toBe(400);
     expect(res.json().errors[0]).toContain('INVALID_FILE_PATH');
+  });
+
+  // --------------------------------------------------------------------------
+  // 6. Adversarial Student Ownership & Purpose Consent Tests (Issue 2)
+  // --------------------------------------------------------------------------
+
+  it('20. Officer attempts to register a student snapshot without consent (422)', async () => {
+    // Student 2 has NOT granted consent
+    const snapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      studentId: studentUser2.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      rawBytes: rawBytes.toString('utf8'),
+      rawFileHash,
+      capturedAt: new Date().toISOString(),
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/evidence/snapshots',
+      headers: {
+        authorization: `Bearer ${officerToken}`,
+        'x-org-id': collegeAOrgId,
+      },
+      payload: { snapshot },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toContain('CONSENT_REQUIRED_OR_REVOKED');
+  });
+
+  it('21. Platform administrator attempts registration without consent (422)', async () => {
+    const snapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      studentId: studentUser2.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      rawBytes: rawBytes.toString('utf8'),
+      rawFileHash,
+      capturedAt: new Date().toISOString(),
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/evidence/snapshots',
+      headers: {
+        authorization: `Bearer ${adminToken}`,
+        'x-org-id': collegeAOrgId,
+      },
+      payload: { snapshot },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toContain('CONSENT_REQUIRED_OR_REVOKED');
+  });
+
+  it('22. Student registration without consent (422)', async () => {
+    const snapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      studentId: studentUser2.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      rawBytes: rawBytes.toString('utf8'),
+      rawFileHash,
+      capturedAt: new Date().toISOString(),
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/evidence/snapshots',
+      headers: {
+        authorization: `Bearer ${student2Token}`,
+        'x-org-id': collegeAOrgId,
+      },
+      payload: { snapshot },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toContain('CONSENT_REQUIRED_OR_REVOKED');
+  });
+
+  it('23. Student registration after consent revocation (422)', async () => {
+    // 1. Grant consent
+    const grant = await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
+    // 2. Revoke consent
+    await consentService.revokeConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      grant.id,
+      'Revocation test'
+    );
+
+    const snapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      studentId: studentUser1.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      rawBytes: rawBytes.toString('utf8'),
+      rawFileHash,
+      capturedAt: new Date().toISOString(),
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/evidence/snapshots',
+      headers: {
+        authorization: `Bearer ${student1Token}`,
+        'x-org-id': collegeAOrgId,
+      },
+      payload: { snapshot },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toContain('CONSENT_REQUIRED_OR_REVOKED');
+  });
+
+  it('24. Snapshot registration fails closed when consent repository is missing (503)', async () => {
+    const { AnchorService } = await import('../src/services/anchor-service.js');
+    const serviceWithoutConsent = new AnchorService({
+      auditRepo: new InMemoryAuditRepository(auditService),
+      consentRepo: undefined,
+    });
+
+    const testApp = buildApp({
+      persistenceMode: 'in-memory',
+      authService,
+      anchorService: serviceWithoutConsent,
+    });
+
+    const snapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      studentId: studentUser1.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      rawBytes: rawBytes.toString('utf8'),
+      rawFileHash,
+      capturedAt: new Date().toISOString(),
+    };
+
+    const res = await testApp.inject({
+      method: 'POST',
+      url: '/api/evidence/snapshots',
+      headers: {
+        authorization: `Bearer ${student1Token}`,
+        'x-org-id': collegeAOrgId,
+      },
+      payload: { snapshot },
+    });
+
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error).toContain('CONSENT_SERVICE_UNAVAILABLE');
+  });
+
+  it('25. Officer tries to parse student repository data without consent (422)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/evidence/parse',
+      headers: {
+        authorization: `Bearer ${officerToken}`,
+        'x-org-id': collegeAOrgId,
+      },
+      payload: {
+        studentId: studentUser2.id, // Unconsented Student 2
+        filePath: 'src/math.ts',
+        source: sampleTypeScriptCode,
+      },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toContain('CONSENT_REQUIRED_OR_REVOKED');
+  });
+
+  it('26. Mentor tries to parse student repository data without consent (422)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/evidence/parse',
+      headers: {
+        authorization: `Bearer ${mentorToken}`,
+        'x-org-id': collegeAOrgId,
+      },
+      payload: {
+        studentId: studentUser2.id,
+        filePath: 'src/math.ts',
+        source: sampleTypeScriptCode,
+      },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toContain('CONSENT_REQUIRED_OR_REVOKED');
+  });
+
+  it('27. Parsing fails closed when student ownership is missing (422 STUDENT_OWNERSHIP_REQUIRED)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/evidence/parse',
+      headers: {
+        authorization: `Bearer ${officerToken}`,
+        'x-org-id': collegeAOrgId,
+      },
+      payload: {
+        // Missing studentId!
+        filePath: 'src/math.ts',
+        source: sampleTypeScriptCode,
+      },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toContain('STUDENT_OWNERSHIP_REQUIRED');
+  });
+
+  it('28. Client-supplied ownership forgery on parse is blocked (403 FORBIDDEN_STUDENT_ACCESS)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/evidence/parse',
+      headers: {
+        authorization: `Bearer ${student1Token}`, // Student 1
+        'x-org-id': collegeAOrgId,
+      },
+      payload: {
+        studentId: studentUser2.id, // Trying to parse as Student 2
+        filePath: 'src/math.ts',
+        source: sampleTypeScriptCode,
+      },
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toContain('FORBIDDEN_STUDENT_ACCESS');
+  });
+
+  it('29. Valid consented operation through explicitly permitted path succeeds with diagnosticOnly flag', async () => {
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/evidence/parse',
+      headers: {
+        authorization: `Bearer ${student1Token}`,
+        'x-org-id': collegeAOrgId,
+      },
+      payload: {
+        filePath: 'src/math.ts',
+        source: sampleTypeScriptCode,
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.success).toBe(true);
+    expect(body.diagnosticOnly).toBe(true);
+    expect(body.authoritative).toBe(false);
+    expect(body.provenance).toBe('diagnostic_parser');
+  });
+
+  // --------------------------------------------------------------------------
+  // 7. Server-Controlled Ingestion Provenance Tests (Issue 3)
+  // --------------------------------------------------------------------------
+
+  it('30. Client snapshot remains permanently non-authoritative even if authoritative requested', async () => {
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
+    const anchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: collegeAOrgId,
+      studentId: studentUser1.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      lineStart: 1,
+      lineEnd: 3,
+      contentHash: createHash('sha256').update(rawBytes).digest('hex'),
+      rawFileHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const clientSnapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      studentId: studentUser1.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      rawBytes: rawBytes.toString('utf8'),
+      rawFileHash,
+      capturedAt: new Date().toISOString(),
+    };
+
+    const anchorSvc = (app as any).anchorService;
+    const authResult = await anchorSvc.resolveAnchor(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      anchor,
+      clientSnapshot,
+      { authoritative: true }
+    );
+
+    expect(authResult.valid).toBe(false);
+    expect(authResult.authoritative).toBe(false);
+    expect(authResult.provenance).toBe('unverified_client_input');
+    expect(authResult.error).toBe('UNTRUSTED_CLIENT_SNAPSHOT');
+  });
+
+  it('31. Previously submitted snapshot remains non-authoritative after trusted ingestion introduced for another repo', async () => {
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
+    const trustedStore = new InMemoryTrustedIngestionStore();
+    // Record for DIFFERENT repository
+    trustedStore.saveRecord({
+      ingestionId: randomUUID(),
+      orgId: collegeAOrgId,
+      repositoryId: '22222222-2222-2222-2222-222222222222', // Other repo
+      commitSha: sampleCommitSha,
+      studentId: studentUser1.id,
+      verifiedAt: new Date().toISOString(),
+      provenance: 'trusted_ingestion_pipeline',
+    });
+
+    const { AnchorService } = await import('../src/services/anchor-service.js');
+    const serviceWithStore = new AnchorService({
+      auditRepo: new InMemoryAuditRepository(auditService),
+      consentRepo: new InMemoryConsentRepository(consentService),
+      trustedIngestionStore: trustedStore,
+    });
+
+    // Save snapshot in service store
+    const snapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      studentId: studentUser1.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      rawBytes: rawBytes.toString('utf8'),
+      rawFileHash,
+      capturedAt: new Date().toISOString(),
+    };
+    await serviceWithStore.registerSnapshot(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      snapshot
+    );
+
+    const anchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: collegeAOrgId,
+      studentId: studentUser1.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      lineStart: 1,
+      lineEnd: 3,
+      contentHash: createHash('sha256').update(sampleTypeScriptCode.split('\n').slice(0, 3).join('\n')).digest('hex'),
+      rawFileHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const res = await serviceWithStore.resolveAnchor(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      anchor
+    );
+
+    // Valid because content matches, but NOT authoritative because sampleRepoId is not the trusted repo!
+    expect(res.valid).toBe(true);
+    expect(res.authoritative).toBe(false);
+    expect(res.provenance).toBe('retained_snapshot_store');
+  });
+
+  it('32. Unregistered repository snapshot remains non-authoritative when authoritative requested', async () => {
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
+    const { AnchorService } = await import('../src/services/anchor-service.js');
+    const serviceWithoutTrusted = new AnchorService({
+      auditRepo: new InMemoryAuditRepository(auditService),
+      consentRepo: new InMemoryConsentRepository(consentService),
+      // No trusted ingestion record store!
+    });
+
+    const snapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      studentId: studentUser1.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      rawBytes: rawBytes.toString('utf8'),
+      rawFileHash,
+      capturedAt: new Date().toISOString(),
+    };
+    await serviceWithoutTrusted.registerSnapshot(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      snapshot
+    );
+
+    const anchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: collegeAOrgId,
+      studentId: studentUser1.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      lineStart: 1,
+      lineEnd: 3,
+      contentHash: createHash('sha256').update(sampleTypeScriptCode.split('\n').slice(0, 3).join('\n')).digest('hex'),
+      rawFileHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const res = await serviceWithoutTrusted.resolveAnchor(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      anchor,
+      undefined,
+      { authoritative: true }
+    );
+
+    expect(res.valid).toBe(false);
+    expect(res.authoritative).toBe(false);
+    expect(res.error).toBe('UNTRUSTED_CLIENT_SNAPSHOT');
+  });
+
+  it('33. Trusted snapshot with matching server-side ingestion record receives authoritative=true', async () => {
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
+    const trustedStore = new InMemoryTrustedIngestionStore();
+    trustedStore.saveRecord({
+      ingestionId: randomUUID(),
+      orgId: collegeAOrgId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      studentId: studentUser1.id,
+      verifiedAt: new Date().toISOString(),
+      provenance: 'trusted_ingestion_pipeline',
+    });
+
+    const { AnchorService } = await import('../src/services/anchor-service.js');
+    const serviceWithTrusted = new AnchorService({
+      auditRepo: new InMemoryAuditRepository(auditService),
+      consentRepo: new InMemoryConsentRepository(consentService),
+      trustedIngestionStore: trustedStore,
+    });
+
+    const snapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      studentId: studentUser1.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      rawBytes: rawBytes.toString('utf8'),
+      rawFileHash,
+      capturedAt: new Date().toISOString(),
+    };
+    await serviceWithTrusted.registerSnapshot(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      snapshot
+    );
+
+    const anchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: collegeAOrgId,
+      studentId: studentUser1.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      lineStart: 1,
+      lineEnd: 3,
+      contentHash: createHash('sha256').update(sampleTypeScriptCode.split('\n').slice(0, 3).join('\n')).digest('hex'),
+      rawFileHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const res = await serviceWithTrusted.resolveAnchor(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      anchor,
+      undefined,
+      { authoritative: true }
+    );
+
+    expect(res.valid).toBe(true);
+    expect(res.authoritative).toBe(true);
+    expect(res.provenance).toBe('trusted_ingestion_pipeline');
+  });
+
+  it('34. Another tenant cannot reuse a trusted ingestion record (tenant isolation)', async () => {
+    const trustedStore = new InMemoryTrustedIngestionStore();
+    // Record strictly stored for College A
+    trustedStore.saveRecord({
+      ingestionId: randomUUID(),
+      orgId: collegeAOrgId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      studentId: studentUser1.id,
+      verifiedAt: new Date().toISOString(),
+      provenance: 'trusted_ingestion_pipeline',
+    });
+
+    // College B lookup must return undefined!
+    const collegeBRecord = trustedStore.getRecord(
+      collegeBOrgId,
+      sampleRepoId,
+      sampleCommitSha,
+      studentUser1.id
+    );
+    expect(collegeBRecord).toBeUndefined();
+  });
+
+  it('35. Client cannot set provenance to trusted by modifying request fields', async () => {
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
+    // Client passes spoofed snapshot with provenance: 'trusted_ingestion_pipeline'
+    const spoofedSnapshot: any = {
+      snapshotId: randomUUID(),
+      studentId: studentUser1.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      rawBytes: rawBytes.toString('utf8'),
+      rawFileHash,
+      capturedAt: new Date().toISOString(),
+      provenance: 'trusted_ingestion_pipeline',
+      authoritative: true,
+    };
+
+    const anchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: collegeAOrgId,
+      studentId: studentUser1.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: sampleFilePath,
+      lineStart: 1,
+      lineEnd: 3,
+      contentHash: createHash('sha256').update(sampleTypeScriptCode.split('\n').slice(0, 3).join('\n')).digest('hex'),
+      rawFileHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const anchorSvc = (app as any).anchorService;
+    const res = await anchorSvc.resolveAnchor(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      anchor,
+      spoofedSnapshot
+    );
+
+    // Server completely ignores client spoofing!
+    expect(res.authoritative).toBe(false);
+    expect(res.provenance).toBe('unverified_client_input');
+  });
+
+  // --------------------------------------------------------------------------
+  // 8. Failure-Safe Snapshot Registration & Compensating Rollback (Issue 4)
+  // --------------------------------------------------------------------------
+
+  it('36. Snapshot storage succeeds but audit logging fails -> throws SNAPSHOT_REGISTRATION_FAILED', async () => {
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
+    const failingAuditRepo: any = {
+      log: () => {
+        throw new Error('SIMULATED_AUDIT_LOG_IO_FAILURE');
+      },
+      verifyIntegrity: () => ({ valid: true }),
+    };
+
+    const { AnchorService } = await import('../src/services/anchor-service.js');
+    const failingService = new AnchorService({
+      auditRepo: failingAuditRepo,
+      consentRepo: new InMemoryConsentRepository(consentService),
+    });
+
+    const snapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      studentId: studentUser1.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/rollback-test.ts',
+      rawBytes: rawBytes.toString('utf8'),
+      rawFileHash,
+      capturedAt: new Date().toISOString(),
+    };
+
+    await expect(
+      failingService.registerSnapshot(
+        { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+        snapshot
+      )
+    ).rejects.toThrow(/SNAPSHOT_REGISTRATION_FAILED/);
+  });
+
+  it('37. Failed registration does not leave untracked snapshot in store (rollback verified)', async () => {
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
+    const failingAuditRepo: any = {
+      log: () => {
+        throw new Error('SIMULATED_AUDIT_LOG_IO_FAILURE');
+      },
+      verifyIntegrity: () => ({ valid: true }),
+    };
+
+    const { AnchorService } = await import('../src/services/anchor-service.js');
+    const failingService = new AnchorService({
+      auditRepo: failingAuditRepo,
+      consentRepo: new InMemoryConsentRepository(consentService),
+    });
+
+    const snapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      studentId: studentUser1.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/rollback-verify.ts',
+      rawBytes: rawBytes.toString('utf8'),
+      rawFileHash,
+      capturedAt: new Date().toISOString(),
+    };
+
+    // Before registration
+    const store = failingService.getSnapshotStore();
+    expect(await store.hasSnapshot(sampleRepoId, sampleCommitSha, 'src/rollback-verify.ts', collegeAOrgId)).toBe(false);
+
+    // Attempt registration which fails on audit
+    await expect(
+      failingService.registerSnapshot(
+        { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+        snapshot
+      )
+    ).rejects.toThrow();
+
+    // After failure: Compensating rollback ensured store remains clean!
+    expect(await store.hasSnapshot(sampleRepoId, sampleCommitSha, 'src/rollback-verify.ts', collegeAOrgId)).toBe(false);
+    expect(await store.getSnapshot(sampleRepoId, sampleCommitSha, 'src/rollback-verify.ts', collegeAOrgId)).toBeUndefined();
+  });
+
+  it('38. Pre-existing identical snapshot is NOT deleted during rollback of subsequent failed attempt', async () => {
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
+    let failAudit = false;
+    const conditionalAuditRepo: any = {
+      log: () => {
+        if (failAudit) {
+          throw new Error('SIMULATED_LATER_AUDIT_FAILURE');
+        }
+        return Promise.resolve();
+      },
+      verifyIntegrity: () => ({ valid: true }),
+    };
+
+    const { AnchorService } = await import('../src/services/anchor-service.js');
+    const service = new AnchorService({
+      auditRepo: conditionalAuditRepo,
+      consentRepo: new InMemoryConsentRepository(consentService),
+    });
+
+    const snapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      studentId: studentUser1.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/preexisting.ts',
+      rawBytes: rawBytes.toString('utf8'),
+      rawFileHash,
+      capturedAt: new Date().toISOString(),
+    };
+
+    // 1. Initial registration succeeds
+    await service.registerSnapshot(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      snapshot
+    );
+    const store = service.getSnapshotStore();
+    expect(await store.hasSnapshot(sampleRepoId, sampleCommitSha, 'src/preexisting.ts', collegeAOrgId)).toBe(true);
+
+    // 2. Subsequent idempotent call encounters audit failure
+    failAudit = true;
+    await expect(
+      service.registerSnapshot(
+        { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+        snapshot
+      )
+    ).rejects.toThrow(/SNAPSHOT_REGISTRATION_FAILED/);
+
+    // 3. Pre-existing snapshot must STILL exist (was not deleted)!
+    expect(await store.hasSnapshot(sampleRepoId, sampleCommitSha, 'src/preexisting.ts', collegeAOrgId)).toBe(true);
+    expect(await store.getSnapshot(sampleRepoId, sampleCommitSha, 'src/preexisting.ts', collegeAOrgId)).toBeDefined();
+  });
+
+  it('39. Concurrent duplicate registrations execute idempotently without corruption', async () => {
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
+    const snapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      studentId: studentUser1.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/concurrent.ts',
+      rawBytes: rawBytes.toString('utf8'),
+      rawFileHash,
+      capturedAt: new Date().toISOString(),
+    };
+
+    // Run 5 simultaneous registrations
+    const promises = Array.from({ length: 5 }).map(() =>
+      app.inject({
+        method: 'POST',
+        url: '/api/evidence/snapshots',
+        headers: {
+          authorization: `Bearer ${student1Token}`,
+          'x-org-id': collegeAOrgId,
+        },
+        payload: { snapshot },
+      })
+    );
+
+    const responses = await Promise.all(promises);
+    for (const res of responses) {
+      expect(res.statusCode).toBe(201);
+      expect(res.json().success).toBe(true);
+    }
+  });
+
+  it('40. Successful registration produces exactly the expected audit record', async () => {
+    await consentService.grantConsent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      studentUser1.id,
+      'repo_verification',
+      1
+    );
+
+    const snapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      studentId: studentUser1.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/audit-expect.ts',
+      rawBytes: rawBytes.toString('utf8'),
+      rawFileHash,
+      capturedAt: new Date().toISOString(),
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/evidence/snapshots',
+      headers: {
+        authorization: `Bearer ${student1Token}`,
+        'x-org-id': collegeAOrgId,
+      },
+      payload: { snapshot },
+    });
+    expect(res.statusCode).toBe(201);
+
+    const auditRes = await app.inject({
+      method: 'GET',
+      url: '/api/audit',
+      headers: {
+        authorization: `Bearer ${officerToken}`,
+        'x-org-id': collegeAOrgId,
+      },
+    });
+    const events = auditRes.json();
+    const event = events.find((e: any) => e.objectId === snapshot.snapshotId);
+    expect(event).toBeDefined();
+    expect(event.action).toBe('SNAPSHOT_REGISTERED');
+    expect(event.metadata.studentId).toBe(studentUser1.id);
+    expect(event.metadata.commitSha).toBe(sampleCommitSha);
+    expect(event.metadata.rawFileHash).toBe(rawFileHash);
+  });
+
+  it('41. Failed registration does not report success or return 201', async () => {
+    const corruptedSnapshot: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      studentId: studentUser1.id,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/fail-test.ts',
+      rawBytes: rawBytes.toString('utf8'),
+      rawFileHash: 'c'.repeat(64), // Invalid hash
+      capturedAt: new Date().toISOString(),
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/evidence/snapshots',
+      headers: {
+        authorization: `Bearer ${student1Token}`,
+        'x-org-id': collegeAOrgId,
+      },
+      payload: { snapshot: corruptedSnapshot },
+    });
+
+    expect(res.statusCode).not.toBe(201);
+    expect(res.json().success).toBeUndefined();
   });
 });

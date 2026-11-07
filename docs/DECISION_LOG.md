@@ -104,3 +104,21 @@
 - **Decision:** `InMemorySourceSnapshotStore` implements defensive buffer copying on both write and read (`Buffer.from(...)`). All snapshot operations and lookups are strictly tenant-scoped (`orgId`). Repository evidence resolution strictly enforces student ownership isolation (`context.userId === anchor.studentId` for students) and requires active purpose consent (`repo_verification`). If consent infrastructure is unavailable, resolution fails closed with `503 CONSENT_SERVICE_UNAVAILABLE`. Production snapshot storage strictly requires durable persistent storage; in-memory stores in production fail closed with `503 DURABLE_STORAGE_REQUIRED`.
 - **Consequences:** In-memory snapshot corruption is physically impossible. Privacy regulations (DPDP Act) are enforced at the API route layer—no staff role can inspect or analyze student repositories without active consent.
 
+---
+
+## ADR-11: Strict Tenant Partitioning, Server-Controlled Ingestion Provenance & Compensating Rollback for Evidence Snapshots
+
+- **Status:** Approved
+- **Context:** An independent source review of P0-05 identified four potential architectural and security risks:
+  1. `InMemorySourceSnapshotStore.getSnapshot()` and `getSnapshotByHash()` fell back to unscoped entries if a tenant-scoped lookup failed, risking cross-tenant data disclosure.
+  2. Snapshot registration and parsing routes allowed placement officers or administrators to process student code without explicit student ownership or active DPDP consent.
+  3. Authoritative provenance was toggled via a process-global Boolean (`trustedIngestionActive`), creating concurrency race conditions across tenants and requests.
+  4. Snapshot registration stored data in memory before emitting audit logs; if audit logging failed, un-audited evidence snapshots persisted without rollback.
+- **Decision:**
+  1. **Strict Tenant Partitioning Without Fallback:** Completely removed unscoped fallback logic from `getSnapshot()` and `getSnapshotByHash()`. Tenant-scoped lookups (`orgId`) strictly return snapshots stored with that exact tenant ID. Unscoped lookups require explicit invocation with `orgId: undefined`.
+  2. **Universal Student Ownership & DPDP Consent Gate:** All snapshot registrations and AST parsing requests require an identified `studentId` and active DPDP `repo_verification` consent. Students can only register snapshots for themselves (`studentId === context.userId`). Placement officers and administrators must provide `studentId` and verify active consent; missing or revoked consent fails closed with `422 CONSENT_REQUIRED_OR_REVOKED`. If consent services are unavailable, operations fail closed with `503 CONSENT_SERVICE_UNAVAILABLE`.
+  3. **Diagnostic-Only AST Parsing:** Source code parsed via `/api/evidence/parse` outputs diagnostic AST representations marked `diagnosticOnly: true, authoritative: false, provenance: 'diagnostic_parser'`. It cannot be used to establish authoritative skill verification.
+  4. **Server-Controlled Ingestion Provenance (`ITrustedIngestionStore`):** Replaced the mutable global flag with `ITrustedIngestionStore` and `InMemoryTrustedIngestionStore`. Authoritative status (`authoritative: true, provenance: 'trusted_ingestion_pipeline'`) is awarded strictly when a matching ingestion record `(orgId, repositoryId, commitSha, studentId)` exists on the server. Client-supplied snapshots remain permanently non-authoritative (`unverified_client_input`).
+  5. **Compensating Rollback on Audit Failure:** In `AnchorService.registerSnapshot()`, newly inserted snapshots are tracked; if subsequent SHA-256 audit chaining throws an error, the newly inserted snapshot is immediately purged via `deleteSnapshot()` before failing closed (`SNAPSHOT_REGISTRATION_FAILED`), preserving audit-storage parity.
+- **Consequences:** Fully eliminates cross-tenant disclosure vectors, multi-tenant race conditions, and un-consented repository parsing. Guarantees that evidence storage and audit ledgers remain strictly synchronized even under audit subsystem failures.
+
