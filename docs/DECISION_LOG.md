@@ -162,5 +162,19 @@
   4. **Explicit P0-04 Production Boundary:** The application composition root (`buildApp()`) will wire durable snapshot and trusted ingestion storage adapters under ticket P0-04. The current development configuration is not claimed to provide durable authoritative ingestion until P0-04 is implemented.
 - **Consequences:** Eliminates memory leak vectors in concurrent registration, establishes cryptographic file-level Git blob binding for authoritative verification, and enforces strict write-once semantics for ingestion manifests. P0-05 deterministic anchor resolver core is formally frozen.
 
+---
+
+## ADR-14: Separation of Trusted Ingestion Record Creation from Snapshot Registration, Prior Consent Enforcement, and Audit-Failure Safety
+
+- **Status:** Approved
+- **Context:** An independent source review of commit `9b51ec2` identified that `AnchorService.registerTrustedSnapshot()` accepted a caller-supplied `TrustedIngestionRecord` and created it when no existing record was found. Schema validation and write-once semantics prove record structure and immutability, but not that GitHub actually supplied the commit, tree, and file blobs. Furthermore, consent checks were not strictly required before repository data retention, and audit logging failures in trusted registration could theoretically leave unaudited snapshots in memory.
+- **Decision:**
+  1. **Separation of Record Creation from Snapshot Registration:** `registerTrustedSnapshot` strictly requires an already-persisted `TrustedIngestionRecord` in `ITrustedIngestionStore` (`TRUSTED_INGESTION_RECORD_NOT_FOUND`). It never creates or mutates records from method arguments. A separate server-controlled ingestion process (P0-04) creates the trusted record only after GitHub commit/tree/blob verification succeeds.
+  2. **Exhaustive Record Identity & Manifest Verification:** `registerTrustedSnapshot` compares the supplied record against the persisted record across all fields (`ingestionId`, `orgId`, `repositoryId`, `commitSha`, `treeSha`, `studentId`, `verifiedAt`, `provenance`, and complete manifest array with each entry's `filePath`, `blobSha`, `rawFileHash`, `byteSize`). Any mismatch fails closed (`INGESTION_RECORD_MISMATCH`).
+  3. **Enforced Consent Prior to Ingestion & Persistence:** Before ingesting or persisting student repository data, `registerTrustedSnapshot` requires an available consent repository and verifies active, tenant-scoped student consent for `repo_verification`. Missing, revoked, or unavailable consent fails closed (`CONSENT_REQUIRED_OR_REVOKED`, `CONSENT_SERVICE_UNAVAILABLE`, `CONSENT_SERVICE_ERROR`) before any snapshot or record interaction.
+  4. **Audit-Failure-Safe Compensating Rollback:** Registration is wrapped in the per-identity `runWithLock` mutex. If audit logging fails, newly stored snapshots are cleanly rolled back via conditional `deleteSnapshot` (using exact `snapshot.snapshotId`). Unaudited snapshots can never resolve as authoritative, while pre-existing snapshots (`wasAlreadyPresent === true`) are preserved intact.
+- **Consequences:** Fully closes the trusted ingestion boundary before implementing P0-04. Establishes that client or untrusted callers cannot create trusted ingestion records, guarantees that consent precedes data retention, and ensures audit-storage parity.
+
+
 
 

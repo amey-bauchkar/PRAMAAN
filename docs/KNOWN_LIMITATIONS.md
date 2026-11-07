@@ -105,3 +105,7 @@
     - Purpose-specific student consent (`repo_verification`) before repository ingestion.
     - A server-generated canonical file manifest.
     The current `buildApp()` production configuration must NOT be described as supporting durable authoritative ingestion until that wiring actually exists.
+14. **Pre-Persisted Trusted Ingestion Record Requirement:**
+    `AnchorService.registerTrustedSnapshot()` requires an already-persisted record in `ITrustedIngestionStore` and will never create or save an ingestion record from its method argument. It strictly verifies all record and manifest fields against the stored record. Client-facing routes cannot create or mutate trusted ingestion records.
+15. **Distributed Transaction & Outbox Requirement for Future Durable Adapters:**
+    In production environments with external object stores (e.g. S3 Object Lock) and PostgreSQL audit tables, compensating rollback is a best-effort application-layer mechanism. A true distributed unit-of-work (e.g., transactional outbox pattern or two-phase commit) must be implemented under P0-04 for distributed multi-adapter atomicity.

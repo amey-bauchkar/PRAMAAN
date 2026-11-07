@@ -21,7 +21,10 @@ Following the M0 monorepo foundation and M1 multi-tenancy/security hardening, **
 - **Write-Once Immutability for Trusted Ingestion Records:** `InMemoryTrustedIngestionStore.saveRecord` validates records with `TrustedIngestionRecordSchema`, canonicalizes manifest paths, rejects duplicate canonical paths (`DUPLICATE_MANIFEST_PATH`), accepts exact duplicates idempotently, and rejects replacement of existing records with different tree SHA, ingestion ID, owner, or manifest (`IMMUTABLE_INGESTION_RECORD_MUTATION_REJECTED`). `registerTrustedSnapshot` verifies snapshot agreement on `orgId`, `studentId`, `repositoryId`, `commitSha`, `filePath`, `blobSha`, and `rawFileHash`.
 - **Offline AST Symbol Parsing:** Implemented `TypeScriptAstParser` using the pinned `typescript` compiler API (`ts.createSourceFile`). Handles syntax errors gracefully, validates UTF-8 decoding strictly, extracts functions, methods, classes, and interfaces with exact UTF-8 byte ranges (converting from UTF-16 character indices), with zero untrusted code execution. Extensible via singleton `ParserRegistry` keyed on `(parserName, language, parserVersion)` to prevent historical parser replacement.
 - **Universal Student Ownership & DPDP Consent Enforcement:** Universal enforcement of trusted student ownership and active DPDP `repo_verification` consent across ALL caller roles (student, placement officer, system administrator) before storing snapshots or executing AST parsing. Parse endpoint `/api/evidence/parse` is strictly diagnostic (`diagnosticOnly: true, authoritative: false, provenance: 'diagnostic_parser'`).
-- **100% Test Success Across Full Suite:** All 355 tests pass across 25 test files (including 59 pure domain anchor resolver tests, 65 API & RBAC tests, and 78 live Supabase PostgreSQL 17 security tests).
+- **Separation of Trusted Ingestion Record Creation from Snapshot Registration:** `registerTrustedSnapshot` strictly requires an already-persisted `TrustedIngestionRecord` in `ITrustedIngestionStore` and never creates or mutates records from method arguments. It performs exhaustive field-by-field verification comparing the supplied record against the stored record (`ingestionId`, `orgId`, `repositoryId`, `commitSha`, `treeSha`, `studentId`, `verifiedAt`, `provenance`, and complete manifest array with each entry's `filePath`, `blobSha`, `rawFileHash`, `byteSize`). Client routes have zero capability to create or mutate trusted ingestion records.
+- **Enforced Consent Prior to Ingestion & Persistence:** Before ingesting or persisting student repository data, `registerTrustedSnapshot` verifies active, tenant-scoped student consent for `repo_verification` against an available `IConsentRepository`. Missing, revoked, or failing consent infrastructure strictly fails closed, preventing snapshot or ingestion persistence.
+- **Audit-Failure-Safe Trusted Snapshot Registration:** Registration is wrapped in the per-identity `runWithLock` mutex. In the event of audit logging failure, newly stored snapshots are cleanly rolled back via conditional `deleteSnapshot` (using exact `snapshot.snapshotId`), ensuring unaudited snapshots can never resolve as authoritative, while pre-existing snapshots are preserved intact.
+- **100% Test Success Across Full Suite:** All 363 tests pass across 25 test files (including 59 pure domain anchor resolver tests, 73 API & RBAC tests, and 78 live Supabase PostgreSQL 17 security tests).
 
 ---
 
@@ -30,18 +33,18 @@ Following the M0 monorepo foundation and M1 multi-tenancy/security hardening, **
 | Tier | Description | Files / Tests | Status |
 | :--- | :--- | :--- | :--- |
 | **Pure Unit Tests** | Pure domain logic: state machine, anchor hashing, exact code anchor resolver, student isolation, offline AST parsing, audit hash chaining, eligibility rules, 4/5ths fairness math. | 6 files, 100 tests | `UNIT_TESTED` (Passing in ~3s) |
-| **API, RBAC & Adversarial Tests** | Fastify HTTP endpoints, positive RBAC matrix, anchor resolution API, snapshot registration mutex with leak-free cleanup, conditional audit rollback, file manifest provenance, mandatory Git blob SHA, student ownership/consent gates, email takeover prevention, fail-closed startup, strict claims validation, JWT test utilities, consent adversarial boundaries, audit concurrency & tenant consent, and administrative TLS/ledger integrity. | 14 files, 177 tests | `INTEGRATION_TESTED` (Passing in ~40s) |
+| **API, RBAC & Adversarial Tests** | Fastify HTTP endpoints, positive RBAC matrix, anchor resolution API, snapshot registration mutex with leak-free cleanup, conditional audit rollback, file manifest provenance, mandatory Git blob SHA, pre-persisted trusted ingestion record separation, prior consent enforcement, audit-failure safety, student ownership/consent gates, email takeover prevention, fail-closed startup, strict claims validation, JWT test utilities, consent adversarial boundaries, audit concurrency & tenant consent, and administrative TLS/ledger integrity. | 14 files, 185 tests | `INTEGRATION_TESTED` (Passing in ~40s) |
 | **Live Database Tests** | Real PostgreSQL 17 on Supabase: RLS isolation, cross-tenant mutation rejection, triggers, constraints, DCL permissions, physical connection reuse via backend PID, restricted runtime user (`pramaan_app_user`), parent university discovery isolation, migration ledger idempotency, test safety guards, and genuine Supabase ES256 JWKS token validation. | 5 files, 78 tests | `SECURITY_VERIFIED` (Passing on live Supabase DB) |
-| **Total Suite** | Full monorepo test pack running under Vitest. | **25 files, 355 tests** | **100% Passing** |
+| **Total Suite** | Full monorepo test pack running under Vitest. | **25 files, 363 tests** | **100% Passing** |
 
-### Complete Test Inventory (25 Files, 355 Tests)
+### Complete Test Inventory (25 Files, 363 Tests)
 1. `packages/domain/tests/exact-anchor-resolver.test.ts` (59 tests)
 2. `packages/domain/tests/skill-state-machine.test.ts` (8 tests)
 3. `packages/domain/tests/anchor-resolver.test.ts` (4 tests)
 4. `packages/domain/tests/audit-chain.test.ts` (19 tests)
 5. `packages/domain/tests/eligibility-evaluator.test.ts` (5 tests)
 6. `packages/domain/tests/fairness-calculator.test.ts` (5 tests)
-7. `apps/api/tests/anchor-service-and-api.test.ts` (65 tests)
+7. `apps/api/tests/anchor-service-and-api.test.ts` (73 tests)
 8. `apps/api/tests/m1-tenancy-rls.test.ts` (5 tests)
 9. `apps/api/tests/m1-audit-chain.test.ts` (3 tests)
 10. `apps/api/tests/m1-consent-ledger.test.ts` (3 tests)

@@ -6,6 +6,7 @@ import {
   ParseResult,
   TrustedIngestionRecord,
   TrustedIngestionRecordSchema,
+  TrustedFileManifestEntry,
 } from '@pramaan/contracts';
 import {
   AnchorResolver,
@@ -237,6 +238,24 @@ export class AnchorService {
    * Validates that the file exists in the ingestion manifest, matches blobSha and rawFileHash,
    * enforces snapshot-record agreement, write-once semantics, and tags the snapshot as authoritative with provenance 'trusted_ingestion_pipeline'.
    */
+  /**
+   * Registers a verified source snapshot originating from the server-controlled
+   * trusted ingestion pipeline (P0-04).
+   *
+   * Security & Provenance Invariants:
+   * 1. Requires an already-persisted trusted ingestion record in trustedIngestionStore.
+   *    Never creates or saves a new ingestion record from the method argument.
+   * 2. Compares complete supplied record against persisted record:
+   *    ingestionId, orgId, repositoryId, commitSha, treeSha, studentId, verifiedAt, provenance,
+   *    and complete manifest with each entry's filePath, blobSha, rawFileHash, and byteSize.
+   * 3. Requires an available consent repository.
+   * 4. Enforces active, tenant-scoped student consent for purpose 'repo_verification' BEFORE saving.
+   * 5. Enforces context tenant isolation and student authorization.
+   * 6. Validates snapshot attributes agree with the persisted record.
+   * 7. Enforces valid 40-character Git blobSha.
+   * 8. Serializes concurrent registrations via runWithLock mutex.
+   * 9. Implements audit-failure-safe compensating rollback (never deletes pre-existing snapshot).
+   */
   public async registerTrustedSnapshot(
     context: SessionContext,
     ingestionRecord: TrustedIngestionRecord,
@@ -251,7 +270,35 @@ export class AnchorService {
       throw new Error('TRUSTED_INGESTION_STORE_NOT_CONFIGURED: Trusted ingestion store is required.');
     }
 
-    // 1. Context tenant isolation and ownership check
+    // 1. Consent repository availability check
+    if (!this.consentRepo) {
+      throw new Error('CONSENT_SERVICE_UNAVAILABLE: Consent repository is required to register trusted snapshots');
+    }
+
+    // 2. Identify target student owner
+    const targetStudentId = context.role === 'student' ? context.userId : (ingestionRecord.studentId || snapshot.studentId);
+    if (!targetStudentId) {
+      throw new Error('STUDENT_OWNERSHIP_REQUIRED: Trusted snapshot registration requires an identified student owner');
+    }
+
+    // 3. Active tenant-scoped consent enforcement (Fail-Closed BEFORE ingestion or persistence)
+    let hasConsent: boolean;
+    try {
+      hasConsent = await this.consentRepo.hasActiveConsent(context, targetStudentId, 'repo_verification');
+    } catch (consentErr: any) {
+      throw new Error(
+        `CONSENT_SERVICE_ERROR: Failed to evaluate consent for student '${targetStudentId}': ${consentErr.message}`,
+        { cause: consentErr }
+      );
+    }
+
+    if (!hasConsent) {
+      throw new Error(
+        `CONSENT_REQUIRED_OR_REVOKED: Student '${targetStudentId}' has not granted active consent for purpose 'repo_verification'`
+      );
+    }
+
+    // 4. Context tenant isolation and student authorization check
     if (context.orgId !== ingestionRecord.orgId) {
       throw new Error('CROSS_TENANT_ACCESS_REJECTED: Context orgId does not match ingestion record orgId');
     }
@@ -259,71 +306,135 @@ export class AnchorService {
       throw new Error('FORBIDDEN_STUDENT_ACCESS: Student cannot register trusted snapshot for another student');
     }
 
-    // 2. Validate ingestion record against schema and save/verify in store (write-once)
+    // 5. Validate supplied record against schema
     const parsedRecord = TrustedIngestionRecordSchema.parse(ingestionRecord);
 
-    const existingRecord = await this.trustedIngestionStore.getRecord(
+    // 6. Retrieve pre-persisted record from trusted ingestion store (never create from argument)
+    const persistedRecord = await this.trustedIngestionStore.getRecord(
       parsedRecord.orgId,
       parsedRecord.repositoryId,
       parsedRecord.commitSha,
       parsedRecord.studentId
     );
 
-    if (existingRecord) {
-      // Must not overwrite an already trusted ingestion record with different data
-      if (existingRecord.ingestionId !== parsedRecord.ingestionId) {
+    if (!persistedRecord) {
+      throw new Error(
+        `TRUSTED_INGESTION_RECORD_NOT_FOUND: Trusted snapshot registration requires an already-persisted trusted ingestion record for repository '${parsedRecord.repositoryId}', commit '${parsedRecord.commitSha}', student '${parsedRecord.studentId}'. Ingestion record creation must precede snapshot registration via server ingestion pipeline (P0-04).`
+      );
+    }
+
+    // 7. Exhaustive field-by-field comparison between supplied and persisted record
+    if (persistedRecord.ingestionId !== parsedRecord.ingestionId) {
+      throw new Error(
+        `INGESTION_RECORD_MISMATCH: Supplied ingestionId '${parsedRecord.ingestionId}' does not match persisted record '${persistedRecord.ingestionId}'`
+      );
+    }
+    if (persistedRecord.orgId !== parsedRecord.orgId) {
+      throw new Error(
+        `INGESTION_RECORD_MISMATCH: Supplied orgId '${parsedRecord.orgId}' does not match persisted record '${persistedRecord.orgId}'`
+      );
+    }
+    if (persistedRecord.repositoryId !== parsedRecord.repositoryId) {
+      throw new Error(
+        `INGESTION_RECORD_MISMATCH: Supplied repositoryId '${parsedRecord.repositoryId}' does not match persisted record '${persistedRecord.repositoryId}'`
+      );
+    }
+    if (persistedRecord.commitSha.toLowerCase() !== parsedRecord.commitSha.toLowerCase()) {
+      throw new Error(
+        `INGESTION_RECORD_MISMATCH: Supplied commitSha '${parsedRecord.commitSha}' does not match persisted record '${persistedRecord.commitSha}'`
+      );
+    }
+    if (persistedRecord.treeSha.toLowerCase() !== parsedRecord.treeSha.toLowerCase()) {
+      throw new Error(
+        `INGESTION_RECORD_MISMATCH: Supplied treeSha '${parsedRecord.treeSha}' does not match persisted record '${persistedRecord.treeSha}'`
+      );
+    }
+    if (persistedRecord.studentId !== parsedRecord.studentId) {
+      throw new Error(
+        `INGESTION_RECORD_MISMATCH: Supplied studentId '${parsedRecord.studentId}' does not match persisted record '${persistedRecord.studentId}'`
+      );
+    }
+    if (
+      persistedRecord.verifiedAt !== parsedRecord.verifiedAt &&
+      new Date(persistedRecord.verifiedAt).getTime() !== new Date(parsedRecord.verifiedAt).getTime()
+    ) {
+      throw new Error(
+        `INGESTION_RECORD_MISMATCH: Supplied verifiedAt '${parsedRecord.verifiedAt}' does not match persisted record '${persistedRecord.verifiedAt}'`
+      );
+    }
+    if (persistedRecord.provenance !== parsedRecord.provenance) {
+      throw new Error(
+        `INGESTION_RECORD_MISMATCH: Supplied provenance '${parsedRecord.provenance}' does not match persisted record '${persistedRecord.provenance}'`
+      );
+    }
+
+    // Compare complete manifest and every entry's filePath, blobSha, rawFileHash, and byteSize
+    if (persistedRecord.manifest.length !== parsedRecord.manifest.length) {
+      throw new Error(
+        `INGESTION_RECORD_MISMATCH: Supplied manifest count (${parsedRecord.manifest.length}) does not match persisted record (${persistedRecord.manifest.length})`
+      );
+    }
+
+    const persistedManifestMap = new Map<string, TrustedFileManifestEntry>();
+    for (const pEntry of persistedRecord.manifest) {
+      persistedManifestMap.set(normalizeFilePath(pEntry.filePath), pEntry);
+    }
+
+    for (const sEntry of parsedRecord.manifest) {
+      const canonicalEntryPath = normalizeFilePath(sEntry.filePath);
+      const matched = persistedManifestMap.get(canonicalEntryPath);
+      if (!matched) {
         throw new Error(
-          `INGESTION_RECORD_MISMATCH: Supplied ingestionId '${parsedRecord.ingestionId}' does not match persisted record '${existingRecord.ingestionId}'`
+          `INGESTION_RECORD_MISMATCH: Supplied manifest contains unpersisted file '${canonicalEntryPath}'`
         );
       }
-      if (existingRecord.treeSha.toLowerCase() !== parsedRecord.treeSha.toLowerCase()) {
+      if (matched.blobSha.toLowerCase() !== sEntry.blobSha.toLowerCase()) {
         throw new Error(
-          `INGESTION_RECORD_MISMATCH: Supplied treeSha '${parsedRecord.treeSha}' does not match persisted record '${existingRecord.treeSha}'`
+          `INGESTION_RECORD_MISMATCH: Manifest entry '${canonicalEntryPath}' blobSha mismatch (persisted: ${matched.blobSha}, supplied: ${sEntry.blobSha})`
         );
       }
-      // saveRecord enforces write-once semantics and allows idempotent duplicates
-      await this.trustedIngestionStore.saveRecord(parsedRecord);
-    } else {
-      await this.trustedIngestionStore.saveRecord(parsedRecord);
+      if (matched.rawFileHash.toLowerCase() !== sEntry.rawFileHash.toLowerCase()) {
+        throw new Error(
+          `INGESTION_RECORD_MISMATCH: Manifest entry '${canonicalEntryPath}' rawFileHash mismatch (persisted: ${matched.rawFileHash}, supplied: ${sEntry.rawFileHash})`
+        );
+      }
+      if (matched.byteSize !== sEntry.byteSize) {
+        throw new Error(
+          `INGESTION_RECORD_MISMATCH: Manifest entry '${canonicalEntryPath}' byteSize mismatch (persisted: ${matched.byteSize}, supplied: ${sEntry.byteSize})`
+        );
+      }
     }
 
-    const trustedRecord = (await this.trustedIngestionStore.getRecord(
-      parsedRecord.orgId,
-      parsedRecord.repositoryId,
-      parsedRecord.commitSha,
-      parsedRecord.studentId
-    ))!;
-
-    // 3. Ensure snapshot attributes agree with ingestion record
-    if (snapshot.orgId && snapshot.orgId !== trustedRecord.orgId) {
+    // 8. Ensure snapshot attributes agree with persisted record
+    if (snapshot.orgId && snapshot.orgId !== persistedRecord.orgId) {
       throw new Error(
-        `SNAPSHOT_RECORD_MISMATCH: Snapshot orgId '${snapshot.orgId}' does not match ingestion record orgId '${trustedRecord.orgId}'`
+        `SNAPSHOT_RECORD_MISMATCH: Snapshot orgId '${snapshot.orgId}' does not match ingestion record orgId '${persistedRecord.orgId}'`
       );
     }
-    if (snapshot.studentId && snapshot.studentId !== trustedRecord.studentId) {
+    if (snapshot.studentId && snapshot.studentId !== persistedRecord.studentId) {
       throw new Error(
-        `SNAPSHOT_RECORD_MISMATCH: Snapshot studentId '${snapshot.studentId}' does not match ingestion record studentId '${trustedRecord.studentId}'`
+        `SNAPSHOT_RECORD_MISMATCH: Snapshot studentId '${snapshot.studentId}' does not match ingestion record studentId '${persistedRecord.studentId}'`
       );
     }
-    if (snapshot.repositoryId !== trustedRecord.repositoryId) {
+    if (snapshot.repositoryId !== persistedRecord.repositoryId) {
       throw new Error(
-        `SNAPSHOT_RECORD_MISMATCH: Snapshot repositoryId '${snapshot.repositoryId}' does not match ingestion record repositoryId '${trustedRecord.repositoryId}'`
+        `SNAPSHOT_RECORD_MISMATCH: Snapshot repositoryId '${snapshot.repositoryId}' does not match ingestion record repositoryId '${persistedRecord.repositoryId}'`
       );
     }
-    if (snapshot.commitSha.toLowerCase() !== trustedRecord.commitSha.toLowerCase()) {
+    if (snapshot.commitSha.toLowerCase() !== persistedRecord.commitSha.toLowerCase()) {
       throw new Error(
-        `SNAPSHOT_RECORD_MISMATCH: Snapshot commitSha '${snapshot.commitSha}' does not match ingestion record commitSha '${trustedRecord.commitSha}'`
+        `SNAPSHOT_RECORD_MISMATCH: Snapshot commitSha '${snapshot.commitSha}' does not match ingestion record commitSha '${persistedRecord.commitSha}'`
       );
     }
 
-    // 4. Require Git blob SHA for trusted snapshots
+    // 9. Require Git blob SHA for trusted snapshots
     if (!snapshot.blobSha || !/^[0-9a-fA-F]{40}$/.test(snapshot.blobSha)) {
       throw new Error(
         'TRUSTED_SNAPSHOT_BLOB_SHA_REQUIRED: Trusted ingestion snapshots must specify a valid 40-character Git blobSha.'
       );
     }
 
-    // 5. Canonicalize snapshot file path
+    // 10. Canonicalize snapshot file path
     let canonicalPath: string;
     try {
       canonicalPath = normalizeFilePath(snapshot.filePath);
@@ -331,12 +442,12 @@ export class AnchorService {
       throw new Error(`INVALID_SNAPSHOT_PATH: ${err.message}`, { cause: err });
     }
 
-    // 6. Verify file against ingestion manifest (path, blobSha, rawFileHash)
+    // 11. Verify file against ingestion manifest (path, blobSha, rawFileHash)
     const manifestResult = await this.trustedIngestionStore.verifyFileManifest(
-      trustedRecord.orgId,
-      trustedRecord.repositoryId,
-      trustedRecord.commitSha,
-      trustedRecord.studentId,
+      persistedRecord.orgId,
+      persistedRecord.repositoryId,
+      persistedRecord.commitSha,
+      persistedRecord.studentId,
       canonicalPath,
       snapshot.blobSha,
       snapshot.rawFileHash
@@ -346,38 +457,95 @@ export class AnchorService {
       throw new Error(`TRUSTED_INGESTION_MANIFEST_VIOLATION: ${manifestResult.reason}`);
     }
 
-    // 7. Store trusted snapshot
-    const trustedSnapshot: SourceSnapshot = {
-      ...snapshot,
-      orgId: trustedRecord.orgId,
-      studentId: trustedRecord.studentId,
-      filePath: canonicalPath,
-      blobSha: snapshot.blobSha.toLowerCase(),
-      rawFileHash: snapshot.rawFileHash.toLowerCase(),
-      provenance: 'trusted_ingestion_pipeline',
-      ingestionId: trustedRecord.ingestionId,
-    };
+    // 12. Mutex-protected, audit-failure-safe snapshot persistence
+    const lockKey = `${context.orgId}:${targetStudentId}:${snapshot.repositoryId}:${snapshot.commitSha}:${canonicalPath}`;
 
-    await this.snapshotStore.saveSnapshot(trustedSnapshot);
+    return this.runWithLock(lockKey, async () => {
+      const wasAlreadyPresent = await this.snapshotStore.hasSnapshot(
+        snapshot.repositoryId,
+        snapshot.commitSha,
+        canonicalPath,
+        context.orgId,
+        targetStudentId
+      );
 
-    // 8. Log audit event
-    await this.auditRepo.log(
-      context,
-      'TRUSTED_SNAPSHOT_INGESTED',
-      'evidence',
-      snapshot.snapshotId,
-      {
-        ingestionId: trustedRecord.ingestionId,
-        repositoryId: trustedRecord.repositoryId,
-        commitSha: trustedRecord.commitSha,
+      const trustedSnapshot: SourceSnapshot = {
+        ...snapshot,
+        orgId: persistedRecord.orgId,
+        studentId: persistedRecord.studentId,
         filePath: canonicalPath,
-        rawFileHash: snapshot.rawFileHash,
-        blobSha: snapshot.blobSha,
-        studentId: trustedRecord.studentId,
-      }
-    );
+        blobSha: snapshot.blobSha!.toLowerCase(),
+        rawFileHash: snapshot.rawFileHash.toLowerCase(),
+        provenance: 'trusted_ingestion_pipeline',
+        ingestionId: persistedRecord.ingestionId,
+      };
 
-    return { success: true, snapshotId: snapshot.snapshotId };
+      await this.snapshotStore.saveSnapshot(trustedSnapshot);
+
+      try {
+        await this.auditRepo.log(
+          context,
+          'TRUSTED_SNAPSHOT_INGESTED',
+          'evidence',
+          snapshot.snapshotId,
+          {
+            ingestionId: persistedRecord.ingestionId,
+            repositoryId: persistedRecord.repositoryId,
+            commitSha: persistedRecord.commitSha,
+            filePath: canonicalPath,
+            rawFileHash: snapshot.rawFileHash,
+            blobSha: snapshot.blobSha,
+            studentId: targetStudentId,
+          }
+        );
+      } catch (auditErr: any) {
+        if (!wasAlreadyPresent) {
+          if (!this.snapshotStore.deleteSnapshot) {
+            throw new Error(
+              `TRUSTED_SNAPSHOT_REGISTRATION_FAILED_UNROLLABLE: Audit logging failed (${auditErr.message}) and snapshot store does not support compensating rollback.`,
+              { cause: auditErr }
+            );
+          }
+
+          let rollbackError: Error | null = null;
+          try {
+            const deleted = await this.snapshotStore.deleteSnapshot(
+              snapshot.repositoryId,
+              snapshot.commitSha,
+              canonicalPath,
+              context.orgId,
+              targetStudentId,
+              snapshot.snapshotId
+            );
+            if (!deleted) {
+              rollbackError = new Error(
+                `Snapshot ${snapshot.snapshotId} was not found or ID mismatch during rollback`
+              );
+            }
+          } catch (rErr: any) {
+            rollbackError = rErr;
+          }
+
+          if (rollbackError) {
+            throw new Error(
+              `TRUSTED_SNAPSHOT_REGISTRATION_FAILED_WITH_ROLLBACK_ERROR: Audit logging failed (${auditErr.message}) and compensating rollback failed (${rollbackError.message})`,
+              { cause: auditErr }
+            );
+          }
+        }
+
+        throw new Error(
+          `TRUSTED_SNAPSHOT_REGISTRATION_FAILED: Audit logging failed (${auditErr.message}). ${
+            wasAlreadyPresent
+              ? 'Pre-existing snapshot was preserved.'
+              : 'Newly stored snapshot was safely rolled back.'
+          }`,
+          { cause: auditErr }
+        );
+      }
+
+      return { success: true, snapshotId: snapshot.snapshotId };
+    });
   }
 
   /**
