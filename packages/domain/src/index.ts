@@ -11,6 +11,7 @@ export type {
   ExactCodeAnchor,
   SourceSnapshot,
   TrustedIngestionRecord,
+  TrustedFileManifestEntry,
   CodeAnchor,
   ResolutionResult,
   AnchorResolutionStatus,

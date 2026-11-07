@@ -7,23 +7,28 @@ export interface ISourceSnapshotStore {
     repositoryId: string,
     commitSha: string,
     filePath: string,
-    orgId?: string
+    orgId?: string,
+    studentId?: string
   ): Promise<SourceSnapshot | undefined> | SourceSnapshot | undefined;
   getSnapshotByHash(
     rawFileHash: string,
-    orgId?: string
+    orgId?: string,
+    studentId?: string
   ): Promise<SourceSnapshot | undefined> | SourceSnapshot | undefined;
   hasSnapshot(
     repositoryId: string,
     commitSha: string,
     filePath: string,
-    orgId?: string
+    orgId?: string,
+    studentId?: string
   ): Promise<boolean> | boolean;
   deleteSnapshot?(
     repositoryId: string,
     commitSha: string,
     filePath: string,
-    orgId?: string
+    orgId?: string,
+    studentId?: string,
+    expectedSnapshotId?: string
   ): Promise<boolean> | boolean;
 }
 
@@ -77,14 +82,22 @@ export class InMemorySourceSnapshotStore implements ISourceSnapshotStore {
   private snapshotsByKey = new Map<string, SourceSnapshot>();
   private snapshotsByHash = new Map<string, SourceSnapshot>();
 
-  private makeKey(repositoryId: string, commitSha: string, filePath: string, orgId?: string): string {
+  private makeKey(
+    repositoryId: string,
+    commitSha: string,
+    filePath: string,
+    orgId?: string,
+    studentId?: string
+  ): string {
     const tenantPrefix = orgId ? `${orgId}:` : '';
-    return `${tenantPrefix}${repositoryId}:${commitSha.toLowerCase()}:${normalizeFilePath(filePath)}`;
+    const studentPrefix = studentId ? `${studentId}:` : '';
+    return `${tenantPrefix}${studentPrefix}${repositoryId}:${commitSha.toLowerCase()}:${normalizeFilePath(filePath)}`;
   }
 
-  private makeHashKey(rawFileHash: string, orgId?: string): string {
+  private makeHashKey(rawFileHash: string, orgId?: string, studentId?: string): string {
     const tenantPrefix = orgId ? `${orgId}:` : '';
-    return `${tenantPrefix}${rawFileHash.toLowerCase()}`;
+    const studentPrefix = studentId ? `${studentId}:` : '';
+    return `${tenantPrefix}${studentPrefix}${rawFileHash.toLowerCase()}`;
   }
 
   /**
@@ -92,7 +105,13 @@ export class InMemorySourceSnapshotStore implements ISourceSnapshotStore {
    */
   public saveSnapshot(snapshot: SourceSnapshot): void {
     const canonicalPath = normalizeFilePath(snapshot.filePath);
-    const key = this.makeKey(snapshot.repositoryId, snapshot.commitSha, canonicalPath, snapshot.orgId);
+    const key = this.makeKey(
+      snapshot.repositoryId,
+      snapshot.commitSha,
+      canonicalPath,
+      snapshot.orgId,
+      snapshot.studentId
+    );
     
     // Verify raw file hash integrity before storage
     const rawBytes =
@@ -128,7 +147,7 @@ export class InMemorySourceSnapshotStore implements ISourceSnapshotStore {
 
     this.snapshotsByKey.set(key, immutableSnapshot);
 
-    const hashKey = this.makeHashKey(snapshot.rawFileHash, snapshot.orgId);
+    const hashKey = this.makeHashKey(snapshot.rawFileHash, snapshot.orgId, snapshot.studentId);
     if (!this.snapshotsByHash.has(hashKey)) {
       this.snapshotsByHash.set(hashKey, immutableSnapshot);
     }
@@ -136,14 +155,15 @@ export class InMemorySourceSnapshotStore implements ISourceSnapshotStore {
 
   /**
    * Retrieves a snapshot with defensive byte copying on read.
-   * If orgId is supplied, retrieves only a snapshot explicitly stored under that exact tenant.
-   * Never falls back to an unscoped snapshot for a tenant-scoped lookup.
+   * If orgId/studentId is supplied, retrieves only a snapshot explicitly stored under that exact tenant and student.
+   * Never falls back to an unscoped snapshot.
    */
   public getSnapshot(
     repositoryId: string,
     commitSha: string,
     filePath: string,
-    orgId?: string
+    orgId?: string,
+    studentId?: string
   ): SourceSnapshot | undefined {
     let canonicalPath: string;
     try {
@@ -152,7 +172,7 @@ export class InMemorySourceSnapshotStore implements ISourceSnapshotStore {
       return undefined;
     }
 
-    const key = this.makeKey(repositoryId, commitSha, canonicalPath, orgId);
+    const key = this.makeKey(repositoryId, commitSha, canonicalPath, orgId, studentId);
     const stored = this.snapshotsByKey.get(key);
 
     if (!stored) return undefined;
@@ -166,11 +186,15 @@ export class InMemorySourceSnapshotStore implements ISourceSnapshotStore {
 
   /**
    * Retrieves a snapshot by hash with defensive byte copying on read.
-   * If orgId is supplied, retrieves only a snapshot explicitly stored under that exact tenant.
-   * Never falls back to an unscoped snapshot for a tenant-scoped lookup.
+   * If orgId/studentId is supplied, retrieves only a snapshot explicitly stored under that exact tenant and student.
+   * Never falls back to an unscoped snapshot.
    */
-  public getSnapshotByHash(rawFileHash: string, orgId?: string): SourceSnapshot | undefined {
-    const hashKey = this.makeHashKey(rawFileHash, orgId);
+  public getSnapshotByHash(
+    rawFileHash: string,
+    orgId?: string,
+    studentId?: string
+  ): SourceSnapshot | undefined {
+    const hashKey = this.makeHashKey(rawFileHash, orgId, studentId);
     const stored = this.snapshotsByHash.get(hashKey);
 
     if (!stored) return undefined;
@@ -183,13 +207,16 @@ export class InMemorySourceSnapshotStore implements ISourceSnapshotStore {
 
   /**
    * Deletes a snapshot from storage (used for compensating rollback on failure).
+   * If expectedSnapshotId is provided, deletion is conditional on matching that exact snapshotId.
    * Returns true if the snapshot existed and was removed, false otherwise.
    */
   public deleteSnapshot(
     repositoryId: string,
     commitSha: string,
     filePath: string,
-    orgId?: string
+    orgId?: string,
+    studentId?: string,
+    expectedSnapshotId?: string
   ): boolean {
     let canonicalPath: string;
     try {
@@ -198,13 +225,18 @@ export class InMemorySourceSnapshotStore implements ISourceSnapshotStore {
       return false;
     }
 
-    const key = this.makeKey(repositoryId, commitSha, canonicalPath, orgId);
+    const key = this.makeKey(repositoryId, commitSha, canonicalPath, orgId, studentId);
     const existing = this.snapshotsByKey.get(key);
     if (!existing) return false;
 
+    // Conditional rollback: only delete if the snapshot ID matches the expected version
+    if (expectedSnapshotId && existing.snapshotId !== expectedSnapshotId) {
+      return false;
+    }
+
     this.snapshotsByKey.delete(key);
 
-    const hashKey = this.makeHashKey(existing.rawFileHash, orgId);
+    const hashKey = this.makeHashKey(existing.rawFileHash, orgId, studentId);
     if (this.snapshotsByHash.get(hashKey)?.snapshotId === existing.snapshotId) {
       this.snapshotsByHash.delete(hashKey);
     }
@@ -216,9 +248,10 @@ export class InMemorySourceSnapshotStore implements ISourceSnapshotStore {
     repositoryId: string,
     commitSha: string,
     filePath: string,
-    orgId?: string
+    orgId?: string,
+    studentId?: string
   ): boolean {
-    return this.getSnapshot(repositoryId, commitSha, filePath, orgId) !== undefined;
+    return this.getSnapshot(repositoryId, commitSha, filePath, orgId, studentId) !== undefined;
   }
 
   public clear(): void {

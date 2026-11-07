@@ -397,7 +397,11 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
 
     const result = await anchorService.resolveAnchor(context, parseResult.data, snapshot);
 
-    if (result.error === 'CROSS_TENANT_ACCESS_REJECTED' || result.error === 'FORBIDDEN_STUDENT_ACCESS') {
+    if (
+      result.error === 'CROSS_TENANT_ACCESS_REJECTED' ||
+      result.error === 'FORBIDDEN_STUDENT_ACCESS' ||
+      result.error === 'STUDENT_OWNERSHIP_MISMATCH'
+    ) {
       return reply.status(403).send(result);
     }
     if (result.error === 'CONSENT_SERVICE_UNAVAILABLE' || result.error === 'TRUSTED_INGESTION_NOT_AVAILABLE') {

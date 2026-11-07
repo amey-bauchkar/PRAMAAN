@@ -7,7 +7,9 @@ import {
 import {
   AnchorResolver,
   InMemorySourceSnapshotStore,
+  InMemoryTrustedIngestionStore,
   TypeScriptAstParser,
+  TrustedIngestionRecord,
 } from '../src/index.js';
 
 describe('Exact Code Anchor Resolver (P0-05) — Domain & Integrity Test Suite', () => {
@@ -1297,5 +1299,389 @@ export function greetCandidate(naam: string): string {
 
     // Deleting again returns false (idempotent / non-destructive)
     expect(store.deleteSnapshot(sampleRepoId, sampleCommitSha, 'src/temp.ts', collegeA)).toBe(false);
+  });
+
+  // ============================================================================
+  // Student Isolation & File-Level Manifest Verification Tests (P0-05 Final Gaps)
+  // ============================================================================
+
+  it('42. Student A can retrieve their own snapshot from store', () => {
+    const store = new InMemorySourceSnapshotStore();
+    const studentAId = '30000000-0000-0000-0000-000000000001';
+    const content = 'console.log("student A work");\n';
+    const snap: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      orgId: sampleOrgId,
+      studentId: studentAId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/work.ts',
+      rawBytes: Buffer.from(content, 'utf8'),
+      rawFileHash: createHash('sha256').update(content).digest('hex'),
+      capturedAt: new Date().toISOString(),
+    };
+    store.saveSnapshot(snap);
+
+    const retrieved = store.getSnapshot(sampleRepoId, sampleCommitSha, 'src/work.ts', sampleOrgId, studentAId);
+    expect(retrieved).toBeDefined();
+    expect(retrieved?.studentId).toBe(studentAId);
+    expect(retrieved?.rawFileHash).toBe(snap.rawFileHash);
+  });
+
+  it('43. Student B cannot retrieve Student A\'s snapshot within the same tenant', () => {
+    const store = new InMemorySourceSnapshotStore();
+    const studentAId = '30000000-0000-0000-0000-000000000001';
+    const studentBId = '30000000-0000-0000-0000-000000000002';
+    const content = 'console.log("student A confidential");\n';
+    const snap: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      orgId: sampleOrgId,
+      studentId: studentAId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/private.ts',
+      rawBytes: Buffer.from(content, 'utf8'),
+      rawFileHash: createHash('sha256').update(content).digest('hex'),
+      capturedAt: new Date().toISOString(),
+    };
+    store.saveSnapshot(snap);
+
+    // Student B in same college attempts to retrieve Student A's file
+    const retrievedByB = store.getSnapshot(sampleRepoId, sampleCommitSha, 'src/private.ts', sampleOrgId, studentBId);
+    expect(retrievedByB).toBeUndefined();
+    expect(store.hasSnapshot(sampleRepoId, sampleCommitSha, 'src/private.ts', sampleOrgId, studentBId)).toBe(false);
+  });
+
+  it('44. Student A cannot retrieve Student B\'s snapshot', () => {
+    const store = new InMemorySourceSnapshotStore();
+    const studentAId = '30000000-0000-0000-0000-000000000001';
+    const studentBId = '30000000-0000-0000-0000-000000000002';
+    const content = 'console.log("student B code");\n';
+    const snapB: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      orgId: sampleOrgId,
+      studentId: studentBId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/code.ts',
+      rawBytes: Buffer.from(content, 'utf8'),
+      rawFileHash: createHash('sha256').update(content).digest('hex'),
+      capturedAt: new Date().toISOString(),
+    };
+    store.saveSnapshot(snapB);
+
+    const retrievedByA = store.getSnapshot(sampleRepoId, sampleCommitSha, 'src/code.ts', sampleOrgId, studentAId);
+    expect(retrievedByA).toBeUndefined();
+  });
+
+  it('45. Student B cannot resolve an anchor referencing Student A\'s snapshot', async () => {
+    const store = new InMemorySourceSnapshotStore();
+    const studentAId = '30000000-0000-0000-0000-000000000001';
+    const studentBId = '30000000-0000-0000-0000-000000000002';
+    const content = 'export function add(a: number, b: number): number { return a + b; }\n';
+    const rawHash = createHash('sha256').update(content).digest('hex');
+
+    const snapA: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      orgId: sampleOrgId,
+      studentId: studentAId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/math.ts',
+      rawBytes: Buffer.from(content, 'utf8'),
+      rawFileHash: rawHash,
+      capturedAt: new Date().toISOString(),
+    };
+    store.saveSnapshot(snapA);
+
+    // Anchor claiming studentB ownership
+    const anchorB: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: sampleOrgId,
+      studentId: studentBId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/math.ts',
+      lineStart: 1,
+      lineEnd: 1,
+      contentHash: createHash('sha256').update('export function add(a: number, b: number): number { return a + b; }').digest('hex'),
+      rawFileHash: rawHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    // Resolving from store for Student B returns SNAPSHOT_NOT_FOUND (cannot find Student A's snapshot)
+    const storeRes = await AnchorResolver.resolveFromStore(store, anchorB);
+    expect(storeRes.status).toBe('SNAPSHOT_NOT_FOUND');
+    expect(storeRes.valid).toBe(false);
+
+    // Direct resolve with Student A's snapshot passed directly to Student B anchor fails with STUDENT_OWNERSHIP_MISMATCH
+    const directRes = AnchorResolver.resolve(snapA, anchorB);
+    expect(directRes.status).toBe('ANCHOR_INVALID');
+    expect(directRes.valid).toBe(false);
+    expect(directRes.error).toBe('STUDENT_OWNERSHIP_MISMATCH');
+  });
+
+  it('46. Student B cannot retrieve Student A\'s content by hash', () => {
+    const store = new InMemorySourceSnapshotStore();
+    const studentAId = '30000000-0000-0000-0000-000000000001';
+    const studentBId = '30000000-0000-0000-0000-000000000002';
+    const content = 'export const secretKey = "super-secret";\n';
+    const rawHash = createHash('sha256').update(content).digest('hex');
+
+    const snapA: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      orgId: sampleOrgId,
+      studentId: studentAId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/secret.ts',
+      rawBytes: Buffer.from(content, 'utf8'),
+      rawFileHash: rawHash,
+      capturedAt: new Date().toISOString(),
+    };
+    store.saveSnapshot(snapA);
+
+    // Student A can retrieve by hash
+    const foundA = store.getSnapshotByHash(rawHash, sampleOrgId, studentAId);
+    expect(foundA).toBeDefined();
+
+    // Student B cannot retrieve Student A's content by hash
+    const foundB = store.getSnapshotByHash(rawHash, sampleOrgId, studentBId);
+    expect(foundB).toBeUndefined();
+
+    // Unscoped query cannot retrieve Student A's content
+    const foundUnscoped = store.getSnapshotByHash(rawHash, undefined, undefined);
+    expect(foundUnscoped).toBeUndefined();
+  });
+
+  it('47. A snapshot with missing student ownership cannot resolve for student-owned evidence anchor', () => {
+    const content = 'export function util(): void {}\n';
+    const rawHash = createHash('sha256').update(content).digest('hex');
+
+    // Snapshot has NO studentId
+    const unownedSnap: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      orgId: sampleOrgId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/util.ts',
+      rawBytes: Buffer.from(content, 'utf8'),
+      rawFileHash: rawHash,
+      capturedAt: new Date().toISOString(),
+    };
+
+    const studentAnchor: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: sampleOrgId,
+      studentId: '30000000-0000-0000-0000-000000000001',
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/util.ts',
+      lineStart: 1,
+      lineEnd: 1,
+      contentHash: createHash('sha256').update('export function util(): void {}').digest('hex'),
+      rawFileHash: rawHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const res = AnchorResolver.resolve(unownedSnap, studentAnchor);
+    expect(res.status).toBe('ANCHOR_INVALID');
+    expect(res.valid).toBe(false);
+    expect(res.error).toBe('STUDENT_OWNERSHIP_REQUIRED');
+  });
+
+  it('48. AnchorResolver rejects cross-tenant orgId mismatch between anchor and snapshot', () => {
+    const collegeBOrgId = '00000000-0000-0000-0000-000000000002';
+    const content = 'export const val = 42;\n';
+    const rawHash = createHash('sha256').update(content).digest('hex');
+
+    const snapCollegeA: SourceSnapshot = {
+      snapshotId: randomUUID(),
+      orgId: sampleOrgId,
+      studentId: '30000000-0000-0000-0000-000000000001',
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/val.ts',
+      rawBytes: Buffer.from(content, 'utf8'),
+      rawFileHash: rawHash,
+      capturedAt: new Date().toISOString(),
+    };
+
+    const anchorCollegeB: ExactCodeAnchor = {
+      id: randomUUID(),
+      orgId: collegeBOrgId, // Mismatched tenant
+      studentId: '30000000-0000-0000-0000-000000000001',
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/val.ts',
+      lineStart: 1,
+      lineEnd: 1,
+      contentHash: createHash('sha256').update('export const val = 42;').digest('hex'),
+      rawFileHash: rawHash,
+      parserName: 'typescript-ast',
+      parserVersion: currentParserVersion,
+      createdAt: new Date().toISOString(),
+      status: 'RESOLVED',
+    };
+
+    const res = AnchorResolver.resolve(snapCollegeA, anchorCollegeB);
+    expect(res.status).toBe('ANCHOR_INVALID');
+    expect(res.valid).toBe(false);
+    expect(res.error).toBe('CROSS_TENANT_ACCESS_REJECTED');
+  });
+
+  it('49. deleteSnapshot with expectedSnapshotId removes matching version and preserves divergent version', () => {
+    const store = new InMemorySourceSnapshotStore();
+    const studentId = '30000000-0000-0000-0000-000000000001';
+    const snapId1 = randomUUID();
+    const snapId2 = randomUUID();
+    const content = 'export const x = 1;\n';
+
+    const snap: SourceSnapshot = {
+      snapshotId: snapId1,
+      orgId: sampleOrgId,
+      studentId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      filePath: 'src/versioned.ts',
+      rawBytes: Buffer.from(content, 'utf8'),
+      rawFileHash: createHash('sha256').update(content).digest('hex'),
+      capturedAt: new Date().toISOString(),
+    };
+    store.saveSnapshot(snap);
+
+    // Attempt rollback specifying WRONG snapshotId (e.g. from a concurrent failed request)
+    const deletedWrong = store.deleteSnapshot(
+      sampleRepoId,
+      sampleCommitSha,
+      'src/versioned.ts',
+      sampleOrgId,
+      studentId,
+      snapId2 // Mismatched expected ID
+    );
+    expect(deletedWrong).toBe(false);
+    expect(store.hasSnapshot(sampleRepoId, sampleCommitSha, 'src/versioned.ts', sampleOrgId, studentId)).toBe(true);
+
+    // Rollback specifying MATCHING snapshotId succeeds
+    const deletedCorrect = store.deleteSnapshot(
+      sampleRepoId,
+      sampleCommitSha,
+      'src/versioned.ts',
+      sampleOrgId,
+      studentId,
+      snapId1 // Matching expected ID
+    );
+    expect(deletedCorrect).toBe(true);
+    expect(store.hasSnapshot(sampleRepoId, sampleCommitSha, 'src/versioned.ts', sampleOrgId, studentId)).toBe(false);
+  });
+
+  it('50. verifyFileManifest validates matching filePath, blobSha, and rawFileHash in trusted tree', () => {
+    const trustedStore = new InMemoryTrustedIngestionStore();
+    const studentId = '30000000-0000-0000-0000-000000000001';
+    const blobSha = 'b'.repeat(40);
+    const rawHash = 'c'.repeat(64);
+
+    const record: TrustedIngestionRecord = {
+      ingestionId: randomUUID(),
+      orgId: sampleOrgId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      treeSha: 'a'.repeat(40),
+      studentId,
+      verifiedAt: new Date().toISOString(),
+      provenance: 'trusted_ingestion_pipeline',
+      manifest: [
+        {
+          filePath: 'src/index.ts',
+          blobSha,
+          rawFileHash: rawHash,
+        },
+      ],
+    };
+    trustedStore.saveRecord(record);
+
+    const result = trustedStore.verifyFileManifest(
+      sampleOrgId,
+      sampleRepoId,
+      sampleCommitSha,
+      studentId,
+      'src/index.ts',
+      blobSha,
+      rawHash
+    );
+
+    expect(result.valid).toBe(true);
+    expect(result.entry?.filePath).toBe('src/index.ts');
+  });
+
+  it('51. verifyFileManifest rejects path absent from manifest, blobSha mismatch, and rawHash mismatch', () => {
+    const trustedStore = new InMemoryTrustedIngestionStore();
+    const studentId = '30000000-0000-0000-0000-000000000001';
+    const blobSha = 'b'.repeat(40);
+    const rawHash = 'c'.repeat(64);
+
+    const record: TrustedIngestionRecord = {
+      ingestionId: randomUUID(),
+      orgId: sampleOrgId,
+      repositoryId: sampleRepoId,
+      commitSha: sampleCommitSha,
+      treeSha: 'a'.repeat(40),
+      studentId,
+      verifiedAt: new Date().toISOString(),
+      provenance: 'trusted_ingestion_pipeline',
+      manifest: [
+        {
+          filePath: 'src/index.ts',
+          blobSha,
+          rawFileHash: rawHash,
+        },
+      ],
+    };
+    trustedStore.saveRecord(record);
+
+    // 1. Path absent from manifest
+    const resMissingPath = trustedStore.verifyFileManifest(
+      sampleOrgId,
+      sampleRepoId,
+      sampleCommitSha,
+      studentId,
+      'src/other.ts',
+      blobSha,
+      rawHash
+    );
+    expect(resMissingPath.valid).toBe(false);
+    expect(resMissingPath.reason).toContain('PATH_NOT_IN_TRUSTED_MANIFEST');
+
+    // 2. Blob SHA mismatch
+    const resBadBlob = trustedStore.verifyFileManifest(
+      sampleOrgId,
+      sampleRepoId,
+      sampleCommitSha,
+      studentId,
+      'src/index.ts',
+      'd'.repeat(40), // Wrong blob
+      rawHash
+    );
+    expect(resBadBlob.valid).toBe(false);
+    expect(resBadBlob.reason).toContain('BLOB_SHA_MISMATCH');
+
+    // 3. Raw file hash mismatch
+    const resBadHash = trustedStore.verifyFileManifest(
+      sampleOrgId,
+      sampleRepoId,
+      sampleCommitSha,
+      studentId,
+      'src/index.ts',
+      blobSha,
+      'e'.repeat(64) // Wrong raw hash
+    );
+    expect(resBadHash.valid).toBe(false);
+    expect(resBadHash.reason).toContain('RAW_HASH_MISMATCH');
   });
 });

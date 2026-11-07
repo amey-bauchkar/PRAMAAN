@@ -164,6 +164,45 @@ export class AnchorResolver {
         }
       }
 
+      // Check tenant identity if present in both
+      if (exactAnchor.orgId && snapshot.orgId && exactAnchor.orgId !== snapshot.orgId) {
+        return {
+          status: 'ANCHOR_INVALID',
+          valid: false,
+          error: 'CROSS_TENANT_ACCESS_REJECTED',
+          anchorId: exactAnchor.id,
+          diagnostics: {
+            reason: `Snapshot orgId (${snapshot.orgId}) does not match anchor orgId (${exactAnchor.orgId})`,
+          },
+        };
+      }
+
+      // Check student ownership identity for student evidence
+      if (exactAnchor.studentId) {
+        if (!snapshot.studentId) {
+          return {
+            status: 'ANCHOR_INVALID',
+            valid: false,
+            error: 'STUDENT_OWNERSHIP_REQUIRED',
+            anchorId: exactAnchor.id,
+            diagnostics: {
+              reason: 'Student-owned evidence anchor requires a snapshot with matching student ownership',
+            },
+          };
+        }
+        if (exactAnchor.studentId !== snapshot.studentId) {
+          return {
+            status: 'ANCHOR_INVALID',
+            valid: false,
+            error: 'STUDENT_OWNERSHIP_MISMATCH',
+            anchorId: exactAnchor.id,
+            diagnostics: {
+              reason: `Snapshot studentId (${snapshot.studentId}) does not match anchor studentId (${exactAnchor.studentId})`,
+            },
+          };
+        }
+      }
+
       // 3. Parser version verification
       if (!options.skipParserVersionCheck && exactAnchor.parserName) {
         const registry = options.registry || ParserRegistry.getInstance();
@@ -435,7 +474,8 @@ export class AnchorResolver {
       anchor.repositoryId,
       anchor.commitSha,
       anchor.filePath,
-      anchor.orgId
+      anchor.orgId,
+      anchor.studentId
     );
     if (!snapshot) {
       return {

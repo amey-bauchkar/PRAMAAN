@@ -60,16 +60,17 @@
 ---
 
 ### Milestone M2: Code Archaeology & Evidence Graph
-- **Backlog Tickets:** `P0-04`, `P0-05` (Implemented, Hardened & Corrective Patched), `P0-06`
+- **Backlog Tickets:** `P0-04`, `P0-05` (Implemented, Hardened, Corrective-Patched & Formally Frozen), `P0-06`
 - **Goal:** Ingest consented repositories, extract verifiable code anchors, and accept non-repo lab/hardware artifacts with faculty attestation.
 - **Tasks:**
   - Build static repository import parser (fetches tree and commits without executing any repo build scripts) (`P0-04`).
   - Implement AST symbol extractor (TypeScript / JavaScript vertical slice) to identify exact skill spans and UTF-8 byte ranges (`P0-05` — Completed & Hardened).
   - Implement exact Anchor Resolver with raw-byte SHA-256 integrity verification, defensive snapshot store, multi-byte UTF-8 character boundary validation, line/byte metadata consistency enforcement, and diagnostic normalized diffing (`P0-05` — Completed & Hardened).
   - Implement strict tenant partitioning in snapshot store (removal of unscoped fallbacks), universal student ownership & DPDP consent enforcement across all caller roles, server-controlled trusted ingestion records (`ITrustedIngestionStore`), and compensating rollback for failure-safe snapshot audit logging (`P0-05` — Corrective Patch Completed).
+  - Implement student-level snapshot partitioning, mutex-serialized concurrent registrations, conditional rollback by snapshot ID, and file-level manifest binding (`TrustedFileManifestEntry`) (`P0-05` — Final Sign-Off Completed & Core Frozen).
   - Implement non-repository evidence workflow (lab reports, hardware builds) and faculty mentor review queue (`P0-06`).
 - **Acceptance Criteria:** 100% of displayed code anchors resolve to exact file lines and raw byte spans; tampered code yields `ANCHOR_INVALID`; mentor attestation moves lab evidence to `Evidence-linked`.
-- **Status (P0-05):** Fully implemented, hardened, and corrective-patched with 82 dedicated tests (41 domain, 41 API/RBAC), achieving 100% pass rate. Cross-tenant isolation without unscoped fallback, student ownership isolation across all roles, fail-closed consent enforcement, buffer mutation immunity, path traversal prevention, server-controlled authoritative provenance boundaries, and failure-safe compensating rollback verified. Zero untrusted code execution.
+- **Status (P0-05):** Fully implemented, hardened, corrective-patched, and formally frozen with 107 dedicated tests (51 domain, 56 API/RBAC), achieving 100% pass rate. Cross-tenant and intra-tenant cross-student isolation, fail-closed consent enforcement across all roles, buffer mutation immunity, path traversal prevention, mutex-serialized registration with safe conditional rollback, and Git file-level manifest provenance boundaries verified. Zero untrusted code execution. Total monorepo suite: 338 passing tests across 25 files.
 
 ---
 

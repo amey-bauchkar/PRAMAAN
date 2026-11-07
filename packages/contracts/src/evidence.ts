@@ -100,18 +100,29 @@ export const SourceSnapshotSchema = z.object({
   rawFileHash: z.string().length(64), // Authoritative SHA-256
   blobSha: z.string().length(40).optional(),
   capturedAt: z.string().datetime(),
+  provenance: z.enum(['unverified_client_input', 'trusted_ingestion_pipeline']).default('unverified_client_input').optional(),
+  ingestionId: z.string().uuid().optional(),
 });
 export type SourceSnapshot = z.infer<typeof SourceSnapshotSchema>;
+
+export const TrustedFileManifestEntrySchema = z.object({
+  filePath: z.string().min(1),
+  blobSha: z.string().length(40),
+  rawFileHash: z.string().length(64), // SHA-256
+  byteSize: z.number().int().nonnegative().optional(),
+});
+export type TrustedFileManifestEntry = z.infer<typeof TrustedFileManifestEntrySchema>;
 
 export const TrustedIngestionRecordSchema = z.object({
   ingestionId: z.string().uuid(),
   orgId: z.string().uuid(),
   repositoryId: z.string().uuid(),
   commitSha: z.string().length(40),
+  treeSha: z.string().length(40),
   studentId: z.string().uuid(),
-  treeSha: z.string().optional(),
   verifiedAt: z.string().datetime(),
   provenance: z.literal('trusted_ingestion_pipeline').default('trusted_ingestion_pipeline'),
+  manifest: z.array(TrustedFileManifestEntrySchema).default([]),
 });
 export type TrustedIngestionRecord = z.infer<typeof TrustedIngestionRecordSchema>;
 
