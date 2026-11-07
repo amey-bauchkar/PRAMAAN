@@ -6,6 +6,7 @@ export * from './ast/index.js';
 export * from './audit-chain.js';
 export * from './eligibility-evaluator.js';
 export * from './fairness-calculator.js';
+export * from './git-object.js';
 
 export type {
   ExactCodeAnchor,

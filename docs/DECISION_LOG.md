@@ -194,6 +194,24 @@
   6. **P0-04 Prior Consent Enforcement Boundary:** P0-04 must verify active, tenant-scoped student consent for `repo_verification` before fetching repository content, retaining blobs, generating ingestion records, and registering snapshots.
 - **Consequences:** Eliminates single point of failure in physical rollback. Guarantees that even with 100% compensating rollback failure, unaudited evidence can never be resolved authoritatively. P0-05 is completely hardened and frozen.
 
+---
+
+## ADR-16: Trusted Static GitHub Repository Ingestion Pipeline (P0-04)
+
+- **Status:** Approved
+- **Context:** P0-05 implemented exact code anchor resolution against content-addressed snapshots. However, activating authoritative verification in production required Milestone M2 Ticket P0-04: authenticating students via GitHub OAuth, fetching repository contents without executing code, verifying Git blob integrity against remote Git trees, enforcing DPDP consent prior to network calls, and persisting snapshots and manifests in durable PostgreSQL storage with RLS.
+- **Decision:**
+  1. **OAuth 2.0 with PKCE S256 Challenge:** Students initiate connections with a single-use cryptographic state and S256 code challenge. The state binds tenant (`orgId`), student (`studentId`), and redirect URI with a 10-minute expiry. Replays are strictly rejected.
+  2. **AES-256-GCM Token Encryption at Rest:** GitHub access and refresh tokens are encrypted using authenticated AES-256-GCM (`v1:iv:tag:ciphertext`) with unique 12-byte IVs, 16-byte auth tags, and key versioning under `GITHUB_TOKEN_ENCRYPTION_KEY`. Missing or invalid keys fail closed in production (`503`). Plaintext tokens are NEVER logged, exposed to API responses, or leaked in error messages.
+  3. **Fail-Closed Consent-Before-Fetch Boundary:** The ingestion engine verifies active DPDP `repo_verification` consent in `IConsentRepository` before making ANY GitHub API call. If consent is absent, revoked, or expired, exactly zero GitHub API calls are dispatched (`callCount === 0`). Consent is re-verified immediately prior to database persistence.
+  4. **Static Ingestion & Truncated Tree Recovery:** Code is fetched exclusively via GitHub REST API without `git clone`, `npm install`, or child process execution. If the recursive tree response returns `truncated: true`, the engine falls back to deterministic iterative directory walking.
+  5. **Strict File Filtering & Hard Limits:** Allows only source code files (`.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`). Rejects symlinks (`mode: '120000'`), submodules (`mode: '160000'`), binary files, vendor directories (`node_modules`, `dist`, `.git`), secret files (`.env*`, `*.pem`, `*.key`), and path traversals. Enforces strict limits: $\le 200$ files, $\le 512$ KB per file, and $\le 10$ MB total retained payload.
+  6. **Cryptographic Git Object & Raw Hash Verification:** Raw bytes are formatted as Git objects (`blob ${byteLength}\0${rawBytes}`). The calculated Git blob SHA-1 must strictly match the remote tree entry SHA. Raw SHA-256 (`rawFileHash`) is computed and bound to the file manifest entry.
+  7. **Write-Once Canonical Ingestion Manifests & Snapshots:** Stores immutable `TrustedIngestionRecord` before registering snapshots via `AnchorService.registerTrustedSnapshot()`. Snapshots progress from `pending_audit` to `audit_committed`.
+  8. **Durable PostgreSQL Adapters & Migration 011:** Schema migration `011_trusted_repository_ingestion_and_snapshots.sql` adds `github_oauth_states`, `source_snapshots`, `trusted_ingestion_records`, and `ingestion_jobs` with RLS enabled and forced across all tables. Repositories `PgSourceSnapshotStore`, `PgTrustedIngestionStore`, `PgGitHubCredentialRepository`, and `PgIngestionJobRepository` implement multi-tenant tenant-transaction isolation under `app_api`.
+  9. **Production Application Composition:** In `buildApp()` (`apps/api/src/app.ts`), production mode wires these durable PostgreSQL adapters and fails closed if in-memory adapters are configured.
+- **Consequences:** Establishes complete end-to-end trusted static repository ingestion with zero untrusted code execution, cryptographic Git provenance, and durable PostgreSQL storage. P0-04 is completely verified and operational.
+
 
 
 

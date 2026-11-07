@@ -2,7 +2,7 @@ name: PRAMAAN CI & Security Verification Gate
 
 on:
   push:
-    branches: [ main, 'fix/**' ]
+    branches: [ main, 'fix/**', 'feat/**' ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -45,6 +45,7 @@ jobs:
             apps/api/tests/m1-audit-chain.test.ts \
             apps/api/tests/m1-consent-ledger.test.ts \
             apps/api/tests/m1-tenancy-rls.test.ts \
+            apps/api/tests/p0-04-github-ingestion.test.ts \
             apps/api/tests/prod-fail-closed.test.ts \
             db/tests/admin-tls-and-ledger.test.ts \
             db/tests/test-safety-guard.test.ts \
@@ -143,6 +144,12 @@ jobs:
       - name: Run Comprehensive PostgreSQL 17 RLS & Verification Invariants Suite
         run: npx vitest run db/tests/supabase-real-db.test.ts
         env:
+          DATABASE_URL_ADMIN: postgresql://postgres:ci_test_admin_password@localhost:5432/pramaan_test
+
+      - name: Run P0-04 Durable Repositories & Ingestion Stores Tests
+        run: npx vitest run db/tests/p0-04-pg-durable-repositories.test.ts
+        env:
+          DATABASE_URL: postgresql://pramaan_app_user:ci_runtime_password@localhost:5432/pramaan_test
           DATABASE_URL_ADMIN: postgresql://postgres:ci_test_admin_password@localhost:5432/pramaan_test
 
   live-supabase-verification:

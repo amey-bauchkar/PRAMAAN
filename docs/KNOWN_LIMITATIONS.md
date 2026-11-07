@@ -96,18 +96,32 @@
     Snapshots tagged `trusted_ingestion_pipeline` strictly require a valid 40-character Git `blobSha` (`TRUSTED_SNAPSHOT_BLOB_SHA_REQUIRED`). Authoritative resolution fails closed if `blobSha` is missing, malformed, or mismatches the manifest entry. Non-authoritative client/legacy snapshots retain optional blob SHA.
 12. **Write-Once Immutability for Trusted Ingestion Records:**
     `InMemoryTrustedIngestionStore.saveRecord` enforces write-once semantics: re-saving an exact duplicate record is treated as an idempotent operation, but any attempt to replace an existing record with a different ingestion ID, tree SHA, owner, or manifest throws `IMMUTABLE_INGESTION_RECORD_MUTATION_REJECTED`. Manifest paths are canonicalized, duplicate canonical paths are rejected (`DUPLICATE_MANIFEST_PATH`), and manifest entries require `blobSha`, `rawFileHash`, and `byteSize`.
-13. **Explicit P0-04 Architectural Boundary & Composition Root Wiring Prerequisite:**
-    To activate authoritative verification in production, Milestone M2 Ticket P0-04 must provide:
-    - Durable snapshot storage.
-    - Durable, write-once trusted ingestion record storage.
-    - Secure production wiring for both adapters through the application composition root (`buildApp()`).
-    - Verified Git commit/tree/blob fetching without executing repository code.
-    - Purpose-specific student consent (`repo_verification`) before repository ingestion.
-    - A server-generated canonical file manifest.
-    The current `buildApp()` production configuration must NOT be described as supporting durable authoritative ingestion until that wiring actually exists.
+13. **Milestone M2 P0-04 Durable Storage Implementation & Production Composition:**
+    Milestone M2 Ticket P0-04 has implemented durable snapshot storage (`PgSourceSnapshotStore`), durable write-once trusted ingestion record storage (`PgTrustedIngestionStore`), GitHub credentials repository (`PgGitHubCredentialRepository`), and ingestion jobs (`PgIngestionJobRepository`) backed by Migration 011. In `buildApp()` (`apps/api/src/app.ts`), production mode wires these durable PostgreSQL adapters and fails closed if in-memory adapters are configured in production.
 14. **Pre-Persisted Trusted Ingestion Record Requirement:**
     `AnchorService.registerTrustedSnapshot()` requires an already-persisted record in `ITrustedIngestionStore` and will never create or save an ingestion record from its method argument. It strictly verifies all record and manifest fields against the stored record. Client-facing routes cannot create or mutate trusted ingestion records.
 15. **Distributed Transaction & Outbox Requirement for Future Durable Adapters:**
-    In production environments with external object stores (e.g. S3 Object Lock) and PostgreSQL audit tables, compensating rollback is a best-effort application-layer mechanism. A true distributed unit-of-work (e.g., transactional outbox pattern or two-phase commit) must be implemented under P0-04 for distributed multi-adapter atomicity.
+    In production environments with external object stores (e.g. S3 Object Lock) and PostgreSQL audit tables, compensating rollback is a best-effort application-layer mechanism. In P0-04, durable PostgreSQL storage with transactional outbox job tracking (`ingestion_jobs`) coordinates between snapshots, records, and audit events.
 16. **Explicit Registration Commit State & Fail-Closed Audit Quarantine:**
-    Snapshot registration operates under an explicit three-state lifecycle: `pending_audit` -> `audit_committed` (on audit log success) or `quarantined` (on audit log failure). `resolveAnchor(..., { authoritative: true })` strictly enforces that snapshots have `registrationState === 'audit_committed'` (`REGISTRATION_NOT_AUDIT_COMMITTED`). If compensating rollback (`deleteSnapshot`) fails or throws during an audit error, the snapshot remains permanently quarantined in storage and can never be resolved authoritatively. In production distributed deployments under P0-04, a durable state transition and reconciliation daemon / transactional outbox must coordinate between the durable snapshot store, the audit log database, and the trusted ingestion store.
+    Snapshot registration operates under an explicit three-state lifecycle: `pending_audit` -> `audit_committed` (on audit log success) or `quarantined` (on audit log failure). `resolveAnchor(..., { authoritative: true })` strictly enforces that snapshots have `registrationState === 'audit_committed'` (`REGISTRATION_NOT_AUDIT_COMMITTED`). If compensating rollback (`deleteSnapshot`) fails or throws during an audit error, the snapshot remains permanently quarantined in storage and can never be resolved authoritatively.
+
+---
+
+## 6. Milestone M2 P0-04 Trusted Static Repository Ingestion Boundaries
+
+1. **Pure Static Inspection (Zero Untrusted Execution):**
+   The ingestion engine operates strictly as an offline static reader via GitHub REST API (trees, commits, blobs). It NEVER invokes `git clone`, `npm install`, `yarn`, `eval()`, child process execution, or repository package scripts. Repositories containing malicious `package.json` hooks (`preinstall`, `postinstall`) or build scripts cannot execute within the PRAMAAN runtime.
+2. **Ingestion Scope & Extension Whitelist:**
+   Static repository ingestion is strictly constrained to source code extensions (`.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`). All binary files, minified bundles (`*.min.js`), package lockfiles (`package-lock.json`), documentation (`*.md`), assets (`*.png`, `*.jpg`), configuration (`.env*`, `*.pem`, `*.key`), Git submodules (`160000`), and symbolic links (`120000`) are rejected or excluded.
+3. **Hard Ingestion Size & Resource Limits:**
+   To defend against repository zip-bombs and denial-of-service payloads:
+   - Maximum file count: 200 files.
+   - Maximum individual file size: 512 KB (524,288 bytes).
+   - Maximum aggregate retained payload: 10 MB (10,485,760 bytes).
+   Exceeding any limit aborts ingestion with fail-closed error.
+4. **Token Encryption Key Confidentiality:**
+   GitHub OAuth access tokens are encrypted using AES-256-GCM under `GITHUB_TOKEN_ENCRYPTION_KEY`. The 32-byte hex key must be securely provided via secret management. In production, missing or malformed keys halt startup (`503`). Plaintext tokens are strictly forbidden from appearing in API responses, logs, or error diagnostics.
+5. **Fail-Closed Consent Boundary:**
+   GitHub API calls are NEVER executed unless active DPDP `repo_verification` consent is confirmed in `IConsentRepository`. If consent is missing, revoked, or expired, zero API calls are made (`callCount === 0`). Ingestion jobs fail closed with `CONSENT_REVOKED` or `CONSENT_REQUIRED_OR_REVOKED`.
+6. **Single-Node Process vs Clustered Worker Architecture:**
+   The current P0-04 ingestion engine runs jobs synchronously/asynchronously within the API process backed by `ingestion_jobs`. In multi-instance clustered production environments, background repository ingestion should be decoupled into a dedicated asynchronous worker pool (e.g., BullMQ or temporal-style workflow orchestrator) consuming from `ingestion_jobs`.

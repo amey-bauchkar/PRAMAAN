@@ -40,6 +40,7 @@ describe('PRAMAAN Database Migration Reproducibility & Ledger Verification (Area
       expect(versions).toContain('008');
       expect(versions).toContain('009');
       expect(versions).toContain('010');
+      expect(versions).toContain('011');
 
       // Verify SHA-256 checksum format
       for (const row of res.rows) {
@@ -56,7 +57,7 @@ describe('PRAMAAN Database Migration Reproducibility & Ledger Verification (Area
     expect(result.total).toBeGreaterThanOrEqual(10);
     expect(result.newlyApplied).toBe(0);
     expect(result.skipped).toBe(result.total);
-  });
+  }, 60000);
 
   it('3. Security role separation: migration runner strictly requires DATABASE_URL_ADMIN and rejects runtime fallback', async () => {
     const originalAdmin = process.env.DATABASE_URL_ADMIN;

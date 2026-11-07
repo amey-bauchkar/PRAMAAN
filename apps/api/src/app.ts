@@ -12,7 +12,36 @@ import { IAuditRepository, InMemoryAuditRepository, PgAuditRepository } from './
 import { IConsentRepository, InMemoryConsentRepository, PgConsentRepository } from './repositories/consent-repository.js';
 import { IUserRepository, InMemoryUserRepository, PgUserRepository } from './repositories/user-repository.js';
 import { AnchorService } from './services/anchor-service.js';
-import { ExactCodeAnchorSchema, SourceSnapshotSchema } from '@pramaan/contracts';
+import {
+  ExactCodeAnchorSchema,
+  SourceSnapshotSchema,
+  RepositoryIngestionRequestSchema,
+} from '@pramaan/contracts';
+import {
+  ISourceSnapshotStore,
+  InMemorySourceSnapshotStore,
+  ITrustedIngestionStore,
+  InMemoryTrustedIngestionStore,
+} from '@pramaan/domain';
+import { PgSourceSnapshotStore } from './repositories/pg-source-snapshot-store.js';
+import { PgTrustedIngestionStore } from './repositories/pg-trusted-ingestion-store.js';
+import {
+  IGitHubCredentialRepository,
+  InMemoryGitHubCredentialRepository,
+  PgGitHubCredentialRepository,
+} from './repositories/github-credential-repository.js';
+import {
+  IIngestionJobRepository,
+  InMemoryIngestionJobRepository,
+  PgIngestionJobRepository,
+} from './repositories/ingestion-job-repository.js';
+import {
+  IGitHubClient,
+  DefaultGitHubClient,
+} from './services/github-client.js';
+import { ITokenCipher, AesGcmTokenCipher } from './services/token-cipher.js';
+import { GitHubAccountService } from './services/github-account-service.js';
+import { StaticRepoIngestionService } from './services/static-repo-ingestion-service.js';
 import { getDbPool } from './db/pool.js';
 
 export interface AppOptions {
@@ -23,6 +52,14 @@ export interface AppOptions {
   authService?: AuthService;
   userRepository?: IUserRepository;
   anchorService?: AnchorService;
+  snapshotStore?: ISourceSnapshotStore;
+  trustedIngestionStore?: ITrustedIngestionStore;
+  githubClient?: IGitHubClient;
+  githubCredentialRepository?: IGitHubCredentialRepository;
+  tokenCipher?: ITokenCipher;
+  githubAccountService?: GitHubAccountService;
+  staticRepoIngestionService?: StaticRepoIngestionService;
+  ingestionJobRepository?: IIngestionJobRepository;
   // Legacy / convenience options for tests:
   tenantStore?: TenantStore;
   auditService?: AuditService;
@@ -48,7 +85,15 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       opts.auditRepository ||
       opts.consentRepository ||
       opts.userRepository ||
-      opts.anchorService
+      opts.anchorService ||
+      opts.snapshotStore ||
+      opts.trustedIngestionStore ||
+      opts.githubClient ||
+      opts.githubCredentialRepository ||
+      opts.tokenCipher ||
+      opts.githubAccountService ||
+      opts.staticRepoIngestionService ||
+      opts.ingestionJobRepository
     ) {
       throw new Error(
         'FATAL: Production mode prohibits injecting custom repositories or mock stores. All production repositories must be constructed internally using the restricted runtime pool.'
@@ -82,7 +127,11 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     opts.tenantRepository instanceof InMemoryTenantRepository ||
     opts.auditRepository instanceof InMemoryAuditRepository ||
     opts.consentRepository instanceof InMemoryConsentRepository ||
-    opts.userRepository instanceof InMemoryUserRepository
+    opts.userRepository instanceof InMemoryUserRepository ||
+    opts.snapshotStore instanceof InMemorySourceSnapshotStore ||
+    opts.trustedIngestionStore instanceof InMemoryTrustedIngestionStore ||
+    opts.githubCredentialRepository instanceof InMemoryGitHubCredentialRepository ||
+    opts.ingestionJobRepository instanceof InMemoryIngestionJobRepository
   ) {
     activePersistenceMode = 'in-memory';
   } else if (process.env.DATABASE_URL) {
@@ -101,6 +150,15 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
   let auditRepo: IAuditRepository;
   let consentRepo: IConsentRepository;
   let userRepo: IUserRepository;
+  let snapshotStore: ISourceSnapshotStore;
+  let trustedIngestionStore: ITrustedIngestionStore;
+  let githubCredentialRepo: IGitHubCredentialRepository;
+  let ingestionJobRepo: IIngestionJobRepository;
+  let tokenCipher: ITokenCipher;
+  let githubClient: IGitHubClient;
+  let githubAccountService: GitHubAccountService;
+  let anchorService: AnchorService;
+  let staticRepoIngestionService: StaticRepoIngestionService;
 
   if (isProduction) {
     // Production repositories are constructed strictly from restricted runtime pool
@@ -109,6 +167,33 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     auditRepo = new PgAuditRepository(runtimePool);
     consentRepo = new PgConsentRepository(runtimePool, auditRepo);
     userRepo = new PgUserRepository(runtimePool);
+    snapshotStore = new PgSourceSnapshotStore(runtimePool);
+    trustedIngestionStore = new PgTrustedIngestionStore(runtimePool);
+    githubCredentialRepo = new PgGitHubCredentialRepository(runtimePool);
+    ingestionJobRepo = new PgIngestionJobRepository(runtimePool);
+    tokenCipher = new AesGcmTokenCipher();
+    githubClient = new DefaultGitHubClient();
+    githubAccountService = new GitHubAccountService({
+      githubClient,
+      tokenCipher,
+      credentialRepo: githubCredentialRepo,
+    });
+    anchorService = new AnchorService({
+      auditRepo,
+      consentRepo,
+      snapshotStore,
+      trustedIngestionStore,
+      isProduction: true,
+    });
+    staticRepoIngestionService = new StaticRepoIngestionService({
+      githubClient,
+      githubAccountService,
+      consentRepo,
+      trustedIngestionStore,
+      snapshotStore,
+      anchorService,
+      ingestionJobRepo,
+    });
   } else {
     if (opts.tenantRepository) {
       tenantRepo = opts.tenantRepository;
@@ -148,17 +233,77 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     } else {
       userRepo = new InMemoryUserRepository();
     }
+
+    if (opts.snapshotStore) {
+      snapshotStore = opts.snapshotStore;
+    } else if (usePostgres) {
+      snapshotStore = new PgSourceSnapshotStore(getDbPool());
+    } else {
+      snapshotStore = new InMemorySourceSnapshotStore();
+    }
+
+    if (opts.trustedIngestionStore) {
+      trustedIngestionStore = opts.trustedIngestionStore;
+    } else if (usePostgres) {
+      trustedIngestionStore = new PgTrustedIngestionStore(getDbPool());
+    } else {
+      trustedIngestionStore = new InMemoryTrustedIngestionStore();
+    }
+
+    if (opts.githubCredentialRepository) {
+      githubCredentialRepo = opts.githubCredentialRepository;
+    } else if (usePostgres) {
+      githubCredentialRepo = new PgGitHubCredentialRepository(getDbPool());
+    } else {
+      githubCredentialRepo = new InMemoryGitHubCredentialRepository();
+    }
+
+    if (opts.ingestionJobRepository) {
+      ingestionJobRepo = opts.ingestionJobRepository;
+    } else if (usePostgres) {
+      ingestionJobRepo = new PgIngestionJobRepository(getDbPool());
+    } else {
+      ingestionJobRepo = new InMemoryIngestionJobRepository();
+    }
+
+    tokenCipher = opts.tokenCipher ?? new AesGcmTokenCipher();
+    githubClient = opts.githubClient ?? new DefaultGitHubClient();
+    githubAccountService = opts.githubAccountService ?? new GitHubAccountService({
+      githubClient,
+      tokenCipher,
+      credentialRepo: githubCredentialRepo,
+    });
+    anchorService = opts.anchorService ?? new AnchorService({
+      auditRepo,
+      consentRepo,
+      snapshotStore,
+      trustedIngestionStore,
+      isProduction: false,
+    });
+    staticRepoIngestionService = opts.staticRepoIngestionService ?? new StaticRepoIngestionService({
+      githubClient,
+      githubAccountService,
+      consentRepo,
+      trustedIngestionStore,
+      snapshotStore,
+      anchorService,
+      ingestionJobRepo,
+    });
   }
 
   const authService = isProduction
     ? new AuthService({ userRepository: userRepo })
     : (opts.authService ?? new AuthService({ userRepository: userRepo }));
 
-  const anchorService = opts.anchorService ?? new AnchorService({
-    auditRepo,
-    consentRepo,
-  });
   (app as any).anchorService = anchorService;
+  (app as any).snapshotStore = snapshotStore;
+  (app as any).trustedIngestionStore = trustedIngestionStore;
+  (app as any).githubCredentialRepository = githubCredentialRepo;
+  (app as any).ingestionJobRepository = ingestionJobRepo;
+  (app as any).tokenCipher = tokenCipher;
+  (app as any).githubClient = githubClient;
+  (app as any).githubAccountService = githubAccountService;
+  (app as any).staticRepoIngestionService = staticRepoIngestionService;
 
   app.register(cors, { origin: true });
 
@@ -524,6 +669,234 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
         return reply.status(503).send({ error: err.message });
       }
       return reply.status(400).send({ error: err.message });
+    }
+  });
+
+  // =========================================================================
+  // GitHub Integration & Trusted Repository Ingestion Routes (P0-04)
+  // =========================================================================
+
+  // Initiate GitHub OAuth Connection with PKCE S256
+  // Positive RBAC: student (own identity), officer, platform_admin
+  app.get('/api/integrations/github/connect', async (req, reply) => {
+    const context = await resolveSessionContext(req, reply);
+    if (!context) return;
+
+    const allowedRoles: UserRole[] = ['student', 'officer', 'platform_admin'];
+    if (!allowedRoles.includes(context.role as UserRole)) {
+      return reply.status(403).send({
+        error: `FORBIDDEN_ROLE: Role '${context.role}' cannot connect GitHub accounts.`,
+      });
+    }
+
+    const query = req.query as any;
+    const targetStudentId = query?.studentId || context.userId;
+    if (context.role === 'student' && targetStudentId !== context.userId) {
+      return reply.status(403).send({
+        error: 'FORBIDDEN_STUDENT_ACCESS: Students can only connect their own GitHub account.',
+      });
+    }
+
+    const redirectUri = query?.redirect_uri || `${req.protocol}://${req.hostname}/api/integrations/github/callback`;
+
+    try {
+      const initRes = await githubAccountService.initiateConnection(context, targetStudentId, redirectUri);
+      return reply.status(200).send(initRes);
+    } catch (err: any) {
+      if (err.message.startsWith('TENANT_CONTEXT_REQUIRED')) {
+        return reply.status(400).send({ error: err.message });
+      }
+      if (err.message.startsWith('FORBIDDEN_STUDENT_ACCESS')) {
+        return reply.status(403).send({ error: err.message });
+      }
+      return reply.status(500).send({ error: err.message });
+    }
+  });
+
+  // Handle GitHub OAuth Callback with PKCE Verifier & Token Encryption
+  app.get('/api/integrations/github/callback', async (req, reply) => {
+    const context = await resolveSessionContext(req, reply);
+    if (!context) return;
+
+    const query = req.query as any;
+    if (!query?.code || !query?.state) {
+      return reply.status(400).send({ error: 'Missing required OAuth callback parameters: code, state' });
+    }
+
+    try {
+      const result = await githubAccountService.handleOAuthCallback(context, query.code, query.state);
+      await auditRepo.log(
+        context,
+        'integration.github.connected',
+        'github_connection',
+        result.githubUserId,
+        {
+          githubUsername: result.githubUsername,
+          githubUserId: result.githubUserId,
+        }
+      );
+      return reply.status(200).send(result);
+    } catch (err: any) {
+      if (err.message.startsWith('INVALID_OR_EXPIRED_OAUTH_STATE')) {
+        return reply.status(400).send({ error: err.message });
+      }
+      if (err.message.startsWith('CROSS_TENANT_OAUTH_REJECTED') || err.message.startsWith('FORBIDDEN_STUDENT_ACCESS')) {
+        return reply.status(403).send({ error: err.message });
+      }
+      return reply.status(500).send({ error: err.message });
+    }
+  });
+
+  // Get Current Student's GitHub Connection Status (Non-credential metadata)
+  app.get('/api/integrations/github/status', async (req, reply) => {
+    const context = await resolveSessionContext(req, reply);
+    if (!context) return;
+
+    const query = req.query as any;
+    const targetStudentId = query?.studentId || context.userId;
+    if (context.role === 'student' && targetStudentId !== context.userId) {
+      return reply.status(403).send({
+        error: 'FORBIDDEN_STUDENT_ACCESS: Students can only view their own connection status.',
+      });
+    }
+
+    try {
+      const status = await githubAccountService.getConnectionStatus(context, targetStudentId);
+      return reply.status(200).send(status);
+    } catch (err: any) {
+      return reply.status(500).send({ error: err.message });
+    }
+  });
+
+  // Revoke & Disconnect GitHub Connection
+  app.delete('/api/integrations/github/connection', async (req, reply) => {
+    const context = await resolveSessionContext(req, reply);
+    if (!context) return;
+
+    const query = req.query as any;
+    const targetStudentId = query?.studentId || context.userId;
+    if (context.role === 'student' && targetStudentId !== context.userId) {
+      return reply.status(403).send({
+        error: 'FORBIDDEN_STUDENT_ACCESS: Students can only unlink their own connection.',
+      });
+    }
+
+    try {
+      const unlinked = await githubAccountService.unlinkConnection(context, targetStudentId);
+      await auditRepo.log(
+        context,
+        'integration.github.disconnected',
+        'github_connection',
+        targetStudentId,
+        { studentId: targetStudentId }
+      );
+      return reply.status(200).send({ success: true, disconnected: unlinked });
+    } catch (err: any) {
+      return reply.status(500).send({ error: err.message });
+    }
+  });
+
+  // Static GitHub Repository Ingestion Pipeline
+  // Enforces consent-before-fetch, raw Git blob SHA verification, and authoritative snapshot registration
+  app.post('/api/evidence/repositories/ingest', async (req, reply) => {
+    const context = await resolveSessionContext(req, reply);
+    if (!context) return;
+
+    const allowedRoles: UserRole[] = ['student', 'officer', 'platform_admin'];
+    if (!allowedRoles.includes(context.role as UserRole)) {
+      return reply.status(403).send({
+        error: `FORBIDDEN_ROLE: Role '${context.role}' cannot trigger repository ingestion.`,
+      });
+    }
+
+    const parseResult = RepositoryIngestionRequestSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      return reply.status(400).send({
+        error: 'INVALID_INGESTION_REQUEST',
+        details: parseResult.error.format(),
+      });
+    }
+
+    const request = parseResult.data;
+    const targetStudentId = request.studentId || context.userId;
+    if (context.role === 'student' && targetStudentId !== context.userId) {
+      return reply.status(403).send({
+        error: 'FORBIDDEN_STUDENT_ACCESS: Students can only ingest repositories for their own account.',
+      });
+    }
+
+    try {
+      const result = await staticRepoIngestionService.ingestRepository(context, request);
+      return reply.status(201).send(result);
+    } catch (err: any) {
+      if (
+        err.message.startsWith('CONSENT_REQUIRED_OR_REVOKED') ||
+        err.message.startsWith('CONSENT_REVOKED')
+      ) {
+        return reply.status(422).send({ error: err.message });
+      }
+      if (
+        err.message.startsWith('CONSENT_SERVICE_UNAVAILABLE') ||
+        err.message.startsWith('CONSENT_SERVICE_UNAVAILABLE_PRE_PERSIST')
+      ) {
+        return reply.status(503).send({ error: err.message });
+      }
+      if (
+        err.message.startsWith('NO_ACTIVE_GITHUB_CONNECTION') ||
+        err.message.startsWith('GITHUB_TOKEN_EXPIRED')
+      ) {
+        return reply.status(422).send({ error: err.message });
+      }
+      if (err.message.startsWith('FORBIDDEN_STUDENT_ACCESS')) {
+        return reply.status(403).send({ error: err.message });
+      }
+      if (
+        err.message.startsWith('INGESTION_LIMIT_EXCEEDED') ||
+        err.message.startsWith('FILE_COUNT_LIMIT_EXCEEDED') ||
+        err.message.startsWith('FILE_SIZE_LIMIT_EXCEEDED') ||
+        err.message.startsWith('TOTAL_SIZE_LIMIT_EXCEEDED') ||
+        err.message.startsWith('INVALID_GITHUB_REPOSITORY') ||
+        err.message.startsWith('REPOSITORY_ACCESS_DENIED')
+      ) {
+        return reply.status(400).send({ error: err.message });
+      }
+      if (
+        err.message.startsWith('GIT_OBJECT_VERIFICATION_FAILED') ||
+        err.message.startsWith('BLOB_VERIFICATION_FAILED') ||
+        err.message.startsWith('BLOB_SHA_MISMATCH')
+      ) {
+        return reply.status(422).send({ error: err.message });
+      }
+      return reply.status(500).send({ error: err.message });
+    }
+  });
+
+  // Track Ingestion Progress / Job Status
+  app.get('/api/evidence/repositories/ingest/:ingestionId', async (req, reply) => {
+    const context = await resolveSessionContext(req, reply);
+    if (!context) return;
+
+    const { ingestionId } = req.params as { ingestionId: string };
+    if (!ingestionId) {
+      return reply.status(400).send({ error: 'Missing ingestionId route parameter.' });
+    }
+
+    try {
+      const job = await staticRepoIngestionService.getJob(context, ingestionId);
+      if (!job) {
+        return reply.status(404).send({ error: 'Ingestion job not found.' });
+      }
+      // Tenant isolation:
+      if (job.orgId !== context.orgId) {
+        return reply.status(404).send({ error: 'Ingestion job not found.' });
+      }
+      // Student isolation:
+      if (context.role === 'student' && job.studentId !== context.userId) {
+        return reply.status(403).send({ error: 'FORBIDDEN_STUDENT_ACCESS: Cannot view ingestion job of another student.' });
+      }
+      return reply.status(200).send(job);
+    } catch (err: any) {
+      return reply.status(500).send({ error: err.message });
     }
   });
 

@@ -163,7 +163,7 @@ describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariant
   // SECTION 2: TABLE AUDIT & RLS ENFORCEMENT
   // ============================================================================
 
-  it('2. Table check: all 42 domain and tenant tables have RLS enabled and forced', async () => {
+  it('2. Table check: all 46 domain and tenant tables have RLS enabled and forced', async () => {
     const res = await runQuery(`
       SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity 
       FROM pg_class c 
@@ -174,7 +174,7 @@ describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariant
       ORDER BY c.relname;
     `);
 
-    expect(res.length).toBe(42);
+    expect(res.length).toBe(46);
     for (const table of res) {
       expect(table.relrowsecurity).toBe(true);
       expect(table.relforcerowsecurity).toBe(true);
