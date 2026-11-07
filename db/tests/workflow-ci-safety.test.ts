@@ -97,17 +97,49 @@ describe('CI Live Supabase Workflow Safety-Gate & Configuration Invariants', () 
   });
 
   it('8. Safety guard strictly throws when ALLOW_DESTRUCTIVE_DB_TESTS is absent or false', () => {
-    const original = process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    const originalDbTests = process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    const originalTests = process.env.ALLOW_DESTRUCTIVE_TESTS;
     try {
+      // 1. Both variables absent -> assertSafeTestEnvironment() rejects
       delete process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
       delete process.env.ALLOW_DESTRUCTIVE_TESTS;
-
       expect(() => {
         assertSafeTestEnvironment('Destructive query execution');
       }).toThrow(/requires explicit opt-in via ALLOW_DESTRUCTIVE_DB_TESTS=true/);
+
+      // 2. ALLOW_DESTRUCTIVE_DB_TESTS=false with legacy variable absent -> rejects
+      process.env.ALLOW_DESTRUCTIVE_DB_TESTS = 'false';
+      delete process.env.ALLOW_DESTRUCTIVE_TESTS;
+      expect(() => {
+        assertSafeTestEnvironment('Destructive query execution');
+      }).toThrow(/requires explicit opt-in via ALLOW_DESTRUCTIVE_DB_TESTS=true/);
+
+      // 3. No alternate legacy opt-in can bypass the requirement
+      // 3a. Explicit false on ALLOW_DESTRUCTIVE_DB_TESTS cannot be overridden by legacy ALLOW_DESTRUCTIVE_TESTS=true
+      process.env.ALLOW_DESTRUCTIVE_DB_TESTS = 'false';
+      process.env.ALLOW_DESTRUCTIVE_TESTS = 'true';
+      expect(() => {
+        assertSafeTestEnvironment('Destructive query execution');
+      }).toThrow(/requires explicit opt-in via ALLOW_DESTRUCTIVE_DB_TESTS=true/);
+
+      // 3b. Arbitrary or non-boolean legacy opt-in values cannot bypass the requirement
+      delete process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+      for (const invalidOptIn of ['yes', '1', 'trueish', 'force', 'bypass', '0']) {
+        process.env.ALLOW_DESTRUCTIVE_TESTS = invalidOptIn;
+        expect(() => {
+          assertSafeTestEnvironment('Destructive query execution');
+        }).toThrow(/requires explicit opt-in via ALLOW_DESTRUCTIVE_DB_TESTS=true/);
+      }
     } finally {
-      if (original !== undefined) {
-        process.env.ALLOW_DESTRUCTIVE_DB_TESTS = original;
+      if (originalDbTests !== undefined) {
+        process.env.ALLOW_DESTRUCTIVE_DB_TESTS = originalDbTests;
+      } else {
+        delete process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+      }
+      if (originalTests !== undefined) {
+        process.env.ALLOW_DESTRUCTIVE_TESTS = originalTests;
+      } else {
+        delete process.env.ALLOW_DESTRUCTIVE_TESTS;
       }
     }
   });
