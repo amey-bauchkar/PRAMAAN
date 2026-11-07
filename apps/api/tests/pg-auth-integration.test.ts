@@ -6,6 +6,7 @@ import { JwtVerifier } from '../src/services/jwt-verifier.js';
 import { createTestToken } from '../src/testing/test-jwt-utils.js';
 import { runQuery } from '../../../scripts/supabase-runner.mjs';
 import pg from 'pg';
+import crypto from 'crypto';
 
 describe('Real PostgreSQL Supabase Integration: Authenticated Identity & Membership Mapping', () => {
   let pool: pg.Pool;
@@ -14,11 +15,12 @@ describe('Real PostgreSQL Supabase Integration: Authenticated Identity & Members
   let jwtVerifier: JwtVerifier;
 
   const testSecret = 'pramaan-live-supabase-jwt-secret-32-chars!';
-  const TEST_COLLEGE = 'f0000000-0000-0000-0000-000000000001';
-  const TEST_USER = 'f1000000-0000-0000-0000-000000000001';
-  const TEST_MEMBERSHIP = 'f2000000-0000-0000-0000-000000000001';
-  const TEST_AUTH_SUB = 'supabase-auth|live-user-f1000000';
-  const TEST_EMAIL = 'officer.live@f-college.edu';
+  const runUuid = crypto.randomUUID();
+  const TEST_COLLEGE = crypto.randomUUID();
+  const TEST_USER = crypto.randomUUID();
+  const TEST_MEMBERSHIP = crypto.randomUUID();
+  const TEST_AUTH_SUB = `supabase-auth|live-user-${runUuid}`;
+  const TEST_EMAIL = `officer.live-${runUuid}@f-college.edu`;
 
   beforeAll(async () => {
     try {

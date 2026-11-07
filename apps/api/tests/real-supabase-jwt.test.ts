@@ -21,9 +21,9 @@ describe('Real Supabase JWT Authentication & JWKS Verification (P0-1, P0-2, P0-4
   let genuineAuthSubject: string;
   let ephemeralUserId: string;
 
-  const TEST_COLLEGE_ID = 'd0000000-0000-0000-0000-000000000001';
-  const TEST_USER_ID = 'd1000000-0000-0000-0000-000000000001';
-  const TEST_MEMBERSHIP_ID = 'd2000000-0000-0000-0000-000000000001';
+  const TEST_COLLEGE_ID = crypto.randomUUID();
+  const TEST_USER_ID = crypto.randomUUID();
+  const TEST_MEMBERSHIP_ID = crypto.randomUUID();
 
   beforeAll(async () => {
     try {
