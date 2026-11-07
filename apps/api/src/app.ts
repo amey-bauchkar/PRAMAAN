@@ -415,7 +415,8 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       result.status === 'PARSER_VERSION_UNAVAILABLE' ||
       result.error === 'STUDENT_OWNERSHIP_REQUIRED' ||
       result.error === 'CONSENT_REQUIRED_OR_REVOKED' ||
-      result.error === 'UNTRUSTED_CLIENT_SNAPSHOT'
+      result.error === 'UNTRUSTED_CLIENT_SNAPSHOT' ||
+      result.error === 'REGISTRATION_NOT_AUDIT_COMMITTED'
     ) {
       return reply.status(422).send(result);
     }

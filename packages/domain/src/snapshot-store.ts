@@ -1,4 +1,4 @@
-import { SourceSnapshot, normalizeFilePath } from '@pramaan/contracts';
+import { SourceSnapshot, SnapshotRegistrationState, normalizeFilePath } from '@pramaan/contracts';
 import { createHash } from 'crypto';
 
 export { normalizeFilePath };
@@ -31,6 +31,15 @@ export interface ISourceSnapshotStore {
     orgId?: string,
     studentId?: string,
     expectedSnapshotId?: string
+  ): Promise<boolean> | boolean;
+  updateRegistrationState?(
+    repositoryId: string,
+    commitSha: string,
+    filePath: string,
+    orgId: string | undefined,
+    studentId: string | undefined,
+    expectedSnapshotId: string,
+    newState: SnapshotRegistrationState
   ): Promise<boolean> | boolean;
 }
 
@@ -90,7 +99,18 @@ export class InMemorySourceSnapshotStore implements ISourceSnapshotStore {
           `IMMUTABLE_SNAPSHOT_MUTATION_REJECTED: Snapshot for ${key} already exists with different hash (${existing.rawFileHash} vs ${snapshot.rawFileHash})`
         );
       }
-      return; // Idempotent write of identical snapshot
+
+      // If the existing snapshot was NOT audit_committed, allow retry or state transition
+      if (existing.registrationState !== 'audit_committed') {
+        existing.snapshotId = snapshot.snapshotId;
+        existing.registrationState = snapshot.registrationState;
+        existing.ingestionId = snapshot.ingestionId;
+        existing.capturedAt = snapshot.capturedAt;
+      } else if (existing.snapshotId === snapshot.snapshotId && snapshot.registrationState) {
+        // Lifecycle state promotion for the exact same snapshot
+        existing.registrationState = snapshot.registrationState;
+      }
+      return; // Idempotent write
     }
 
     // Defensive byte copying on write to prevent external buffer mutation
@@ -197,6 +217,35 @@ export class InMemorySourceSnapshotStore implements ISourceSnapshotStore {
       this.snapshotsByHash.delete(hashKey);
     }
 
+    return true;
+  }
+
+  /**
+   * Updates the registration state (e.g. pending_audit -> audit_committed or quarantined)
+   * bound strictly to the exact expectedSnapshotId, tenant, student, repository, commit, and file path.
+   */
+  public updateRegistrationState(
+    repositoryId: string,
+    commitSha: string,
+    filePath: string,
+    orgId: string | undefined,
+    studentId: string | undefined,
+    expectedSnapshotId: string,
+    newState: SnapshotRegistrationState
+  ): boolean {
+    let canonicalPath: string;
+    try {
+      canonicalPath = normalizeFilePath(filePath);
+    } catch {
+      return false;
+    }
+
+    const key = this.makeKey(repositoryId, commitSha, canonicalPath, orgId, studentId);
+    const existing = this.snapshotsByKey.get(key);
+    if (!existing) return false;
+    if (existing.snapshotId !== expectedSnapshotId) return false;
+
+    existing.registrationState = newState;
     return true;
   }
 

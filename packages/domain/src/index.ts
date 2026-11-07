@@ -10,6 +10,7 @@ export * from './fairness-calculator.js';
 export type {
   ExactCodeAnchor,
   SourceSnapshot,
+  SnapshotRegistrationState,
   TrustedIngestionRecord,
   TrustedFileManifestEntry,
   CodeAnchor,
@@ -18,5 +19,7 @@ export type {
   ParseResult,
   CodeSymbolLocation,
 } from '@pramaan/contracts';
+
+export { SnapshotRegistrationStateSchema } from '@pramaan/contracts';
 
 

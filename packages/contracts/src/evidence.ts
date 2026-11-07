@@ -144,6 +144,13 @@ export const CanonicalFilePathSchema = z.string().min(1).refine(
   { message: 'filePath must be a valid canonical repository-relative path without traversal sequences' }
 );
 
+export const SnapshotRegistrationStateSchema = z.enum([
+  'pending_audit',
+  'audit_committed',
+  'quarantined',
+]);
+export type SnapshotRegistrationState = z.infer<typeof SnapshotRegistrationStateSchema>;
+
 export const SourceSnapshotSchema = z.object({
   snapshotId: z.string().uuid(),
   orgId: z.string().uuid().optional(), // Tenant organization identifier
@@ -160,6 +167,7 @@ export const SourceSnapshotSchema = z.object({
   capturedAt: z.string().datetime(),
   provenance: z.enum(['unverified_client_input', 'trusted_ingestion_pipeline']).default('unverified_client_input').optional(),
   ingestionId: z.string().uuid().optional(),
+  registrationState: SnapshotRegistrationStateSchema.optional(),
 }).superRefine((val, ctx) => {
   if (val.provenance === 'trusted_ingestion_pipeline') {
     if (!val.blobSha || !/^[0-9a-fA-F]{40}$/.test(val.blobSha)) {

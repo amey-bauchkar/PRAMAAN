@@ -457,11 +457,11 @@ export class AnchorService {
       throw new Error(`TRUSTED_INGESTION_MANIFEST_VIOLATION: ${manifestResult.reason}`);
     }
 
-    // 12. Mutex-protected, audit-failure-safe snapshot persistence
+    // 12. Mutex-protected, audit-failure-safe snapshot persistence with explicit commit state
     const lockKey = `${context.orgId}:${targetStudentId}:${snapshot.repositoryId}:${snapshot.commitSha}:${canonicalPath}`;
 
     return this.runWithLock(lockKey, async () => {
-      const wasAlreadyPresent = await this.snapshotStore.hasSnapshot(
+      const existingSnapshot = await this.snapshotStore.getSnapshot(
         snapshot.repositoryId,
         snapshot.commitSha,
         canonicalPath,
@@ -469,7 +469,39 @@ export class AnchorService {
         targetStudentId
       );
 
-      const trustedSnapshot: SourceSnapshot = {
+      const wasAlreadyCommitted = existingSnapshot?.registrationState === 'audit_committed';
+
+      // Pre-existing, successfully committed snapshots must remain unaffected by duplicate registrations
+      if (wasAlreadyCommitted) {
+        try {
+          await this.auditRepo.log(
+            context,
+            'TRUSTED_SNAPSHOT_INGESTED',
+            'evidence',
+            existingSnapshot.snapshotId,
+            {
+              ingestionId: persistedRecord.ingestionId,
+              repositoryId: persistedRecord.repositoryId,
+              commitSha: persistedRecord.commitSha,
+              filePath: canonicalPath,
+              rawFileHash: existingSnapshot.rawFileHash,
+              blobSha: existingSnapshot.blobSha,
+              studentId: targetStudentId,
+              idempotent: true,
+            }
+          );
+        } catch (auditErr: any) {
+          throw new Error(
+            `TRUSTED_SNAPSHOT_REGISTRATION_FAILED: Audit logging failed (${auditErr.message}). Pre-existing snapshot was preserved.`,
+            { cause: auditErr }
+          );
+        }
+
+        return { success: true, snapshotId: existingSnapshot.snapshotId };
+      }
+
+      // Step 1: Save newly registered snapshot in 'pending_audit' state
+      const pendingSnapshot: SourceSnapshot = {
         ...snapshot,
         orgId: persistedRecord.orgId,
         studentId: persistedRecord.studentId,
@@ -478,10 +510,12 @@ export class AnchorService {
         rawFileHash: snapshot.rawFileHash.toLowerCase(),
         provenance: 'trusted_ingestion_pipeline',
         ingestionId: persistedRecord.ingestionId,
+        registrationState: 'pending_audit',
       };
 
-      await this.snapshotStore.saveSnapshot(trustedSnapshot);
+      await this.snapshotStore.saveSnapshot(pendingSnapshot);
 
+      // Step 2: Attempt cryptographic audit logging
       try {
         await this.auditRepo.log(
           context,
@@ -499,15 +533,36 @@ export class AnchorService {
           }
         );
       } catch (auditErr: any) {
-        if (!wasAlreadyPresent) {
-          if (!this.snapshotStore.deleteSnapshot) {
-            throw new Error(
-              `TRUSTED_SNAPSHOT_REGISTRATION_FAILED_UNROLLABLE: Audit logging failed (${auditErr.message}) and snapshot store does not support compensating rollback.`,
-              { cause: auditErr }
+        // Step 3 (Failure path): Audit logging failed!
+        // 1. Quarantine snapshot immediately to prevent authoritative resolution under any circumstance
+        try {
+          if (this.snapshotStore.updateRegistrationState) {
+            await this.snapshotStore.updateRegistrationState(
+              snapshot.repositoryId,
+              snapshot.commitSha,
+              canonicalPath,
+              context.orgId,
+              targetStudentId,
+              snapshot.snapshotId,
+              'quarantined'
             );
+          } else {
+            await this.snapshotStore.saveSnapshot({
+              ...pendingSnapshot,
+              registrationState: 'quarantined',
+            });
           }
+        } catch {
+          // Quarantine attempt; snapshot remains in uncommitted state
+        }
 
-          let rollbackError: Error | null = null;
+        // 2. Attempt compensating physical rollback deletion
+        let rollbackError: Error | null = null;
+        if (!this.snapshotStore.deleteSnapshot) {
+          rollbackError = new Error(
+            'Snapshot store does not support compensating rollback deletion'
+          );
+        } else {
           try {
             const deleted = await this.snapshotStore.deleteSnapshot(
               snapshot.repositoryId,
@@ -525,23 +580,37 @@ export class AnchorService {
           } catch (rErr: any) {
             rollbackError = rErr;
           }
+        }
 
-          if (rollbackError) {
-            throw new Error(
-              `TRUSTED_SNAPSHOT_REGISTRATION_FAILED_WITH_ROLLBACK_ERROR: Audit logging failed (${auditErr.message}) and compensating rollback failed (${rollbackError.message})`,
-              { cause: auditErr }
-            );
-          }
+        if (rollbackError) {
+          throw new Error(
+            `TRUSTED_SNAPSHOT_REGISTRATION_FAILED_WITH_ROLLBACK_ERROR: Audit logging failed (${auditErr.message}) and compensating rollback failed (${rollbackError.message}). Snapshot quarantined in uncommitted state.`,
+            { cause: auditErr }
+          );
         }
 
         throw new Error(
-          `TRUSTED_SNAPSHOT_REGISTRATION_FAILED: Audit logging failed (${auditErr.message}). ${
-            wasAlreadyPresent
-              ? 'Pre-existing snapshot was preserved.'
-              : 'Newly stored snapshot was safely rolled back.'
-          }`,
+          `TRUSTED_SNAPSHOT_REGISTRATION_FAILED: Audit logging failed (${auditErr.message}). Newly stored snapshot was safely rolled back.`,
           { cause: auditErr }
         );
+      }
+
+      // Step 4 (Success path): Audit committed! Promote snapshot to 'audit_committed'
+      if (this.snapshotStore.updateRegistrationState) {
+        await this.snapshotStore.updateRegistrationState(
+          snapshot.repositoryId,
+          snapshot.commitSha,
+          canonicalPath,
+          context.orgId,
+          targetStudentId,
+          snapshot.snapshotId,
+          'audit_committed'
+        );
+      } else {
+        await this.snapshotStore.saveSnapshot({
+          ...pendingSnapshot,
+          registrationState: 'audit_committed',
+        });
       }
 
       return { success: true, snapshotId: snapshot.snapshotId };
@@ -844,6 +913,25 @@ export class AnchorService {
                 anchorId: anchor.id,
                 diagnostics: {
                   reason: `Snapshot failed trusted manifest verification: ${manifestCheck.reason}`,
+                },
+              };
+            }
+          } else if (snapshot.registrationState !== 'audit_committed') {
+            // Fail-closed registration commit state verification:
+            // Snapshots in pending_audit, quarantined, or uncommitted states CANNOT be authoritative!
+            isAuthoritative = false;
+            provenance = 'retained_snapshot_store';
+
+            if (options.authoritative) {
+              return {
+                status: 'ANCHOR_INVALID',
+                valid: false,
+                authoritative: false,
+                provenance: 'retained_snapshot_store',
+                error: 'REGISTRATION_NOT_AUDIT_COMMITTED',
+                anchorId: anchor.id,
+                diagnostics: {
+                  reason: `Authoritative resolution requires an audit-committed snapshot. Current registration state is '${snapshot.registrationState ?? 'uncommitted'}'.`,
                 },
               };
             }

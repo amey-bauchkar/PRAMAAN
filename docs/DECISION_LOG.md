@@ -175,6 +175,26 @@
   4. **Audit-Failure-Safe Compensating Rollback:** Registration is wrapped in the per-identity `runWithLock` mutex. If audit logging fails, newly stored snapshots are cleanly rolled back via conditional `deleteSnapshot` (using exact `snapshot.snapshotId`). Unaudited snapshots can never resolve as authoritative, while pre-existing snapshots (`wasAlreadyPresent === true`) are preserved intact.
 - **Consequences:** Fully closes the trusted ingestion boundary before implementing P0-04. Establishes that client or untrusted callers cannot create trusted ingestion records, guarantees that consent precedes data retention, and ensures audit-storage parity.
 
+---
+
+## ADR-15: Explicit Registration Commit State Lifecycle and Fail-Closed Audit Quarantine
+
+- **Status:** Approved
+- **Context:** An independent source review of commit `fa19449` identified that if audit logging fails during `AnchorService.registerTrustedSnapshot()`, and the subsequent compensating rollback (`deleteSnapshot`) fails or returns `false` (e.g. disk failure, network timeout, adapter error), the newly stored snapshot remains in storage with `provenance: 'trusted_ingestion_pipeline'` and a valid `ingestionId`. Because `resolveAnchor()` previously only checked trusted provenance and manifest matching, an unaudited snapshot could theoretically be resolved authoritatively if physical rollback failed.
+- **Decision:**
+  1. **Explicit Registration Commit State Lifecycle:** Added `SnapshotRegistrationStateSchema` (`pending_audit`, `audit_committed`, `quarantined`) to `@pramaan/contracts` and `SourceSnapshot`.
+  2. **Fail-Closed State Promotion:**
+     - `registerTrustedSnapshot` stores the snapshot initially with `registrationState: 'pending_audit'`.
+     - Only after `this.auditRepo.log()` succeeds is the state promoted to `audit_committed` using `updateRegistrationState` bound to `expectedSnapshotId`.
+     - If `auditRepo.log()` fails, the snapshot state is immediately transitioned to `quarantined` before attempting `deleteSnapshot`.
+     - Even if `deleteSnapshot` fails or throws an exception, the snapshot remains permanently in `quarantined` state in storage.
+  3. **Strict Authoritative Gate in Resolver:** `AnchorService.resolveAnchor(..., { authoritative: true })` strictly enforces `snapshot.registrationState === 'audit_committed'`. Any snapshot in `pending_audit`, `quarantined`, or undefined state fails closed with `ANCHOR_INVALID` and `error: 'REGISTRATION_NOT_AUDIT_COMMITTED'`.
+  4. **Pre-Existing Audit-Committed Snapshot Protection:** Duplicate registration requests for an already `audit_committed` snapshot are tracked with `wasAlreadyCommitted === true`. If the audit logging for the duplicate request fails, the existing snapshot is never downgraded, quarantined, or deleted.
+  5. **Safe Reconciliation & Retry:** An interrupted or quarantined registration can be safely retried. When audit persistence succeeds on retry, the snapshot is promoted to `audit_committed` and becomes eligible for authoritative resolution.
+  6. **P0-04 Prior Consent Enforcement Boundary:** P0-04 must verify active, tenant-scoped student consent for `repo_verification` before fetching repository content, retaining blobs, generating ingestion records, and registering snapshots.
+- **Consequences:** Eliminates single point of failure in physical rollback. Guarantees that even with 100% compensating rollback failure, unaudited evidence can never be resolved authoritatively. P0-05 is completely hardened and frozen.
+
+
 
 
 
