@@ -496,7 +496,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
       expect(() => tokenCipher.decrypt(tamperedTag)).toThrow(/AUTHENTICATED_DECRYPTION_FAILED/);
     });
 
-    it('1.10. Authorization URL generation uses default read-only scope "read:user public_repo" space-separated', async () => {
+    it('1.10. Authorization URL generation uses default public repository scope "read:user public_repo" space-separated', async () => {
       const initRes = await app.inject({
         method: 'GET',
         url: '/api/integrations/github/connect',
@@ -573,6 +573,93 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
       expect(cbRes.json().error).toContain('INSUFFICIENT_GITHUB_PERMISSIONS');
 
       // Reset mock client
+      mockGitHubClient.mockScopeOverride = undefined;
+    });
+
+    it('1.12a. Callback rejects token with only "read:user" (missing "public_repo") with 403 INSUFFICIENT_GITHUB_PERMISSIONS', async () => {
+      const initRes = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/github/connect',
+        headers: {
+          authorization: `Bearer ${student1Token}`,
+          'x-org-id': collegeAOrgId,
+        },
+      });
+      const { state } = initRes.json();
+
+      // Only read:user granted
+      mockGitHubClient.mockScopeOverride = 'read:user';
+
+      const cbRes = await app.inject({
+        method: 'GET',
+        url: `/api/integrations/github/callback?code=mock-code-readuser-only&state=${state}`,
+        headers: {
+          authorization: `Bearer ${student1Token}`,
+          'x-org-id': collegeAOrgId,
+        },
+      });
+
+      expect(cbRes.statusCode).toBe(403);
+      expect(cbRes.json().error).toContain('INSUFFICIENT_GITHUB_PERMISSIONS');
+
+      mockGitHubClient.mockScopeOverride = undefined;
+    });
+
+    it('1.12b. Callback rejects token with only "public_repo" (missing "read:user") with 403 INSUFFICIENT_GITHUB_PERMISSIONS', async () => {
+      const initRes = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/github/connect',
+        headers: {
+          authorization: `Bearer ${student1Token}`,
+          'x-org-id': collegeAOrgId,
+        },
+      });
+      const { state } = initRes.json();
+
+      // Only public_repo granted
+      mockGitHubClient.mockScopeOverride = 'public_repo';
+
+      const cbRes = await app.inject({
+        method: 'GET',
+        url: `/api/integrations/github/callback?code=mock-code-publicrepo-only&state=${state}`,
+        headers: {
+          authorization: `Bearer ${student1Token}`,
+          'x-org-id': collegeAOrgId,
+        },
+      });
+
+      expect(cbRes.statusCode).toBe(403);
+      expect(cbRes.json().error).toContain('INSUFFICIENT_GITHUB_PERMISSIONS');
+
+      mockGitHubClient.mockScopeOverride = undefined;
+    });
+
+    it('1.12c. Callback accepts GitHub App fine-grained permissions ("contents:read metadata:read")', async () => {
+      const initRes = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/github/connect',
+        headers: {
+          authorization: `Bearer ${student1Token}`,
+          'x-org-id': collegeAOrgId,
+        },
+      });
+      const { state } = initRes.json();
+
+      // GitHub App permissions
+      mockGitHubClient.mockScopeOverride = 'contents:read metadata:read';
+
+      const cbRes = await app.inject({
+        method: 'GET',
+        url: `/api/integrations/github/callback?code=mock-code-github-app&state=${state}`,
+        headers: {
+          authorization: `Bearer ${student1Token}`,
+          'x-org-id': collegeAOrgId,
+        },
+      });
+
+      expect(cbRes.statusCode).toBe(200);
+      expect(cbRes.json().success).toBe(true);
+
       mockGitHubClient.mockScopeOverride = undefined;
     });
 
@@ -1090,6 +1177,76 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
       expect(record?.manifest.length).toBe(2);
       expect(record?.manifest[0].filePath).toBe('src/math.ts');
       expect(record?.manifest[0].blobSha).toBe(file1BlobSha);
+
+      // Verify Audit Actor Identity: actor_id is the authenticated user (studentUser1.id), NOT student1RecordId
+      const events = await auditRepo.getEventsForTenant({
+        orgId: collegeAOrgId,
+        userId: studentUser1.id,
+        role: 'student',
+      });
+      const snapshotEvents = events.filter((e) => e.action === 'TRUSTED_SNAPSHOT_INGESTED');
+      expect(snapshotEvents.length).toBe(2);
+      for (const ev of snapshotEvents) {
+        expect(ev.actorId).toBe(studentUser1.id);
+        expect(ev.actorId).not.toBe(student1RecordId);
+        expect((ev.metadata as any)?.studentId).toBe(student1RecordId);
+      }
+    });
+
+    it('3.1b. Officer-initiated ingestion preserves officer actor identity while snapshot belongs to student', async () => {
+      // Officer ingests repository for student1
+      const ingestRes = await app.inject({
+        method: 'POST',
+        url: '/api/evidence/repositories/ingest',
+        headers: {
+          authorization: `Bearer ${officerToken}`,
+          'x-org-id': collegeAOrgId,
+        },
+        payload: {
+          owner: 'alice',
+          repo: 'my-project',
+          ref: 'main',
+          studentId: student1RecordId,
+        },
+      });
+
+      expect(ingestRes.statusCode).toBe(201);
+      const resData = ingestRes.json();
+      expect(resData.success).toBe(true);
+
+      // Verify Audit Actor: actor_id is officerUser.id, NOT student1RecordId or studentUser1.id
+      const events = await auditRepo.getEventsForTenant({
+        orgId: collegeAOrgId,
+        userId: officerUser.id,
+        role: 'officer',
+      });
+      const officerEvents = events.filter((e) => e.action === 'TRUSTED_SNAPSHOT_INGESTED');
+      expect(officerEvents.length).toBeGreaterThanOrEqual(2);
+      const latestOfficerEvents = officerEvents.slice(-2);
+      for (const ev of latestOfficerEvents) {
+        expect(ev.actorId).toBe(officerUser.id);
+        expect(ev.actorId).not.toBe(student1RecordId);
+        expect((ev.metadata as any)?.studentId).toBe(student1RecordId);
+      }
+    });
+
+    it('3.1c. StaticRepoIngestionService fails closed when repositoryRepo is not configured', async () => {
+      const unbackedService = new StaticRepoIngestionService({
+        githubClient: mockGitHubClient,
+        githubAccountService,
+        consentRepo,
+        trustedIngestionStore,
+        snapshotStore,
+        anchorService,
+        // repositoryRepo intentionally omitted
+      });
+
+      await expect(
+        unbackedService.ingestRepository(
+          { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+          { owner: 'alice', repo: 'my-project', ref: 'main', studentId: student1RecordId }
+        )
+      ).rejects.toThrow('REPOSITORY_REPOSITORY_REQUIRED: Cannot ingest repository without configured IRepositoryRepository.');
     });
 
     it('3.2. Tampered blob content (Git blob SHA mismatch) fails verification fail-closed', async () => {

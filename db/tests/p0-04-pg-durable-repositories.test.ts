@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import pg from 'pg';
 import crypto, { randomUUID } from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import {
   PgSourceSnapshotStore,
 } from '../../apps/api/src/repositories/pg-source-snapshot-store.js';
@@ -16,6 +18,12 @@ import {
 import {
   PgRepositoryRepository,
 } from '../../apps/api/src/repositories/repository-repository.js';
+import {
+  PgTenantRepository,
+} from '../../apps/api/src/repositories/tenant-repository.js';
+import {
+  PgConsentRepository,
+} from '../../apps/api/src/repositories/consent-repository.js';
 import {
   SourceSnapshot,
   TrustedIngestionRecord,
@@ -65,6 +73,8 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
   let credentialRepo: PgGitHubCredentialRepository;
   let jobRepo: PgIngestionJobRepository;
   let repoRepository: PgRepositoryRepository;
+  let tenantRepo: PgTenantRepository;
+  let consentRepo: PgConsentRepository;
 
   const cleanupFixtures = async () => {
     const client = await pool.connect();
@@ -98,6 +108,20 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
     credentialRepo = new PgGitHubCredentialRepository(pool);
     jobRepo = new PgIngestionJobRepository(pool);
     repoRepository = new PgRepositoryRepository(pool);
+    tenantRepo = new PgTenantRepository(pool);
+    consentRepo = new PgConsentRepository(pool);
+
+    // Apply migration 012 if not already present
+    const migrationClient = await pool.connect();
+    try {
+      const migrationPath = path.resolve(process.cwd(), 'db/migrations/012_canonical_repository_unique_constraint.sql');
+      if (fs.existsSync(migrationPath)) {
+        const migrationSql = fs.readFileSync(migrationPath, 'utf8');
+        await migrationClient.query(migrationSql);
+      }
+    } finally {
+      migrationClient.release();
+    }
 
     // Initial cleanup
     await cleanupFixtures();
@@ -152,7 +176,7 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
       const verifier = crypto.randomBytes(32).toString('base64url');
       const ctxA: SessionContext = {
         orgId: COLLEGE_A,
-        userId: STUDENT_A,
+        userId: USER_A,
         role: 'student',
       };
 
@@ -182,7 +206,7 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
       const verifier = crypto.randomBytes(32).toString('base64url');
       const ctxB: SessionContext = {
         orgId: COLLEGE_B,
-        userId: STUDENT_B,
+        userId: USER_B,
         role: 'student',
       };
 
@@ -203,7 +227,7 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
       // State remains unconsumed for COLLEGE_A
       const ctxA: SessionContext = {
         orgId: COLLEGE_A,
-        userId: STUDENT_A,
+        userId: USER_A,
         role: 'student',
       };
       const validConsumed = await credentialRepo.consumeOAuthState(ctxA, state);
@@ -216,7 +240,7 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
       const verifier = crypto.randomBytes(32).toString('base64url');
       const ctxA: SessionContext = {
         orgId: COLLEGE_A,
-        userId: STUDENT_A,
+        userId: USER_A,
         role: 'student',
       };
 
@@ -237,7 +261,7 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
     it('1.4. Saves encrypted connected account, retrieves it, and revokes it cleanly', async () => {
       const ctx: SessionContext = {
         orgId: COLLEGE_A,
-        userId: STUDENT_A,
+        userId: USER_A,
         role: 'student',
       };
 
@@ -488,7 +512,7 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
     it('4.1. Creates job, updates status to completed, and retrieves progress', async () => {
       const ctx: SessionContext = {
         orgId: COLLEGE_A,
-        userId: STUDENT_A,
+        userId: USER_A,
         role: 'student',
       };
 
@@ -534,13 +558,13 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
   describe('5. PgRepositoryRepository (Canonical Repository Database Records)', () => {
     const ctxA: SessionContext = {
       orgId: COLLEGE_A,
-      userId: STUDENT_A,
+      userId: USER_A,
       role: 'student',
     };
 
     const ctxB: SessionContext = {
       orgId: COLLEGE_B,
-      userId: STUDENT_B,
+      userId: USER_B,
       role: 'student',
     };
 
@@ -741,6 +765,151 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
         STUDENT_A
       );
       expect(fetchedSnapshot?.repositoryId).toBe(canonicalRepo.id);
+    });
+
+    it('5.7. Distinct users.id and students.id verified via PgTenantRepository', async () => {
+      const student = await tenantRepo.getStudentByUserId(ctxA, USER_A);
+      expect(student).not.toBeNull();
+      expect(student?.id).toBe(STUDENT_A);
+      expect(student?.userId).toBe(USER_A);
+      expect(student?.id).not.toBe(student?.userId);
+
+      const studentB = await tenantRepo.getStudentByUserId(ctxB, USER_B);
+      expect(studentB).not.toBeNull();
+      expect(studentB?.id).toBe(STUDENT_B);
+      expect(studentB?.userId).toBe(USER_B);
+      expect(studentB?.id).not.toBe(studentB?.userId);
+    });
+
+    it('5.8. Concurrency-safe canonical repository registration: parallel requests return identical ID', async () => {
+      const parallelCalls = Array.from({ length: 5 }, () =>
+        repoRepository.getOrCreateRepository(ctxA, {
+          studentId: STUDENT_A,
+          providerRepoId: 'concurrent-repo-999',
+          url: 'https://github.com/alice/concurrent-repo',
+          defaultBranch: 'main',
+          consentGrantId: CONSENT_A,
+        })
+      );
+
+      const results = await Promise.all(parallelCalls);
+      const firstId = results[0].id;
+      for (const res of results) {
+        expect(res.id).toBe(firstId);
+        expect(res.studentId).toBe(STUDENT_A);
+        expect(res.providerRepoId).toBe('concurrent-repo-999');
+      }
+
+      // Verify in DB that only one canonical row exists
+      const client = await pool.connect();
+      try {
+        const countRes = await client.query(
+          `SELECT COUNT(*)::int as count FROM repositories WHERE student_id = $1 AND provider_repo_id = $2;`,
+          [STUDENT_A, 'concurrent-repo-999']
+        );
+        expect(countRes.rows[0].count).toBe(1);
+      } finally {
+        client.release();
+      }
+    });
+
+    it('5.9. Consent revocation quarantines source snapshots and marks trusted records revoked', async () => {
+      // Create dedicated consent grant, repository, trusted record, and snapshot for revocation testing
+      const revConsent = await consentRepo.grantConsent(ctxA, STUDENT_A, 'repo_verification', 1);
+      const revRepo = await repoRepository.getOrCreateRepository(ctxA, {
+        studentId: STUDENT_A,
+        providerRepoId: 'revocation-test-repo',
+        url: 'https://github.com/alice/revocation-test-repo',
+        defaultBranch: 'main',
+        consentGrantId: revConsent.id,
+      });
+
+      const revIngestionId = randomUUID();
+      const revCommitSha = 'ca80000000000000000000000000000000000001';
+      const revTreeSha = 'bee8000000000000000000000000000000000002';
+      const fileBytes = Buffer.from('console.log("revoked");\n', 'utf8');
+      const blobSha = computeGitBlobSha(fileBytes);
+      const rawFileHash = computeRawFileHash(fileBytes);
+
+      await trustedIngestionStore.saveRecord({
+        ingestionId: revIngestionId,
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: revRepo.id,
+        commitSha: revCommitSha,
+        treeSha: revTreeSha,
+        verifiedAt: new Date().toISOString(),
+        provenance: 'trusted_ingestion_pipeline',
+        manifest: [{ filePath: 'src/rev.ts', blobSha, rawFileHash, byteSize: fileBytes.length }],
+      });
+
+      await snapshotStore.saveSnapshot({
+        snapshotId: randomUUID(),
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: revRepo.id,
+        commitSha: revCommitSha,
+        filePath: 'src/rev.ts',
+        rawBytes: fileBytes,
+        rawFileHash,
+        blobSha,
+        capturedAt: new Date().toISOString(),
+        provenance: 'trusted_ingestion_pipeline',
+        ingestionId: revIngestionId,
+        registrationState: 'audit_committed',
+      });
+
+      // Revoke both fixture consent and test consent to test student-level purpose revocation
+      await consentRepo.revokeConsent(ctxA, CONSENT_A, 'Initial fixture revocation');
+      const revResult = await consentRepo.revokeConsent(ctxA, revConsent.id, 'Student withdrawal');
+      expect(revResult.success).toBe(true);
+
+      // Verify active consent is completely revoked for STUDENT_A
+      const hasActive = await consentRepo.hasActiveConsent(ctxA, STUDENT_A, 'repo_verification');
+      expect(hasActive).toBe(false);
+
+      // Verify snapshot is quarantined
+      const client = await pool.connect();
+      try {
+        const snapRes = await client.query(
+          `SELECT registration_state FROM source_snapshots WHERE ingestion_id = $1;`,
+          [revIngestionId]
+        );
+        expect(snapRes.rows.length).toBe(1);
+        expect(snapRes.rows[0].registration_state).toBe('quarantined');
+      } finally {
+        client.release();
+      }
+    });
+
+    it('5.10. Subsequent re-consent and re-ingestion links canonical repository to new grant while quarantined snapshots stay quarantined', async () => {
+      // Student grants new consent
+      const newConsent = await consentRepo.grantConsent(ctxA, STUDENT_A, 'repo_verification', 1);
+      expect(newConsent).toBeDefined();
+
+      // Re-register the repository under new consent
+      const updatedRepo = await repoRepository.getOrCreateRepository(ctxA, {
+        studentId: STUDENT_A,
+        providerRepoId: 'revocation-test-repo',
+        url: 'https://github.com/alice/revocation-test-repo',
+        defaultBranch: 'main',
+        consentGrantId: newConsent.id,
+      });
+
+      expect(updatedRepo.consentGrantId).toBe(newConsent.id);
+
+      // Verify old quarantined snapshots remain quarantined (not resurrected)
+      const client = await pool.connect();
+      try {
+        const snapRes = await client.query(
+          `SELECT registration_state FROM source_snapshots WHERE repository_id = $1 AND file_path = 'src/rev.ts';`,
+          [updatedRepo.id]
+        );
+        expect(snapRes.rows.length).toBe(1);
+        expect(snapRes.rows[0].registration_state).toBe('quarantined');
+      } finally {
+        client.release();
+      }
     });
   });
 });

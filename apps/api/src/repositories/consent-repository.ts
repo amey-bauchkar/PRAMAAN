@@ -269,6 +269,7 @@ export class PgConsentRepository implements IConsentRepository {
       let localTokenPurged = false;
       let withdrawnEvidenceCount = 0;
       let downgradedSkillsCount = 0;
+      let quarantinedSnapshotCount = 0;
 
       if (grant.purpose === 'repo_verification') {
         // A. Purge connected OAuth tokens
@@ -300,6 +301,22 @@ export class PgConsentRepository implements IConsentRepository {
             );
         `, [grant.student_id]);
         downgradedSkillsCount = skillRes.rowCount ?? 0;
+
+        // D. Quarantine source snapshots to ensure revoked content is inaccessible for authoritative resolution
+        const snapRes = await client.query(`
+          UPDATE source_snapshots
+          SET registration_state = 'quarantined'
+          WHERE student_id = $1;
+        `, [grant.student_id]);
+        quarantinedSnapshotCount = snapRes.rowCount ?? 0;
+
+        // E. Cancel pending ingestion jobs
+        await client.query(`
+          UPDATE ingestion_jobs
+          SET status = 'failed',
+              diagnostics = jsonb_set(COALESCE(diagnostics, '{}'::jsonb), '{error}', '"CONSENT_REVOKED"')
+          WHERE student_id = $1 AND status IN ('queued', 'running', 'fetching_tree', 'persisted');
+        `, [grant.student_id]);
       }
 
       const providerRevocationStatus = (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET)
@@ -307,6 +324,16 @@ export class PgConsentRepository implements IConsentRepository {
         : 'sandbox_inert';
 
       if (this.auditRepository) {
+        const auditMetadata = {
+          studentId: grant.student_id,
+          purpose: grant.purpose,
+          reason,
+          localTokenPurged,
+          providerRevocationStatus,
+          withdrawnEvidenceCount,
+          downgradedSkillsCount,
+          quarantinedSnapshotCount,
+        };
         if (this.auditRepository.logInTransaction) {
           await this.auditRepository.logInTransaction(
             client,
@@ -314,15 +341,7 @@ export class PgConsentRepository implements IConsentRepository {
             'CONSENT_REVOKED',
             'consent_grant',
             grantId,
-            {
-              studentId: grant.student_id,
-              purpose: grant.purpose,
-              reason,
-              localTokenPurged,
-              providerRevocationStatus,
-              withdrawnEvidenceCount,
-              downgradedSkillsCount
-            }
+            auditMetadata
           );
         } else {
           await this.auditRepository.log(
@@ -330,15 +349,7 @@ export class PgConsentRepository implements IConsentRepository {
             'CONSENT_REVOKED',
             'consent_grant',
             grantId,
-            {
-              studentId: grant.student_id,
-              purpose: grant.purpose,
-              reason,
-              localTokenPurged,
-              providerRevocationStatus,
-              withdrawnEvidenceCount,
-              downgradedSkillsCount
-            }
+            auditMetadata
           );
         }
       }

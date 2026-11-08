@@ -9,17 +9,22 @@ import { ITokenCipher } from './token-cipher.js';
 import { IGitHubCredentialRepository } from '../repositories/github-credential-repository.js';
 
 /**
- * Permitted GitHub OAuth scopes.
+ * Permitted GitHub OAuth scopes and fine-grained permissions.
  *
  * For GitHub Apps (production standard): fine-grained read-only permissions
- * ('contents:read', 'metadata:read') are configured on the App itself.
+ * ('contents:read', 'metadata:read') are configured on the GitHub App registration.
  *
- * For OAuth Apps (developer / legacy fallback):
- * - 'read:user': standard minimal read-only scope for student identity verification.
+ * For OAuth Apps (developer / fallback):
+ * - 'read:user': standard scope for student identity verification.
  * - 'user:email': read-only email access.
- * - 'public_repo': access to public repositories only.
+ * - 'public_repo': access to public repositories.
+ *   NOTE: According to GitHub's official OAuth documentation, the 'public_repo' scope
+ *   grants read and write access to public repositories. PRAMAAN strictly enforces
+ *   read-only operations in application code (fetching commits, trees, and blobs)
+ *   and never issues any mutating or write operations against student repositories.
  *
- * Broad 'repo' scope is strictly rejected under public-repository-only architecture.
+ * Monolithic 'repo' scope (which grants full access to private repositories) is
+ * strictly rejected under PRAMAAN's public-repository-only architecture.
  */
 export const ALLOWED_GITHUB_OAUTH_SCOPES = [
   'read:user',
@@ -176,12 +181,16 @@ export class GitHubAccountService {
       ? tokenRes.scope.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean)
       : [];
 
-    const hasRequiredScope = grantedScopes.some((s) =>
-      ['read:user', 'public_repo'].includes(s)
-    );
-    if (!hasRequiredScope) {
+    // For standard OAuth: both 'read:user' (identity) and 'public_repo' (repo access) are required.
+    // For GitHub App installations: 'contents:read' and 'metadata:read' (or 'read:user') are permitted.
+    const hasOAuthScopes = grantedScopes.includes('read:user') && grantedScopes.includes('public_repo');
+    const hasAppScopes =
+      grantedScopes.includes('contents:read') &&
+      (grantedScopes.includes('metadata:read') || grantedScopes.includes('read:user'));
+
+    if (!hasOAuthScopes && !hasAppScopes) {
       throw new Error(
-        'INSUFFICIENT_GITHUB_PERMISSIONS: GitHub OAuth token was granted with insufficient permissions or scopes.'
+        'INSUFFICIENT_GITHUB_PERMISSIONS: GitHub authorization was granted with insufficient scopes. Both "read:user" and "public_repo" (or GitHub App "contents:read" and "metadata:read") are required.'
       );
     }
 

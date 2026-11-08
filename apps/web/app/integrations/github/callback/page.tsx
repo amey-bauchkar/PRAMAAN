@@ -1,6 +1,6 @@
 'use client';
 
-import React, { Suspense, useEffect, useState } from 'react';
+import React, { Suspense, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 
 interface CallbackState {
@@ -14,12 +14,25 @@ function GitHubCallbackContent() {
   const searchParams = useSearchParams();
   const code = searchParams.get('code');
   const state = searchParams.get('state');
+  const errorParam = searchParams.get('error');
+  const errorDescription = searchParams.get('error_description');
 
   const [callbackState, setCallbackState] = useState<CallbackState>({
     status: 'idle',
   });
 
+  const hasTriggered = useRef(false);
+
   useEffect(() => {
+    // 1. Explicitly handle GitHub authorization denial
+    if (errorParam) {
+      setCallbackState({
+        status: 'error',
+        error: `GitHub authorization was denied: ${errorDescription || errorParam}`,
+      });
+      return;
+    }
+
     if (!code || !state) {
       setCallbackState({
         status: 'error',
@@ -27,6 +40,12 @@ function GitHubCallbackContent() {
       });
       return;
     }
+
+    // 2. StrictMode Guard: prevent double-invocation under React development mode
+    if (hasTriggered.current) {
+      return;
+    }
+    hasTriggered.current = true;
 
     // Read active session token and tenant header from client storage if available
     const win = typeof globalThis !== 'undefined' ? (globalThis as any) : null;
@@ -67,6 +86,13 @@ function GitHubCallbackContent() {
         if (!res.ok) {
           throw new Error(data.error || `Server responded with HTTP ${res.status}`);
         }
+
+        // 3. Clear sensitive temporary code and state query parameters from browser URL
+        if (win?.history?.replaceState) {
+          const cleanUrl = win?.location?.pathname || '/integrations/github/callback';
+          win.history.replaceState({}, win?.document?.title || '', cleanUrl);
+        }
+
         setCallbackState({
           status: 'success',
           githubUsername: data.githubUsername,
@@ -79,7 +105,7 @@ function GitHubCallbackContent() {
           error: err.message,
         });
       });
-  }, [code, state]);
+  }, [code, state, errorParam, errorDescription]);
 
   return (
     <div style={{ maxWidth: '600px', margin: '4rem auto', padding: '2rem', border: '1px solid #e2e8f0', borderRadius: '8px' }}>

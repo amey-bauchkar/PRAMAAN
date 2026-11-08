@@ -197,20 +197,20 @@ export class StaticRepoIngestionService {
       }
 
       // 6. Resolve or create canonical repository record in database
-      let repositoryId: string;
-      if (this.repositoryRepo) {
-        const repoRecord = await this.repositoryRepo.getOrCreateRepository(context, {
-          studentId: targetStudentId,
-          providerRepoId: String(access.repoId),
-          url: `https://github.com/${request.owner}/${request.repo}`,
-          defaultBranch: access.defaultBranch || request.ref || 'main',
-          consentGrantId: activeGrant.id,
-          requestedRepositoryId: request.repositoryId,
-        });
-        repositoryId = repoRecord.id;
-      } else {
-        repositoryId = request.repositoryId || crypto.randomUUID();
+      if (!this.repositoryRepo) {
+        throw new Error(
+          'REPOSITORY_REPOSITORY_REQUIRED: Cannot ingest repository without configured IRepositoryRepository.'
+        );
       }
+      const repoRecord = await this.repositoryRepo.getOrCreateRepository(context, {
+        studentId: targetStudentId,
+        providerRepoId: String(access.repoId),
+        url: `https://github.com/${request.owner}/${request.repo}`,
+        defaultBranch: access.defaultBranch || request.ref || 'main',
+        consentGrantId: activeGrant.id,
+        requestedRepositoryId: request.repositoryId,
+      });
+      const repositoryId = repoRecord.id;
 
       // 7. Initialize tracking job if outbox/job repo is available
       if (this.ingestionJobRepo) {
@@ -406,7 +406,8 @@ export class StaticRepoIngestionService {
       let registeredCount = 0;
       const anchorContext: SessionContext = {
         ...context,
-        userId: targetStudentId,
+        userId: context.role === 'student' ? targetStudentId : context.userId,
+        actorUserId: context.userId,
       };
       for (const snapshot of verifiedSnapshots) {
         await this.anchorService.registerTrustedSnapshot(anchorContext, verifiedRecord, snapshot);

@@ -89,17 +89,24 @@ export class InMemoryRepositoryRepository implements IRepositoryRepository {
           `REPOSITORY_PROVIDER_MISMATCH: Repository '${params.requestedRepositoryId}' providerRepoId '${existing.providerRepoId}' does not match verified GitHub repo '${params.providerRepoId}'.`
         );
       }
+      existing.consentGrantId = params.consentGrantId;
+      existing.url = params.url;
+      if (params.defaultBranch) {
+        existing.defaultBranch = params.defaultBranch;
+      }
       return existing;
     }
 
     // 2. Check if a repository already exists for this student and providerRepoId
-    const existing = await this.findRepositoryByProviderId(
-      context,
-      params.studentId,
-      'github',
-      params.providerRepoId
-    );
-    if (existing) {
+    const key = `${params.studentId}:github:${params.providerRepoId}`;
+    const existingId = this.providerIndex.get(key);
+    if (existingId) {
+      const existing = this.repositories.get(existingId)!;
+      existing.consentGrantId = params.consentGrantId;
+      existing.url = params.url;
+      if (params.defaultBranch) {
+        existing.defaultBranch = params.defaultBranch;
+      }
       return existing;
     }
 
@@ -117,7 +124,7 @@ export class InMemoryRepositoryRepository implements IRepositoryRepository {
     };
 
     this.repositories.set(id, record);
-    this.providerIndex.set(`${params.studentId}:github:${params.providerRepoId}`, id);
+    this.providerIndex.set(key, id);
     return record;
   }
 }
@@ -202,29 +209,55 @@ export class PgRepositoryRepository implements IRepositoryRepository {
           `REPOSITORY_PROVIDER_MISMATCH: Repository '${params.requestedRepositoryId}' providerRepoId '${existing.providerRepoId}' does not match verified GitHub repo '${params.providerRepoId}'.`
         );
       }
+      // If consent grant changed or needs updating, update within tenant transaction
+      if (
+        existing.consentGrantId !== params.consentGrantId ||
+        existing.url !== params.url ||
+        (params.defaultBranch && existing.defaultBranch !== params.defaultBranch)
+      ) {
+        return withTenantTransaction(context, async (client) => {
+          const updateQuery = `
+            UPDATE repositories
+            SET consent_grant_id = $1, url = $2, default_branch = $3
+            WHERE id = $4
+            RETURNING id, student_id, provider, provider_repo_id, url, default_branch, consent_grant_id, imported_at;
+          `;
+          const res = await client.query(updateQuery, [
+            params.consentGrantId,
+            params.url,
+            params.defaultBranch || existing.defaultBranch,
+            existing.id,
+          ]);
+          const row = res.rows[0];
+          return {
+            id: row.id,
+            studentId: row.student_id,
+            provider: row.provider,
+            providerRepoId: row.provider_repo_id,
+            url: row.url,
+            defaultBranch: row.default_branch,
+            consentGrantId: row.consent_grant_id,
+            importedAt: new Date(row.imported_at).toISOString(),
+          };
+        }, this.pool);
+      }
       return existing;
     }
 
-    // 2. Check if repository already exists in database
-    const existing = await this.findRepositoryByProviderId(
-      context,
-      params.studentId,
-      'github',
-      params.providerRepoId
-    );
-    if (existing) {
-      return existing;
-    }
-
-    // 3. Insert new canonical repository row under tenant transaction
+    // 2. Concurrency-safe atomic insert/upsert using unique constraint (student_id, provider, provider_repo_id)
     return withTenantTransaction(context, async (client) => {
-      const insertQuery = `
+      const upsertQuery = `
         INSERT INTO repositories (
           student_id, provider, provider_repo_id, url, default_branch, consent_grant_id
         ) VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (student_id, provider, provider_repo_id)
+        DO UPDATE SET
+          url = EXCLUDED.url,
+          default_branch = EXCLUDED.default_branch,
+          consent_grant_id = EXCLUDED.consent_grant_id
         RETURNING id, student_id, provider, provider_repo_id, url, default_branch, consent_grant_id, imported_at;
       `;
-      const res = await client.query(insertQuery, [
+      const res = await client.query(upsertQuery, [
         params.studentId,
         'github',
         params.providerRepoId,

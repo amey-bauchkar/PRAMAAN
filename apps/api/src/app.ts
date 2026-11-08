@@ -787,6 +787,21 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
   // Handle GitHub OAuth Browser Redirect & Direct GET Callback
   app.get('/api/integrations/github/callback', async (req, reply) => {
     const query = req.query as any;
+
+    const isProduction = process.env.NODE_ENV === 'production';
+    let frontendUrl = process.env.FRONTEND_URL;
+    if (isProduction && (!frontendUrl || frontendUrl.includes('localhost') || frontendUrl.includes('127.0.0.1'))) {
+      return reply.status(500).send({
+        error: 'PRODUCTION_CONFIG_ERROR: FRONTEND_URL must be configured with a valid non-localhost URL in production.',
+      });
+    }
+    frontendUrl = frontendUrl || 'http://localhost:3000';
+
+    if (query?.error) {
+      const target = `${frontendUrl}/integrations/github/callback?error=${encodeURIComponent(query.error)}&error_description=${encodeURIComponent(query.error_description || '')}`;
+      return reply.status(302).redirect(target);
+    }
+
     if (!query?.code || !query?.state) {
       return reply.status(400).send({ error: 'Missing required OAuth callback parameters: code, state' });
     }
@@ -794,7 +809,6 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     const authHeader = req.headers['authorization'];
     if (!authHeader) {
       // Browser redirect from GitHub lacks Bearer token; 302 redirect to frontend callback handler
-      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
       const target = `${frontendUrl}/integrations/github/callback?code=${encodeURIComponent(query.code)}&state=${encodeURIComponent(query.state)}`;
       return reply.status(302).redirect(target);
     }
@@ -859,6 +873,11 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     }
 
     const body = req.body as any;
+    if (body?.error) {
+      return reply.status(400).send({
+        error: `GITHUB_AUTHORIZATION_DENIED: ${body.error_description || body.error}`,
+      });
+    }
     if (!body?.code || !body?.state) {
       return reply.status(400).send({ error: 'Missing required OAuth callback parameters: code, state' });
     }
