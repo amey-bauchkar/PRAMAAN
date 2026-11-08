@@ -63,6 +63,12 @@ export interface GitHubBlobResponse {
   encoding: 'base64' | 'utf-8';
 }
 
+export interface GitHubRevocationResult {
+  success: boolean;
+  statusCode?: number;
+  error?: string;
+}
+
 export interface IGitHubClient {
   exchangeOAuthCode(
     code: string,
@@ -75,14 +81,16 @@ export interface IGitHubClient {
   verifyRepositoryAccess(
     accessToken: string,
     owner: string,
-    repo: string
+    repo: string,
+    signal?: AbortSignal
   ): Promise<GitHubRepoAccessResponse>;
 
   resolveCommit(
     accessToken: string,
     owner: string,
     repo: string,
-    ref: string
+    ref: string,
+    signal?: AbortSignal
   ): Promise<GitHubCommitResponse>;
 
   getTree(
@@ -90,15 +98,22 @@ export interface IGitHubClient {
     owner: string,
     repo: string,
     treeSha: string,
-    recursive?: boolean
+    recursive?: boolean,
+    signal?: AbortSignal
   ): Promise<GitHubTreeResponse>;
 
   getBlob(
     accessToken: string,
     owner: string,
     repo: string,
-    blobSha: string
+    blobSha: string,
+    signal?: AbortSignal
   ): Promise<GitHubBlobResponse>;
+
+  revokeOAuthGrant(
+    accessToken: string,
+    signal?: AbortSignal
+  ): Promise<GitHubRevocationResult>;
 }
 
 export interface GitHubClientOptions {
@@ -207,10 +222,23 @@ export class DefaultGitHubClient implements IGitHubClient {
     };
   }
 
+  private checkRateLimit(res: Response): void {
+    if (res.status === 403 || res.status === 429) {
+      const remaining = res.headers?.get?.('x-ratelimit-remaining');
+      const retryAfter = res.headers?.get?.('retry-after');
+      if (remaining === '0' || res.status === 429) {
+        throw new Error(
+          `GITHUB_RATE_LIMIT_EXCEEDED: GitHub API rate limit reached (HTTP ${res.status}, remaining=${remaining ?? 'none'}, retry_after=${retryAfter ?? 'none'})`
+        );
+      }
+    }
+  }
+
   public async verifyRepositoryAccess(
     accessToken: string,
     owner: string,
-    repo: string
+    repo: string,
+    signal?: AbortSignal
   ): Promise<GitHubRepoAccessResponse> {
     this.validateOwnerAndRepo(owner, repo);
 
@@ -220,7 +248,10 @@ export class DefaultGitHubClient implements IGitHubClient {
         'Accept': 'application/vnd.github.v3+json',
         'User-Agent': 'PRAMAAN-Ingestion-Service',
       },
+      signal,
     });
+
+    this.checkRateLimit(res);
 
     if (res.status === 404 || res.status === 403) {
       return {
@@ -254,7 +285,8 @@ export class DefaultGitHubClient implements IGitHubClient {
     accessToken: string,
     owner: string,
     repo: string,
-    ref: string
+    ref: string,
+    signal?: AbortSignal
   ): Promise<GitHubCommitResponse> {
     this.validateOwnerAndRepo(owner, repo);
 
@@ -265,7 +297,10 @@ export class DefaultGitHubClient implements IGitHubClient {
         'Accept': 'application/vnd.github.v3+json',
         'User-Agent': 'PRAMAAN-Ingestion-Service',
       },
+      signal,
     });
+
+    this.checkRateLimit(res);
 
     if (!res.ok) {
       throw new Error(`GITHUB_COMMIT_NOT_FOUND: Ref '${ref}' on ${owner}/${repo} returned HTTP ${res.status}`);
@@ -292,7 +327,8 @@ export class DefaultGitHubClient implements IGitHubClient {
     owner: string,
     repo: string,
     treeSha: string,
-    recursive = false
+    recursive = false,
+    signal?: AbortSignal
   ): Promise<GitHubTreeResponse> {
     this.validateOwnerAndRepo(owner, repo);
 
@@ -305,8 +341,11 @@ export class DefaultGitHubClient implements IGitHubClient {
           'Accept': 'application/vnd.github.v3+json',
           'User-Agent': 'PRAMAAN-Ingestion-Service',
         },
+        signal,
       }
     );
+
+    this.checkRateLimit(res);
 
     if (!res.ok) {
       throw new Error(`GITHUB_TREE_LOOKUP_FAILED: HTTP ${res.status} for tree '${treeSha}'`);
@@ -331,7 +370,8 @@ export class DefaultGitHubClient implements IGitHubClient {
     accessToken: string,
     owner: string,
     repo: string,
-    blobSha: string
+    blobSha: string,
+    signal?: AbortSignal
   ): Promise<GitHubBlobResponse> {
     this.validateOwnerAndRepo(owner, repo);
 
@@ -343,8 +383,11 @@ export class DefaultGitHubClient implements IGitHubClient {
           'Accept': 'application/vnd.github.v3+json',
           'User-Agent': 'PRAMAAN-Ingestion-Service',
         },
+        signal,
       }
     );
+
+    this.checkRateLimit(res);
 
     if (!res.ok) {
       throw new Error(`GITHUB_BLOB_LOOKUP_FAILED: HTTP ${res.status} for blob '${blobSha}'`);
@@ -358,6 +401,62 @@ export class DefaultGitHubClient implements IGitHubClient {
       encoding: data.encoding || 'base64',
     };
   }
+
+  /**
+   * Genuine GitHub OAuth Application Grant Revocation.
+   * Calls GitHub's documented DELETE /applications/{client_id}/grant API.
+   * Uses Basic authentication with client_id and client_secret.
+   * Never leaks or logs the plaintext access token.
+   */
+  public async revokeOAuthGrant(
+    accessToken: string,
+    signal?: AbortSignal
+  ): Promise<GitHubRevocationResult> {
+    if (!this.clientId || !this.clientSecret) {
+      return {
+        success: false,
+        error: 'MISSING_CLIENT_CREDENTIALS: GITHUB_CLIENT_ID or GITHUB_CLIENT_SECRET not configured',
+      };
+    }
+
+    const authHeader = 'Basic ' + Buffer.from(`${this.clientId}:${this.clientSecret}`).toString('base64');
+    try {
+      const res = await this.fetchFn(`${this.apiBaseUrl}/applications/${this.clientId}/grant`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': authHeader,
+          'Accept': 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+          'User-Agent': 'PRAMAAN-Ingestion-Service',
+        },
+        body: JSON.stringify({ access_token: accessToken }),
+        signal,
+      });
+
+      if (res.status === 204) {
+        return { success: true, statusCode: 204 };
+      }
+
+      let errorMsg = `HTTP_${res.status}`;
+      try {
+        const data = await res.json() as any;
+        if (data?.message) {
+          errorMsg = `${errorMsg}: ${data.message}`;
+        }
+      } catch {}
+
+      return {
+        success: false,
+        statusCode: res.status,
+        error: errorMsg,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err.name === 'AbortError' ? 'NETWORK_TIMEOUT' : `NETWORK_ERROR: ${err.message}`,
+      };
+    }
+  }
 }
 
 /**
@@ -368,7 +467,9 @@ export class MockGitHubClient implements IGitHubClient {
   public totalCallCount = 0;
   public metadataCallCount = 0;
   public contentCallCount = 0;
+  public revokeCallCount = 0;
   public mockScopeOverride?: string;
+  public mockRevokeBehavior?: (token: string) => Promise<GitHubRevocationResult>;
 
   public mockUsers = new Map<string, GitHubUserResponse>();
   public mockRepos = new Map<string, GitHubRepoAccessResponse>();
@@ -380,6 +481,7 @@ export class MockGitHubClient implements IGitHubClient {
     this.totalCallCount = 0;
     this.metadataCallCount = 0;
     this.contentCallCount = 0;
+    this.revokeCallCount = 0;
   }
 
   public async exchangeOAuthCode(
@@ -411,7 +513,8 @@ export class MockGitHubClient implements IGitHubClient {
   public async verifyRepositoryAccess(
     _accessToken: string,
     owner: string,
-    repo: string
+    repo: string,
+    _signal?: AbortSignal
   ): Promise<GitHubRepoAccessResponse> {
     this.totalCallCount++;
     this.metadataCallCount++;
@@ -433,7 +536,8 @@ export class MockGitHubClient implements IGitHubClient {
     _accessToken: string,
     owner: string,
     repo: string,
-    ref: string
+    ref: string,
+    _signal?: AbortSignal
   ): Promise<GitHubCommitResponse> {
     this.totalCallCount++;
     this.contentCallCount++;
@@ -452,7 +556,8 @@ export class MockGitHubClient implements IGitHubClient {
     owner: string,
     repo: string,
     treeSha: string,
-    recursive = false
+    recursive = false,
+    _signal?: AbortSignal
   ): Promise<GitHubTreeResponse> {
     this.totalCallCount++;
     this.contentCallCount++;
@@ -470,13 +575,26 @@ export class MockGitHubClient implements IGitHubClient {
     _accessToken: string,
     _owner: string,
     _repo: string,
-    blobSha: string
+    blobSha: string,
+    _signal?: AbortSignal
   ): Promise<GitHubBlobResponse> {
     this.totalCallCount++;
     this.contentCallCount++;
     const mock = this.mockBlobs.get(blobSha.toLowerCase());
     if (mock) return mock;
     throw new Error(`MOCK_BLOB_NOT_FOUND: No mock blob configured for ${blobSha}`);
+  }
+
+  public async revokeOAuthGrant(
+    accessToken: string,
+    _signal?: AbortSignal
+  ): Promise<GitHubRevocationResult> {
+    this.totalCallCount++;
+    this.revokeCallCount++;
+    if (this.mockRevokeBehavior) {
+      return this.mockRevokeBehavior(accessToken);
+    }
+    return { success: true, statusCode: 204 };
   }
 
   /**

@@ -282,6 +282,44 @@
   5. **Browser Callback Hardening:** Next.js `/integrations/github/callback` page adds `useRef` guard to eliminate double-invocation under React StrictMode development, scrubs temporary `code` and `state` parameters from browser history upon success via `window.history.replaceState`, and explicitly handles GitHub authorization denial errors (`error=access_denied`). Fastify route validates `FRONTEND_URL` in production mode fail-closed.
 - **Consequences:** Eliminates race conditions in canonical repository registration, preserves true audit actor identity across roles, strictly enforces data retention and quarantine on consent revocation, and ensures transparent, least-privilege GitHub authorization with zero regressions.
 
+---
+
+## ADR-19: Provider Revocation Abstraction, Active Consent Uniqueness (Migration 013), Safe Migration 014 Reconciliation, Bounded Tree Traversal, and Ingestion Job Cancellation
+
+- **Status:** Approved & Verified
+- **Context:** An independent backend reliability and consent lifecycle review identified five areas for remediation:
+  1. *Genuine GitHub OAuth Revocation:* Previously, revocation was logged as `revoked_upstream` merely based on the presence of environment credentials without making an actual upstream HTTP call to GitHub's revocation endpoint.
+  2. *Active Consent Uniqueness:* `consent_grants` previously allowed multiple active grants (`revoked_at IS NULL`) for the same student and purpose. Re-consent did not automatically transition previous grants to revoked history, and concurrent grants could race.
+  3. *Safe Canonical Repository Reconciliation (Migration 014):* Migration 012 applied a unique constraint on `(student_id, provider, provider_repo_id)` by executing `DELETE FROM repositories r1 ... WHERE r1.id > r2.id`. In databases with dependent child records (`repo_snapshots`, `evidence_items`, `source_snapshots`, `trusted_ingestion_records`, `ingestion_jobs`), `ON DELETE CASCADE` would destroy student evidence.
+  4. *Bounded Tree Traversal & Rate-Limit Handling:* Recursive tree fetching could traverse unbounded directory hierarchies or download unbounded files, risking memory exhaustion or infinite rate-limit retries.
+  5. *Ingestion Job Transitions on Revocation:* When consent was revoked, running or queued ingestion jobs were not transitioned, risking post-revocation authoritative snapshot registration.
+- **Decision:**
+  1. **Genuine GitHub OAuth Grant Revocation:**
+     - Added `revokeOAuthGrant(accessToken, signal)` to `IGitHubClient`, `DefaultGitHubClient`, and `MockGitHubClient`.
+     - `DefaultGitHubClient` invokes GitHub's documented `DELETE /applications/{client_id}/grant` authenticating via HTTP Basic Auth (`client_id:client_secret`) with JSON body `{ access_token }`.
+     - In `GitHubAccountService.revokeUpstreamGrantAndUnlink()`, upstream HTTP revocation is performed **strictly outside PostgreSQL transactions holding locks**, eliminating connection pool starvation and long lock holds during network latency.
+     - Distinguishes `confirmed` (HTTP 204), `failed` (e.g. 404/422 or network timeout), and `local_only` (sandbox/missing credentials).
+     - Local stored credentials and encrypted tokens are unconditionally purged fail-closed, even if upstream fails.
+     - Plaintext access tokens are never logged or stored in audit records.
+  2. **Active Consent Uniqueness & Partial Unique Index (Migration 013):**
+     - Created `db/migrations/013_active_consent_uniqueness.sql` which deterministically reconciles pre-existing duplicates (preserving latest, revoking older) and creates partial unique index `uq_consent_grants_active_student_purpose ON consent_grants (student_id, purpose) WHERE revoked_at IS NULL`.
+     - In `PgConsentRepository.grantConsent()`, acquires transaction-level advisory lock `pg_advisory_xact_lock(hashtext(student_id || ':' || purpose))` to serialize concurrent grants, updates existing active grants to `revoked_at = CURRENT_TIMESTAMP`, and inserts the new active grant.
+     - In `PgConsentRepository.revokeConsent()`, transitions all active grants for that student and purpose to `revoked_at = CURRENT_TIMESTAMP`, strictly leaving zero active grants.
+  3. **Safe Canonical Repository Reconciliation (Migration 014):**
+     - Created `db/migrations/014_safe_repository_reconciliation.sql` without modifying Migration 012 checksum.
+     - Preflights duplicate repository groups `(student_id, provider, provider_repo_id)`.
+     - Re-parents all child records (`repo_snapshots`, `evidence_items`, `source_snapshots`, `trusted_ingestion_records`, `ingestion_jobs`) to the canonical repository (`imported_at ASC, id ASC`), temporarily managing trigger `trg_trusted_ingestion_immutable`.
+     - Asserts zero duplicate groups remain, and then deletes redundant repository rows safely without data loss.
+  4. **Bounded GitHub Tree Traversal:**
+     - Configured limits: `maxTreeEntries = 5000`, `maxDirectoryTraversals = 100`, `maxTreeApiRequests = 30`, `maxFiles = 200`, `maxWallClockMs = 30000ms`.
+     - Enforces early termination during traversal: halts immediately with `FILE_COUNT_LIMIT_EXCEEDED` once 201 eligible files are discovered.
+     - Handles HTTP 403/429 rate limit errors fail-closed (`GITHUB_RATE_LIMIT_EXCEEDED`) without retry loops.
+     - On any limit failure, records terminal error in `ingestion_jobs` and persists NO manifests or snapshots.
+  5. **Ingestion Job Status Transitions on Revocation:**
+     - Implemented `cancelJobsForStudentOnRevocation(context, studentId)` across interface, in-memory, and PostgreSQL repository adapters.
+     - Transitions all in-progress jobs (`queued`, `resolving`, `fetching`, `verifying`, `persisted`) to `status = 'failed'` with `error = 'CONSENT_REVOKED'`, `diagnostics.revocation_reason = 'CONSENT_REVOKED'`, and `completed_at = CURRENT_TIMESTAMP`. Completed and already-failed jobs are untouched.
+- **Consequences:** Eliminates external network calls inside database transactions, prevents duplicate active consent grants while preserving audit trail, protects historical student evidence from migration data loss, caps ingestion resource consumption, and guarantees that consent revocation immediately cancels in-flight ingestion jobs.
+
 
 
 

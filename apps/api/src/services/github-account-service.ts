@@ -9,22 +9,17 @@ import { ITokenCipher } from './token-cipher.js';
 import { IGitHubCredentialRepository } from '../repositories/github-credential-repository.js';
 
 /**
- * Permitted GitHub OAuth scopes and fine-grained permissions.
+ * Permitted GitHub OAuth scopes.
  *
- * For GitHub Apps (production standard): fine-grained read-only permissions
- * ('contents:read', 'metadata:read') are configured on the GitHub App registration.
+ * NOTE: According to GitHub's official documentation, the 'public_repo' scope
+ * grants read and write access to public repositories. PRAMAAN application code
+ * strictly restricts all operations to read-only access (fetching commits, trees,
+ * and blobs) and never issues mutating or write operations against student repositories.
  *
- * For OAuth Apps (developer / fallback):
- * - 'read:user': standard scope for student identity verification.
- * - 'user:email': read-only email access.
- * - 'public_repo': access to public repositories.
- *   NOTE: According to GitHub's official OAuth documentation, the 'public_repo' scope
- *   grants read and write access to public repositories. PRAMAAN strictly enforces
- *   read-only operations in application code (fetching commits, trees, and blobs)
- *   and never issues any mutating or write operations against student repositories.
- *
- * Monolithic 'repo' scope (which grants full access to private repositories) is
+ * Monolithic 'repo' scope (which grants access to private repositories) is
  * strictly rejected under PRAMAAN's public-repository-only architecture.
+ * Fine-grained GitHub App permissions and private repository ingestion remain
+ * planned for a future milestone; private repositories are currently rejected fail-closed.
  */
 export const ALLOWED_GITHUB_OAUTH_SCOPES = [
   'read:user',
@@ -249,13 +244,82 @@ export class GitHubAccountService {
   }
 
   /**
+   * Genuine Provider-Side Revocation and Local Credential Purge.
+   *
+   * 1. Fetches stored encrypted GitHub access token outside of any mutating database lock.
+   * 2. Decrypts token securely on the server using versioned token cipher.
+   * 3. Invokes GitHub's documented DELETE /applications/{client_id}/grant API.
+   * 4. Authenticates with configured GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET.
+   * 5. Purges local credentials from database regardless of upstream outcome.
+   * 6. Strictly prevents plaintext token leakage in logs, diagnostics, or return values.
+   */
+  public async revokeUpstreamGrantAndUnlink(
+    context: SessionContext,
+    studentId: string
+  ): Promise<{
+    localTokenPurged: boolean;
+    providerRevocationStatus: 'confirmed' | 'failed' | 'local_only';
+    error?: string;
+  }> {
+    let providerRevocationStatus: 'confirmed' | 'failed' | 'local_only' = 'local_only';
+    let upstreamError: string | undefined;
+
+    // 1. Fetch connected account under tenant context (read only, zero DB write locks held)
+    const acc = await this.credentialRepo.getConnectedAccount(context, studentId, context.orgId);
+
+    if (acc && acc.encryptedAccessToken && acc.status !== 'revoked') {
+      let decryptedToken: string | null = null;
+      try {
+        decryptedToken = this.tokenCipher.decrypt(acc.encryptedAccessToken);
+      } catch {
+        providerRevocationStatus = 'failed';
+        upstreamError = 'TOKEN_DECRYPTION_FAILED';
+      }
+
+      if (decryptedToken) {
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 8000);
+          try {
+            const res = await this.githubClient.revokeOAuthGrant(decryptedToken, controller.signal);
+            if (res.success && res.statusCode === 204) {
+              providerRevocationStatus = 'confirmed';
+            } else if (res.error?.startsWith('MISSING_CLIENT_CREDENTIALS')) {
+              providerRevocationStatus = 'local_only';
+              upstreamError = res.error;
+            } else {
+              providerRevocationStatus = 'failed';
+              upstreamError = res.error || `HTTP_${res.statusCode}`;
+            }
+          } finally {
+            clearTimeout(timeoutId);
+          }
+        } catch (err: any) {
+          providerRevocationStatus = 'failed';
+          upstreamError = err.name === 'AbortError' ? 'NETWORK_TIMEOUT' : 'NETWORK_ERROR';
+        }
+      }
+    }
+
+    // 2. Always purge local credentials fail-closed, even if upstream failed or was unreachable
+    const localTokenPurged = await this.credentialRepo.revokeConnectedAccount(context, studentId, context.orgId);
+
+    return {
+      localTokenPurged,
+      providerRevocationStatus,
+      error: upstreamError,
+    };
+  }
+
+  /**
    * Safely revokes and unlinks the connected GitHub account.
    */
   public async unlinkConnection(
     context: SessionContext,
     studentId: string
   ): Promise<boolean> {
-    return this.credentialRepo.revokeConnectedAccount(context, studentId, context.orgId);
+    const res = await this.revokeUpstreamGrantAndUnlink(context, studentId);
+    return res.localTokenPurged;
   }
 
   /**

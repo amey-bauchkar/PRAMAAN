@@ -16,6 +16,7 @@ export interface IIngestionJobRepository {
   ): Promise<void>;
   getJob(context: SessionContext, ingestionId: string): Promise<IngestionJobProgress | null>;
   listJobsForStudent(context: SessionContext, studentId: string): Promise<IngestionJobProgress[]>;
+  cancelJobsForStudentOnRevocation(context: SessionContext, studentId: string): Promise<number>;
 }
 
 export class InMemoryIngestionJobRepository implements IIngestionJobRepository {
@@ -42,6 +43,27 @@ export class InMemoryIngestionJobRepository implements IIngestionJobRepository {
           ? updates?.completedAt || new Date().toISOString()
           : existing.completedAt,
     });
+  }
+
+  public async cancelJobsForStudentOnRevocation(
+    _context: SessionContext,
+    studentId: string
+  ): Promise<number> {
+    const inProgressStatuses: IngestionJobStatus[] = ['queued', 'resolving', 'fetching', 'verifying', 'persisted'];
+    let count = 0;
+    for (const job of this.jobs.values()) {
+      if (job.studentId === studentId && inProgressStatuses.includes(job.status)) {
+        job.status = 'failed';
+        job.error = 'CONSENT_REVOKED';
+        job.diagnostics = {
+          ...job.diagnostics,
+          revocation_reason: 'CONSENT_REVOKED',
+        };
+        job.completedAt = new Date().toISOString();
+        count++;
+      }
+    }
+    return count;
   }
 
   public async getJob(
@@ -258,6 +280,28 @@ export class PgIngestionJobRepository implements IIngestionJobRepository {
         createdAt: new Date(row.started_at).toISOString(),
         completedAt: row.completed_at ? new Date(row.completed_at).toISOString() : null,
       }));
+    }, this.pool);
+  }
+
+  public async cancelJobsForStudentOnRevocation(
+    context: SessionContext,
+    studentId: string
+  ): Promise<number> {
+    return withTenantTransaction(context, async (client) => {
+      const res = await client.query(`
+        UPDATE ingestion_jobs
+        SET status = 'failed',
+            error = 'CONSENT_REVOKED',
+            diagnostics = jsonb_set(
+              COALESCE(diagnostics, '{}'::jsonb),
+              '{revocation_reason}',
+              '"CONSENT_REVOKED"'
+            ),
+            completed_at = CURRENT_TIMESTAMP
+        WHERE student_id = $1
+          AND status IN ('queued', 'resolving', 'fetching', 'verifying', 'persisted');
+      `, [studentId]);
+      return res.rowCount ?? 0;
     }, this.pool);
   }
 }

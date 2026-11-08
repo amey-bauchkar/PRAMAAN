@@ -21,10 +21,12 @@ export interface RevocationResult {
   success: boolean;
   grantId: string;
   localTokenPurged: boolean;
-  providerRevocationStatus: 'sandbox_inert' | 'revoked_upstream' | 'upstream_failed';
+  providerRevocationStatus: 'confirmed' | 'failed' | 'local_only' | 'sandbox_inert' | 'revoked_upstream' | 'upstream_failed';
   withdrawnEvidenceCount: number;
   downgradedSkillsCount: number;
+  quarantinedSnapshotCount?: number;
   error?: string;
+  upstreamError?: string;
 }
 
 export class ConsentService {
@@ -32,8 +34,18 @@ export class ConsentService {
   private connectedTokens: Map<string, ConnectedToken> = new Map();
   private evidenceItems: Map<string, EvidenceItem> = new Map();
   private studentSkills: Map<string, StudentSkill> = new Map();
+  private providerRevocationHandler?: (studentId: string) => Promise<{
+    status: 'confirmed' | 'failed' | 'local_only';
+    error?: string;
+  }>;
 
   constructor(private auditService: AuditService) {}
+
+  public setProviderRevocationHandler(
+    handler: (studentId: string) => Promise<{ status: 'confirmed' | 'failed' | 'local_only'; error?: string }>
+  ): void {
+    this.providerRevocationHandler = handler;
+  }
 
   /**
    * Registers evidence and student skill records for tracking revocation effects.
@@ -52,6 +64,8 @@ export class ConsentService {
 
   /**
    * Grants purpose-specific consent for a student.
+   * Invariant: At most ONE active grant per (studentId, purpose).
+   * Re-consent transitions the previous active grant into revoked history before creating the new active grant.
    */
   public grantConsent(
     context: SessionContext,
@@ -60,6 +74,13 @@ export class ConsentService {
     noticeVersion = 1,
     scope: Record<string, unknown> = {}
   ): ConsentGrant {
+    // 1. Reconcile existing active grants: revoke previous active grant before creating new one
+    for (const existing of this.grants.values()) {
+      if (existing.studentId === studentId && existing.purpose === purpose && !existing.revokedAt) {
+        existing.revokedAt = new Date().toISOString();
+      }
+    }
+
     const grant: ConsentGrant = {
       id: randomUUID(),
       studentId,
@@ -179,10 +200,18 @@ export class ConsentService {
       };
     }
 
-    grant.revokedAt = new Date().toISOString();
+    // Revoke the specified grant AND any other active grants for this student and purpose
+    // strictly guaranteeing zero active grants remain for this purpose after revocation.
+    const nowIso = new Date().toISOString();
+    grant.revokedAt = nowIso;
+    for (const g of this.grants.values()) {
+      if (g.studentId === grant.studentId && g.purpose === grant.purpose && !g.revokedAt) {
+        g.revokedAt = nowIso;
+      }
+    }
 
     let localTokenPurged = false;
-    let providerRevocationStatus: 'sandbox_inert' | 'revoked_upstream' | 'upstream_failed' = 'sandbox_inert';
+    let providerRevocationStatus: 'confirmed' | 'failed' | 'local_only' | 'sandbox_inert' | 'revoked_upstream' | 'upstream_failed' = 'sandbox_inert';
     let withdrawnEvidenceCount = 0;
     let downgradedSkillsCount = 0;
 
@@ -195,16 +224,13 @@ export class ConsentService {
         }
       }
 
-      // 2. Provider-Side Revocation (Check if GitHub Client ID & Secret configured)
-      const clientId = process.env.GITHUB_CLIENT_ID;
-      const clientSecret = process.env.GITHUB_CLIENT_SECRET;
-
-      if (clientId && clientSecret) {
+      // 2. Genuine Provider-Side Revocation via configured handler
+      if (this.providerRevocationHandler) {
         try {
-          // If live credentials were provided, invoke GitHub OAuth revoke API
-          providerRevocationStatus = 'revoked_upstream';
+          const res = await this.providerRevocationHandler(grant.studentId);
+          providerRevocationStatus = res.status;
         } catch {
-          providerRevocationStatus = 'upstream_failed';
+          providerRevocationStatus = 'failed';
         }
       } else {
         // Documented Sandbox boundary

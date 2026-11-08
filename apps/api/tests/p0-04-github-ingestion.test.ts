@@ -19,7 +19,7 @@ import {
   TypeScriptAstParser,
 } from '@pramaan/domain';
 import { ExactCodeAnchor } from '@pramaan/contracts';
-import { MockGitHubClient } from '../src/services/github-client.js';
+import { MockGitHubClient, DefaultGitHubClient } from '../src/services/github-client.js';
 import { AesGcmTokenCipher } from '../src/services/token-cipher.js';
 import { InMemoryGitHubCredentialRepository } from '../src/repositories/github-credential-repository.js';
 import { InMemoryIngestionJobRepository } from '../src/repositories/ingestion-job-repository.js';
@@ -1932,6 +1932,483 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
       );
       expect(hasSnap1).toBe(false);
       expect(hasSnap2).toBe(false);
+    });
+  });
+
+  // =========================================================================
+  // 7. Upstream Provider Revocation & Resilient Credential Purge
+  // =========================================================================
+  describe('7. Upstream Provider Revocation & Resilient Credential Purge', () => {
+    it('7.1. DefaultGitHubClient sends Basic auth with client credentials and returns success on 204 No Content', async () => {
+      let capturedUrl = '';
+      let capturedAuth = '';
+      let capturedBody = '';
+
+      const mockFetch: typeof fetch = async (input, init) => {
+        capturedUrl = input.toString();
+        capturedAuth = (init?.headers as any)?.['Authorization'] || '';
+        capturedBody = init?.body?.toString() || '';
+        return new Response(null, { status: 204 });
+      };
+
+      const client = new DefaultGitHubClient({
+        fetchFn: mockFetch,
+        apiBaseUrl: 'https://api.github.test',
+        clientId: 'test-client-id',
+        clientSecret: 'test-client-secret',
+      });
+
+      const result = await client.revokeOAuthGrant('gho_secret_access_token_123');
+      expect(result.success).toBe(true);
+      expect(result.statusCode).toBe(204);
+      expect(capturedUrl).toBe('https://api.github.test/applications/test-client-id/grant');
+      const expectedBasic = 'Basic ' + Buffer.from('test-client-id:test-client-secret').toString('base64');
+      expect(capturedAuth).toBe(expectedBasic);
+      expect(JSON.parse(capturedBody)).toEqual({ access_token: 'gho_secret_access_token_123' });
+    });
+
+    it('7.2. DefaultGitHubClient handles 404 or 422 provider errors safely without throwing', async () => {
+      const mockFetch: typeof fetch = async () => {
+        return new Response(JSON.stringify({ message: 'Token not found or already revoked' }), {
+          status: 404,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      };
+
+      const client = new DefaultGitHubClient({
+        fetchFn: mockFetch,
+        apiBaseUrl: 'https://api.github.test',
+        clientId: 'test-client-id',
+        clientSecret: 'test-client-secret',
+      });
+
+      const result = await client.revokeOAuthGrant('gho_invalid_token');
+      expect(result.success).toBe(false);
+      expect(result.statusCode).toBe(404);
+      expect(result.error).toContain('Token not found');
+    });
+
+    it('7.3. DefaultGitHubClient handles network timeout / AbortError fail-closed', async () => {
+      const mockFetch: typeof fetch = async () => {
+        const err = new Error('The operation was aborted');
+        err.name = 'AbortError';
+        throw err;
+      };
+
+      const client = new DefaultGitHubClient({
+        fetchFn: mockFetch,
+        apiBaseUrl: 'https://api.github.test',
+        clientId: 'test-client-id',
+        clientSecret: 'test-client-secret',
+      });
+
+      const result = await client.revokeOAuthGrant('gho_timeout_token');
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('NETWORK_TIMEOUT');
+    });
+
+    it('7.4. DefaultGitHubClient returns failure when client credentials are missing', async () => {
+      const client = new DefaultGitHubClient({ fetchFn: fetch, apiBaseUrl: 'https://api.github.test' });
+      const result = await client.revokeOAuthGrant('gho_token');
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('MISSING_CLIENT_CREDENTIALS');
+    });
+
+    it('7.5. DefaultGitHubClient zero plaintext token leakage in results', async () => {
+      const secretToken = 'gho_very_confidential_token_99999';
+      const mockFetch: typeof fetch = async () => {
+        return new Response(JSON.stringify({ message: 'Revocation failed' }), { status: 500 });
+      };
+
+      const client = new DefaultGitHubClient({
+        fetchFn: mockFetch,
+        apiBaseUrl: 'https://api.github.test',
+        clientId: 'test-client-id',
+        clientSecret: 'test-client-secret',
+      });
+
+      const result = await client.revokeOAuthGrant(secretToken);
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(secretToken);
+    });
+
+    it('7.6. GitHubAccountService.revokeUpstreamGrantAndUnlink purges local credentials even when upstream revocation fails', async () => {
+      const sessionCtx1 = { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' as const };
+      // Connect account first
+      const encrypted = await tokenCipher.encrypt('gho_failing_upstream_token');
+      await githubCredentialRepo.saveConnectedAccount(
+        sessionCtx1,
+        student1RecordId,
+        collegeAOrgId,
+        {
+          githubUserId: '12345',
+          githubUsername: 'alice-github',
+          encryptedAccessToken: encrypted.serialized,
+          keyVersion: tokenCipher.getKeyVersion(),
+          scopes: ['read:user', 'public_repo'],
+        }
+      );
+
+      // Verify connected
+      const existing = await githubCredentialRepo.getConnectedAccount(
+        sessionCtx1,
+        student1RecordId,
+        collegeAOrgId
+      );
+      expect(existing).not.toBeNull();
+
+      // Configure mock client to simulate upstream failure
+      mockGitHubClient.mockRevokeBehavior = async () => ({
+        success: false,
+        statusCode: 502,
+        error: 'HTTP_502: Bad Gateway',
+      });
+
+      const res = await githubAccountService.revokeUpstreamGrantAndUnlink(
+        sessionCtx1,
+        student1RecordId
+      );
+
+      // Local token must be purged fail-closed
+      expect(res.localTokenPurged).toBe(true);
+      expect(res.providerRevocationStatus).toBe('failed');
+
+      // Verify credential repo has revoked status and purged encrypted token
+      const postAccount = await githubCredentialRepo.getConnectedAccount(
+        sessionCtx1,
+        student1RecordId,
+        collegeAOrgId
+      );
+      expect(postAccount?.status).toBe('revoked');
+      expect(postAccount?.encryptedAccessToken).toBeUndefined();
+    });
+
+    it('7.7. /api/consent/revoke route triggers upstream provider revocation, local token purge, and job cancellation', async () => {
+      // 1. Grant consent
+      const consentRes = await app.inject({
+        method: 'POST',
+        url: '/api/consent/grant',
+        headers: { authorization: `Bearer ${student1Token}`, 'x-org-id': collegeAOrgId },
+        payload: { studentId: student1RecordId, purpose: 'repo_verification', noticeVersion: 1 },
+      });
+      expect(consentRes.statusCode).toBe(201);
+      const grantId = consentRes.json().id;
+
+      // 2. Connect account
+      const enc = await tokenCipher.encrypt('gho_student1_token');
+      await githubCredentialRepo.saveConnectedAccount(
+        { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+        student1RecordId,
+        collegeAOrgId,
+        {
+          githubUserId: '54321',
+          githubUsername: 'alice-student1',
+          encryptedAccessToken: enc.serialized,
+          keyVersion: tokenCipher.getKeyVersion(),
+          scopes: ['read:user', 'public_repo'],
+        }
+      );
+
+      // 3. Create an in-flight job for student1
+      const inFlightJobId = 'aaaaaaaa-0000-0000-0000-000000000001';
+      await ingestionJobRepo.createJob({
+        ingestionId: inFlightJobId,
+        orgId: collegeAOrgId,
+        studentId: student1RecordId,
+        repositoryId: '90000000-0000-0000-0000-000000000001',
+        owner: 'alice',
+        repo: 'test-in-flight',
+        ref: 'main',
+        status: 'fetching',
+        fileCount: 3,
+        retainedBytes: 500,
+        registeredSnapshotsCount: 0,
+        createdAt: new Date().toISOString(),
+      });
+
+      // 4. Revoke consent
+      mockGitHubClient.mockRevokeBehavior = async () => ({
+        success: true,
+        statusCode: 204,
+      });
+
+      const revokeRes = await app.inject({
+        method: 'POST',
+        url: '/api/consent/revoke',
+        headers: { authorization: `Bearer ${student1Token}`, 'x-org-id': collegeAOrgId },
+        payload: { grantId, reason: 'Revoking for test' },
+      });
+
+      expect(revokeRes.statusCode).toBe(200);
+      const revData = revokeRes.json();
+      expect(revData.success).toBe(true);
+      expect(revData.localTokenPurged).toBe(true);
+      expect(revData.providerRevocationStatus).toBe('confirmed');
+
+      // 5. In-flight job must be failed with CONSENT_REVOKED
+      const updatedJob = await ingestionJobRepo.getJob(
+        { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+        inFlightJobId
+      );
+      expect(updatedJob?.status).toBe('failed');
+      expect(updatedJob?.error).toBe('CONSENT_REVOKED');
+      expect(updatedJob?.diagnostics?.revocation_reason).toBe('CONSENT_REVOKED');
+
+      // 6. Connected account tokens must be purged and marked revoked
+      const acc = await githubCredentialRepo.getConnectedAccount(
+        { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+        student1RecordId,
+        collegeAOrgId
+      );
+      expect(acc?.status).toBe('revoked');
+      expect(acc?.encryptedAccessToken).toBeUndefined();
+    });
+  });
+
+  // =========================================================================
+  // 8. Bounded Tree Traversal & Rate-Limit Handling
+  // =========================================================================
+  describe('8. Bounded Tree Traversal & Rate-Limit Handling', () => {
+    beforeEach(async () => {
+      mockGitHubClient.seedRepoAccess('alice', 'huge-tree-repo', { accessible: true, isPrivate: false });
+      mockGitHubClient.seedRepoAccess('alice', 'deep-tree-repo', { accessible: true, isPrivate: false });
+      mockGitHubClient.seedRepoAccess('alice', 'many-files-repo', { accessible: true, isPrivate: false });
+      const enc = await tokenCipher.encrypt('gho_student1_token');
+      const ctx = { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' as const };
+      await githubCredentialRepo.saveConnectedAccount(ctx, student1RecordId, collegeAOrgId, {
+        githubUserId: '1001',
+        githubUsername: 'alice',
+        encryptedAccessToken: enc.serialized,
+        keyVersion: tokenCipher.getKeyVersion(),
+        scopes: ['read:user', 'public_repo'],
+      });
+      await consentRepo.grantConsent(ctx, student1RecordId, 'repo_verification');
+    });
+
+    it('8.1. Huge tree exceeding maxTreeEntries terminates with TREE_ENTRY_BUDGET_EXCEEDED and fails job', async () => {
+      // Create service with low maxTreeEntries limit
+      const customService = new StaticRepoIngestionService({
+        githubClient: mockGitHubClient,
+        githubAccountService,
+        consentRepo,
+        trustedIngestionStore,
+        snapshotStore,
+        anchorService,
+        ingestionJobRepo,
+        repositoryRepo,
+        tenantRepo: new InMemoryTenantRepository(tenantStore),
+        limits: {
+          maxFiles: 200,
+          maxFileSizeBytes: 512 * 1024,
+          maxTotalBytes: 10 * 1024 * 1024,
+          maxTreeEntries: 5, // Budget of 5 entries
+        },
+      });
+
+      const customApp = buildApp({
+        persistenceMode: 'in-memory',
+        authService,
+        userRepository: userRepo,
+        tenantStore,
+        consentRepository: consentRepo,
+        auditRepository: auditRepo,
+        snapshotStore,
+        trustedIngestionStore,
+        githubCredentialRepository: githubCredentialRepo,
+        ingestionJobRepository: ingestionJobRepo,
+        repositoryRepository: repositoryRepo,
+        tokenCipher,
+        githubClient: mockGitHubClient,
+        githubAccountService,
+        staticRepoIngestionService: customService,
+        anchorService,
+      });
+
+      const commitSha = '3333333333333333333333333333333333333333';
+      const treeSha = '4444444444444444444444444444444444444444';
+      mockGitHubClient.seedCommit('alice', 'huge-tree-repo', 'main', { sha: commitSha, treeSha });
+
+      // Seed 6 entries (> 5 budget)
+      const treeEntries = Array.from({ length: 6 }, (_, i) => ({
+        path: `src/file_${i}.ts`,
+        mode: '100644',
+        type: 'blob' as const,
+        sha: `sha_${i}`,
+        size: 50,
+      }));
+      mockGitHubClient.seedTree('alice', 'huge-tree-repo', treeSha, treeEntries);
+
+      const res = await customApp.inject({
+        method: 'POST',
+        url: '/api/evidence/repositories/ingest',
+        headers: { authorization: `Bearer ${student1Token}`, 'x-org-id': collegeAOrgId },
+        payload: { owner: 'alice', repo: 'huge-tree-repo', ref: 'main' },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toContain('TREE_ENTRY_BUDGET_EXCEEDED');
+
+      // Verify no snapshots persisted
+      const hasSnap = await snapshotStore.hasSnapshot('alice/huge-tree-repo', commitSha, 'src/file_0.ts', collegeAOrgId, student1RecordId);
+      expect(hasSnap).toBe(false);
+    });
+
+    it('8.2. Excessive sub-tree API requests terminates with TREE_API_BUDGET_EXCEEDED', async () => {
+      const customService = new StaticRepoIngestionService({
+        githubClient: mockGitHubClient,
+        githubAccountService,
+        consentRepo,
+        trustedIngestionStore,
+        snapshotStore,
+        anchorService,
+        ingestionJobRepo,
+        repositoryRepo,
+        tenantRepo: new InMemoryTenantRepository(tenantStore),
+        limits: {
+          maxFiles: 200,
+          maxFileSizeBytes: 512 * 1024,
+          maxTotalBytes: 10 * 1024 * 1024,
+          maxTreeEntries: 5000,
+          maxTreeApiRequests: 1, // Only 1 sub-tree request allowed
+        },
+      });
+
+      const customApp = buildApp({
+        persistenceMode: 'in-memory',
+        authService,
+        userRepository: userRepo,
+        tenantStore,
+        consentRepository: consentRepo,
+        auditRepository: auditRepo,
+        snapshotStore,
+        trustedIngestionStore,
+        githubCredentialRepository: githubCredentialRepo,
+        ingestionJobRepository: ingestionJobRepo,
+        repositoryRepository: repositoryRepo,
+        tokenCipher,
+        githubClient: mockGitHubClient,
+        githubAccountService,
+        staticRepoIngestionService: customService,
+        anchorService,
+      });
+
+      const commitSha = '5555555555555555555555555555555555555555';
+      const rootTreeSha = '6666666666666666666666666666666666666666';
+      const subTreeSha1 = '7777777777777777777777777777777777777771';
+      const subTreeSha2 = '7777777777777777777777777777777777777772';
+
+      mockGitHubClient.seedCommit('alice', 'deep-tree-repo', 'main', { sha: commitSha, treeSha: rootTreeSha });
+
+      // Root tree contains 2 tree subdirectories and is truncated to force iterative directory traversal
+      mockGitHubClient.seedTree('alice', 'deep-tree-repo', rootTreeSha, [
+        { path: 'dir1', mode: '040000', type: 'tree', sha: subTreeSha1 },
+        { path: 'dir2', mode: '040000', type: 'tree', sha: subTreeSha2 },
+      ], true);
+      mockGitHubClient.seedTree('alice', 'deep-tree-repo', subTreeSha1, [
+        { path: 'f1.ts', mode: '100644', type: 'blob', sha: 'sha1', size: 50 },
+      ]);
+      mockGitHubClient.seedTree('alice', 'deep-tree-repo', subTreeSha2, [
+        { path: 'f2.ts', mode: '100644', type: 'blob', sha: 'sha2', size: 50 },
+      ]);
+
+      const res = await customApp.inject({
+        method: 'POST',
+        url: '/api/evidence/repositories/ingest',
+        headers: { authorization: `Bearer ${student1Token}`, 'x-org-id': collegeAOrgId },
+        payload: { owner: 'alice', repo: 'deep-tree-repo', ref: 'main' },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toContain('TREE_API_BUDGET_EXCEEDED');
+    });
+
+    it('8.3. Exceeding eligible file count stops traversal early with FILE_COUNT_LIMIT_EXCEEDED', async () => {
+      const customService = new StaticRepoIngestionService({
+        githubClient: mockGitHubClient,
+        githubAccountService,
+        consentRepo,
+        trustedIngestionStore,
+        snapshotStore,
+        anchorService,
+        ingestionJobRepo,
+        repositoryRepo,
+        tenantRepo: new InMemoryTenantRepository(tenantStore),
+        limits: {
+          maxFiles: 2, // Limit to 2 eligible files
+          maxFileSizeBytes: 512 * 1024,
+          maxTotalBytes: 10 * 1024 * 1024,
+        },
+      });
+
+      const customApp = buildApp({
+        persistenceMode: 'in-memory',
+        authService,
+        userRepository: userRepo,
+        tenantStore,
+        consentRepository: consentRepo,
+        auditRepository: auditRepo,
+        snapshotStore,
+        trustedIngestionStore,
+        githubCredentialRepository: githubCredentialRepo,
+        ingestionJobRepository: ingestionJobRepo,
+        repositoryRepository: repositoryRepo,
+        tokenCipher,
+        githubClient: mockGitHubClient,
+        githubAccountService,
+        staticRepoIngestionService: customService,
+        anchorService,
+      });
+
+      const commitSha = '8888888888888888888888888888888888888888';
+      const treeSha = '9999999999999999999999999999999999999999';
+      mockGitHubClient.seedCommit('alice', 'many-files-repo', 'main', { sha: commitSha, treeSha });
+
+      // Seed 3 eligible TypeScript files (> maxFiles of 2)
+      mockGitHubClient.seedTree('alice', 'many-files-repo', treeSha, [
+        { path: 'src/a.ts', mode: '100644', type: 'blob', sha: 'sha_a', size: 10 },
+        { path: 'src/b.ts', mode: '100644', type: 'blob', sha: 'sha_b', size: 10 },
+        { path: 'src/c.ts', mode: '100644', type: 'blob', sha: 'sha_c', size: 10 },
+      ]);
+
+      const res = await customApp.inject({
+        method: 'POST',
+        url: '/api/evidence/repositories/ingest',
+        headers: { authorization: `Bearer ${student1Token}`, 'x-org-id': collegeAOrgId },
+        payload: { owner: 'alice', repo: 'many-files-repo', ref: 'main' },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toContain('FILE_COUNT_LIMIT_EXCEEDED');
+    });
+
+    it('8.4. Rate-limit detection fail-closed throws GITHUB_RATE_LIMIT_EXCEEDED', async () => {
+      const rateLimitedFetch: typeof fetch = async (url) => {
+        // First call is repo lookup, let it succeed
+        if (url.toString().includes('/repos/bob/rate-limited-repo') && !url.toString().includes('/commits/')) {
+          return new Response(JSON.stringify({ id: 99999, default_branch: 'main', private: false }), { status: 200 });
+        }
+        // Commit lookup hits rate limit
+        return new Response(JSON.stringify({ message: 'API rate limit exceeded' }), {
+          status: 403,
+          headers: {
+            'x-ratelimit-remaining': '0',
+            'retry-after': '60',
+          },
+        });
+      };
+
+      const realClient = new DefaultGitHubClient({
+        fetchFn: rateLimitedFetch,
+        apiBaseUrl: 'https://api.github.test',
+      });
+      let thrown = false;
+      try {
+        await realClient.resolveCommit('tok', 'bob', 'rate-limited-repo', 'main');
+      } catch (err: any) {
+        thrown = true;
+        expect(err.message).toContain('GITHUB_RATE_LIMIT_EXCEEDED');
+      }
+      expect(thrown).toBe(true);
     });
   });
 });

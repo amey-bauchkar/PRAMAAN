@@ -80,13 +80,17 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
     const client = await pool.connect();
     try {
       await client.query(`
+        DELETE FROM skill_evidence WHERE student_skill_id IN (SELECT id FROM student_skills WHERE student_id IN ('${STUDENT_A}', '${STUDENT_B}'));
+        DELETE FROM student_skills WHERE student_id IN ('${STUDENT_A}', '${STUDENT_B}');
+        DELETE FROM evidence_items WHERE student_id IN ('${STUDENT_A}', '${STUDENT_B}');
+        DELETE FROM repo_snapshots WHERE repository_id IN (SELECT id FROM repositories WHERE student_id IN ('${STUDENT_A}', '${STUDENT_B}') OR id IN ('${REPO_A}', '${REPO_B}'));
         DELETE FROM source_snapshots WHERE org_id IN ('${COLLEGE_A}', '${COLLEGE_B}');
         DELETE FROM trusted_ingestion_records WHERE org_id IN ('${COLLEGE_A}', '${COLLEGE_B}');
         DELETE FROM ingestion_jobs WHERE org_id IN ('${COLLEGE_A}', '${COLLEGE_B}');
         DELETE FROM github_oauth_states WHERE org_id IN ('${COLLEGE_A}', '${COLLEGE_B}');
         DELETE FROM connected_accounts WHERE student_id IN ('${STUDENT_A}', '${STUDENT_B}');
         DELETE FROM repositories WHERE student_id IN ('${STUDENT_A}', '${STUDENT_B}') OR id IN ('${REPO_A}', '${REPO_B}');
-        DELETE FROM consent_grants WHERE id IN ('${CONSENT_A}', '${CONSENT_B}');
+        DELETE FROM consent_grants WHERE student_id IN ('${STUDENT_A}', '${STUDENT_B}') OR id IN ('${CONSENT_A}', '${CONSENT_B}');
         DELETE FROM students WHERE id IN ('${STUDENT_A}', '${STUDENT_B}');
         DELETE FROM departments WHERE id IN ('${DEPT_A}', '${DEPT_B}');
         DELETE FROM users WHERE id IN ('${USER_A}', '${USER_B}');
@@ -111,13 +115,19 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
     tenantRepo = new PgTenantRepository(pool);
     consentRepo = new PgConsentRepository(pool);
 
-    // Apply migration 012 if not already present
+    // Apply migrations 012, 013, 014 if not already present
     const migrationClient = await pool.connect();
     try {
-      const migrationPath = path.resolve(process.cwd(), 'db/migrations/012_canonical_repository_unique_constraint.sql');
-      if (fs.existsSync(migrationPath)) {
-        const migrationSql = fs.readFileSync(migrationPath, 'utf8');
-        await migrationClient.query(migrationSql);
+      for (const mig of [
+        '012_canonical_repository_unique_constraint.sql',
+        '013_active_consent_uniqueness.sql',
+        '014_safe_repository_reconciliation.sql',
+      ]) {
+        const migrationPath = path.resolve(process.cwd(), 'db/migrations', mig);
+        if (fs.existsSync(migrationPath)) {
+          const migrationSql = fs.readFileSync(migrationPath, 'utf8');
+          await migrationClient.query(migrationSql);
+        }
       }
     } finally {
       migrationClient.release();
@@ -910,6 +920,408 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
       } finally {
         client.release();
       }
+    });
+  });
+
+  // =========================================================================
+  // 6. Active Consent Semantics & Partial Unique Index Invariants (Migration 013)
+  // =========================================================================
+
+  describe('6. Active Consent Semantics & Partial Unique Index Invariants', () => {
+    const ctxA: SessionContext = {
+      orgId: COLLEGE_A,
+      userId: USER_A,
+      role: 'student',
+    };
+
+    it('6.1. Partial unique index uq_consent_grants_active_student_purpose strictly prevents duplicate active grants via direct SQL', async () => {
+      const client = await pool.connect();
+      const testStudent = STUDENT_B;
+      const testPurpose = 'repo_verification';
+      const id1 = randomUUID();
+      const id2 = randomUUID();
+
+      try {
+        // Ensure no active grant exists for STUDENT_B for this purpose first
+        await client.query(
+          `UPDATE consent_grants SET revoked_at = CURRENT_TIMESTAMP WHERE student_id = $1 AND purpose = $2 AND revoked_at IS NULL;`,
+          [testStudent, testPurpose]
+        );
+
+        // First active grant succeeds
+        await client.query(`
+          INSERT INTO consent_grants (id, student_id, purpose, notice_version, granted_at)
+          VALUES ($1, $2, $3, 1, CURRENT_TIMESTAMP);
+        `, [id1, testStudent, testPurpose]);
+
+        // Second active grant for same (student_id, purpose) with revoked_at IS NULL must fail
+        let errorThrown = false;
+        try {
+          await client.query(`
+            INSERT INTO consent_grants (id, student_id, purpose, notice_version, granted_at)
+            VALUES ($1, $2, $3, 1, CURRENT_TIMESTAMP);
+          `, [id2, testStudent, testPurpose]);
+        } catch (err: any) {
+          errorThrown = true;
+          expect(err.code).toBe('23505'); // unique_violation
+          expect(err.constraint).toBe('uq_consent_grants_active_student_purpose');
+        }
+        expect(errorThrown).toBe(true);
+      } finally {
+        await client.query(`DELETE FROM consent_grants WHERE id IN ($1, $2);`, [id1, id2]);
+        client.release();
+      }
+    });
+
+    it('6.2. Multiple revoked grants for same (student_id, purpose) are allowed for historical audit trail', async () => {
+      const client = await pool.connect();
+      const testStudent = STUDENT_B;
+      const testPurpose = 'repo_verification';
+      const id1 = randomUUID();
+      const id2 = randomUUID();
+
+      try {
+        // Two grants, both with revoked_at NOT NULL
+        await client.query(`
+          INSERT INTO consent_grants (id, student_id, purpose, notice_version, granted_at, revoked_at)
+          VALUES ($1, $2, $3, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+        `, [id1, testStudent, testPurpose]);
+
+        await client.query(`
+          INSERT INTO consent_grants (id, student_id, purpose, notice_version, granted_at, revoked_at)
+          VALUES ($1, $2, $3, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+        `, [id2, testStudent, testPurpose]);
+
+        // Both rows must exist cleanly without unique violation
+        const res = await client.query(`SELECT COUNT(*)::int as cnt FROM consent_grants WHERE id IN ($1, $2);`, [id1, id2]);
+        expect(res.rows[0].cnt).toBe(2);
+      } finally {
+        await client.query(`DELETE FROM consent_grants WHERE id IN ($1, $2);`, [id1, id2]);
+        client.release();
+      }
+    });
+
+    it('6.3. consentRepo.grantConsent() automatically transitions previous active grant to revoked before inserting new active grant', async () => {
+      // 1. Grant consent
+      const grant1 = await consentRepo.grantConsent(ctxA, STUDENT_A, 'repo_verification', 1);
+      expect(grant1.revokedAt).toBeNull();
+
+      // Verify grant1 is active in DB
+      let active = await consentRepo.getActiveGrant(ctxA, STUDENT_A, 'repo_verification');
+      expect(active?.id).toBe(grant1.id);
+
+      // 2. Grant new consent for same student and purpose
+      const grant2 = await consentRepo.grantConsent(ctxA, STUDENT_A, 'repo_verification', 2);
+      expect(grant2.revokedAt).toBeNull();
+      expect(grant2.id).not.toBe(grant1.id);
+
+      // 3. Verify grant1 is now revoked in DB
+      const client = await pool.connect();
+      try {
+        const oldGrantRes = await client.query(`SELECT revoked_at FROM consent_grants WHERE id = $1;`, [grant1.id]);
+        expect(oldGrantRes.rows[0].revoked_at).not.toBeNull();
+
+        // Verify only ONE active grant exists for STUDENT_A and repo_verification
+        const activeCountRes = await client.query(
+          `SELECT COUNT(*)::int as cnt FROM consent_grants WHERE student_id = $1 AND purpose = $2 AND revoked_at IS NULL;`,
+          [STUDENT_A, 'repo_verification']
+        );
+        expect(activeCountRes.rows[0].cnt).toBe(1);
+      } finally {
+        client.release();
+      }
+
+      // 4. Verify getActiveGrant returns grant2
+      active = await consentRepo.getActiveGrant(ctxA, STUDENT_A, 'repo_verification');
+      expect(active?.id).toBe(grant2.id);
+    });
+
+    it('6.4. consentRepo.revokeConsent() revokes all active grants, leaving strictly zero active grants', async () => {
+      const active = await consentRepo.getActiveGrant(ctxA, STUDENT_A, 'repo_verification');
+      expect(active).not.toBeNull();
+
+      const revRes = await consentRepo.revokeConsent(ctxA, active!.id, 'Testing full revocation');
+      expect(revRes.success).toBe(true);
+
+      const hasActive = await consentRepo.hasActiveConsent(ctxA, STUDENT_A, 'repo_verification');
+      expect(hasActive).toBe(false);
+
+      const client = await pool.connect();
+      try {
+        const countRes = await client.query(
+          `SELECT COUNT(*)::int as cnt FROM consent_grants WHERE student_id = $1 AND purpose = $2 AND revoked_at IS NULL;`,
+          [STUDENT_A, 'repo_verification']
+        );
+        expect(countRes.rows[0].cnt).toBe(0);
+      } finally {
+        client.release();
+      }
+    });
+
+    it('6.5. Concurrent grantConsent() calls under app_api preserve the invariant of at most 1 active grant', async () => {
+      // Execute 5 concurrent grantConsent calls for STUDENT_A
+      const promises = Array.from({ length: 5 }, (_, i) =>
+        consentRepo.grantConsent(ctxA, STUDENT_A, 'repo_verification', i + 1)
+      );
+
+      const results = await Promise.all(promises);
+      expect(results.length).toBe(5);
+
+      // Check DB directly: exactly 1 active grant must exist
+      const client = await pool.connect();
+      try {
+        const countRes = await client.query(
+          `SELECT COUNT(*)::int as cnt FROM consent_grants WHERE student_id = $1 AND purpose = $2 AND revoked_at IS NULL;`,
+          [STUDENT_A, 'repo_verification']
+        );
+        expect(countRes.rows[0].cnt).toBe(1);
+      } finally {
+        client.release();
+      }
+    });
+  });
+
+  // =========================================================================
+  // 7. Safe Canonical Repository Reconciliation (Migration 014)
+  // =========================================================================
+
+  describe('7. Safe Canonical Repository Reconciliation (Migration 014)', () => {
+    it('7.1. Safely re-parents child records without data loss when reconciling duplicate repositories', async () => {
+      const client = await pool.connect();
+      const canonRepoId = randomUUID();
+      const dupRepoId = randomUUID();
+      const testProviderRepoId = `test-reconciliation-${Date.now()}`;
+      const snapId = randomUUID();
+      const tirId = randomUUID();
+      const jobId = randomUUID();
+      const rSnapId = randomUUID();
+      const evidenceId = randomUUID();
+      const commitSha = '1111222233334444555566667777888899990000';
+      const treeSha = '2222333344445555666677778888999900001111';
+      const fileBytes = Buffer.from('console.log("migration-014-reconcile");\n');
+      const blobSha = computeGitBlobSha(fileBytes);
+      const rawHash = computeRawFileHash(fileBytes);
+
+      try {
+        // Temporarily drop the constraint to simulate existing duplicates prior to reconciliation
+        await client.query(`ALTER TABLE repositories DROP CONSTRAINT IF EXISTS uq_repositories_student_provider_repo;`);
+
+        // Insert canonical repository (earlier imported_at)
+        await client.query(`
+          INSERT INTO repositories (id, student_id, provider, provider_repo_id, url, default_branch, consent_grant_id, imported_at)
+          VALUES ($1, $2, 'github', $3, 'https://github.com/alice/test-repo', 'main', '${CONSENT_B}', '2026-01-01 10:00:00+00');
+        `, [canonRepoId, STUDENT_B, testProviderRepoId]);
+
+        // Insert duplicate repository (later imported_at)
+        await client.query(`
+          INSERT INTO repositories (id, student_id, provider, provider_repo_id, url, default_branch, consent_grant_id, imported_at)
+          VALUES ($1, $2, 'github', $3, 'https://github.com/alice/test-repo', 'main', '${CONSENT_B}', '2026-01-02 10:00:00+00');
+        `, [dupRepoId, STUDENT_B, testProviderRepoId]);
+
+        // Attach child records to the duplicate repository:
+        // 1. repo_snapshots
+        await client.query(`
+          INSERT INTO repo_snapshots (id, repository_id, commit_sha, parser_version, tree_summary)
+          VALUES ($1, $2, $3, '1.0.0', '{}'::jsonb);
+        `, [rSnapId, dupRepoId, commitSha]);
+
+        // 2. evidence_items pointing to that repo_snapshot
+        await client.query(`
+          INSERT INTO evidence_items (id, student_id, kind, repo_snapshot_id, content_hash, status)
+          VALUES ($1, $2, 'code_span', $3, 'hash_evidence_1', 'accepted');
+        `, [evidenceId, STUDENT_B, rSnapId]);
+
+        // 3. source_snapshots pointing to dupRepoId
+        await client.query(`
+          INSERT INTO source_snapshots (id, snapshot_id, org_id, student_id, repository_id, commit_sha, file_path, raw_bytes, raw_file_hash, blob_sha, captured_at, provenance, ingestion_id, registration_state)
+          VALUES ($1, $1, '${COLLEGE_B}', $2, $3, $4, 'src/test.ts', $5, $6, $7, CURRENT_TIMESTAMP, 'trusted_ingestion_pipeline', $8, 'audit_committed');
+        `, [snapId, STUDENT_B, dupRepoId, commitSha, fileBytes, rawHash, blobSha, tirId]);
+
+        // 4. trusted_ingestion_records pointing to dupRepoId
+        await client.query(`
+          INSERT INTO trusted_ingestion_records (id, ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, verified_at, provenance, manifest)
+          VALUES ($1, $1, '${COLLEGE_B}', $2, $3, $4, $5, CURRENT_TIMESTAMP, 'trusted_ingestion_pipeline', $6::jsonb);
+        `, [tirId, STUDENT_B, dupRepoId, commitSha, treeSha, JSON.stringify([{ filePath: 'src/test.ts', blobSha, rawFileHash: rawHash, byteSize: fileBytes.length }])]);
+
+        // 5. ingestion_jobs pointing to dupRepoId
+        await client.query(`
+          INSERT INTO ingestion_jobs (ingestion_id, org_id, student_id, repository_id, owner, repo, ref, status, file_count, retained_bytes, registered_snapshots_count)
+          VALUES ($1, '${COLLEGE_B}', $2, $3, 'alice', 'test-repo', 'main', 'completed', 1, 100, 1);
+        `, [jobId, STUDENT_B, dupRepoId]);
+
+        // Run the Migration 014 reconciliation logic
+        const migrationPath = path.resolve(process.cwd(), 'db/migrations/014_safe_repository_reconciliation.sql');
+        const migrationSql = fs.readFileSync(migrationPath, 'utf8');
+        await client.query(migrationSql);
+
+        // Verification assertions:
+        // A. Duplicate repository was safely deleted
+        const dupCheck = await client.query(`SELECT id FROM repositories WHERE id = $1;`, [dupRepoId]);
+        expect(dupCheck.rows.length).toBe(0);
+
+        // B. Canonical repository remains
+        const canonCheck = await client.query(`SELECT id FROM repositories WHERE id = $1;`, [canonRepoId]);
+        expect(canonCheck.rows.length).toBe(1);
+
+        // C. All child records are re-parented to canonRepoId
+        const snapCheck = await client.query(`SELECT repository_id FROM source_snapshots WHERE id = $1;`, [snapId]);
+        expect(snapCheck.rows[0].repository_id).toBe(canonRepoId);
+
+        const tirCheck = await client.query(`SELECT repository_id FROM trusted_ingestion_records WHERE id = $1;`, [tirId]);
+        expect(tirCheck.rows[0].repository_id).toBe(canonRepoId);
+
+        const jobCheck = await client.query(`SELECT repository_id FROM ingestion_jobs WHERE ingestion_id = $1;`, [jobId]);
+        expect(jobCheck.rows[0].repository_id).toBe(canonRepoId);
+
+        const rSnapCheck = await client.query(`SELECT repository_id FROM repo_snapshots WHERE id = $1;`, [rSnapId]);
+        expect(rSnapCheck.rows[0].repository_id).toBe(canonRepoId);
+
+        // D. Evidence item is intact
+        const evidenceCheck = await client.query(`SELECT repo_snapshot_id FROM evidence_items WHERE id = $1;`, [evidenceId]);
+        expect(evidenceCheck.rows[0].repo_snapshot_id).toBe(rSnapId);
+      } finally {
+        // Cleanup test-created records
+        await client.query(`DELETE FROM evidence_items WHERE id = $1;`, [evidenceId]);
+        await client.query(`DELETE FROM repo_snapshots WHERE id = $1;`, [rSnapId]);
+        await client.query(`DELETE FROM source_snapshots WHERE id = $1;`, [snapId]);
+        await client.query(`DELETE FROM trusted_ingestion_records WHERE id = $1;`, [tirId]);
+        await client.query(`DELETE FROM ingestion_jobs WHERE ingestion_id = $1;`, [jobId]);
+        await client.query(`DELETE FROM repositories WHERE id IN ($1, $2);`, [canonRepoId, dupRepoId]);
+
+        // Restore unique constraint
+        await client.query(`
+          DO $$
+          BEGIN
+            IF NOT EXISTS (
+              SELECT 1 FROM pg_constraint WHERE conname = 'uq_repositories_student_provider_repo'
+            ) THEN
+              ALTER TABLE repositories ADD CONSTRAINT uq_repositories_student_provider_repo UNIQUE (student_id, provider, provider_repo_id);
+            END IF;
+          END $$;
+        `);
+        client.release();
+      }
+    });
+  });
+
+  // =========================================================================
+  // 8. Ingestion Job Status Transitions on Revocation
+  // =========================================================================
+
+  describe('8. Ingestion Job Status Transitions on Revocation', () => {
+    const ctxA: SessionContext = {
+      orgId: COLLEGE_A,
+      userId: USER_A,
+      role: 'student',
+    };
+    const ctxB: SessionContext = {
+      orgId: COLLEGE_B,
+      userId: USER_B,
+      role: 'student',
+    };
+
+    it('8.1. cancelJobsForStudentOnRevocation() transitions all in-progress jobs to failed with CONSENT_REVOKED and preserves completed/failed jobs', async () => {
+      const inProgressStates = ['queued', 'resolving', 'fetching', 'verifying', 'persisted'] as const;
+      const createdJobIds: string[] = [];
+
+      for (const st of inProgressStates) {
+        const jId = randomUUID();
+        createdJobIds.push(jId);
+        await jobRepo.createJob({
+          ingestionId: jId,
+          orgId: COLLEGE_A,
+          studentId: STUDENT_A,
+          repositoryId: REPO_A,
+          owner: 'test-owner',
+          repo: `test-repo-${st}`,
+          ref: 'main',
+          status: st,
+          fileCount: 0,
+          retainedBytes: 0,
+          registeredSnapshotsCount: 0,
+          createdAt: new Date().toISOString(),
+        });
+      }
+
+      // Create a completed job and an unrelated failed job
+      const completedJobId = randomUUID();
+      await jobRepo.createJob({
+        ingestionId: completedJobId,
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: REPO_A,
+        owner: 'test-owner',
+        repo: 'test-repo-completed',
+        ref: 'main',
+        status: 'completed',
+        fileCount: 5,
+        retainedBytes: 1000,
+        registeredSnapshotsCount: 5,
+        createdAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+      });
+
+      const failedJobId = randomUUID();
+      await jobRepo.createJob({
+        ingestionId: failedJobId,
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: REPO_A,
+        owner: 'test-owner',
+        repo: 'test-repo-other-failed',
+        ref: 'main',
+        status: 'failed',
+        fileCount: 0,
+        retainedBytes: 0,
+        registeredSnapshotsCount: 0,
+        error: 'PARSER_SYNTAX_ERROR',
+        createdAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+      });
+
+      // Create an in-progress job for STUDENT_B (must NOT be touched)
+      const studentBJobId = randomUUID();
+      await jobRepo.createJob({
+        ingestionId: studentBJobId,
+        orgId: COLLEGE_B,
+        studentId: STUDENT_B,
+        repositoryId: REPO_B,
+        owner: 'test-owner',
+        repo: 'test-repo-student-b',
+        ref: 'main',
+        status: 'fetching',
+        fileCount: 2,
+        retainedBytes: 200,
+        registeredSnapshotsCount: 0,
+        createdAt: new Date().toISOString(),
+      });
+
+      // Execute revocation cancellation for STUDENT_A
+      const cancelledCount = await jobRepo.cancelJobsForStudentOnRevocation(ctxA, STUDENT_A);
+      expect(cancelledCount).toBe(inProgressStates.length);
+
+      // Verify each in-progress job is now failed with CONSENT_REVOKED and completedAt is set
+      for (const jId of createdJobIds) {
+        const job = await jobRepo.getJob(ctxA, jId);
+        expect(job?.status).toBe('failed');
+        expect(job?.error).toBe('CONSENT_REVOKED');
+        expect(job?.diagnostics?.revocation_reason).toBe('CONSENT_REVOKED');
+        expect(job?.completedAt).not.toBeNull();
+      }
+
+      // Verify completed job was NOT modified
+      const compJob = await jobRepo.getJob(ctxA, completedJobId);
+      expect(compJob?.status).toBe('completed');
+      expect(compJob?.error).toBeUndefined();
+
+      // Verify other failed job was NOT rewritten
+      const fJob = await jobRepo.getJob(ctxA, failedJobId);
+      expect(fJob?.status).toBe('failed');
+      expect(fJob?.error).toBe('PARSER_SYNTAX_ERROR');
+
+      // Verify STUDENT_B's job was NOT affected
+      const bJob = await jobRepo.getJob(ctxB, studentBJobId);
+      expect(bJob?.status).toBe('fetching');
     });
   });
 });

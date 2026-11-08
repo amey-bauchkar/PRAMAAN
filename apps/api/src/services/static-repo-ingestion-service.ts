@@ -26,6 +26,23 @@ export interface IngestionLimits {
   maxFiles?: number;
   maxFileSizeBytes?: number;
   maxTotalBytes?: number;
+  maxTreeEntries?: number;
+  maxDirectoryTraversals?: number;
+  maxTreeApiRequests?: number;
+  maxWallClockMs?: number;
+}
+
+export interface EligibleTreeEntry {
+  entry: GitHubTreeEntry;
+  canonicalPath: string;
+}
+
+export interface BoundedTraversalResult {
+  eligibleEntries: EligibleTreeEntry[];
+  excludedDiagnostics: Record<string, string>;
+  totalTreeEntries: number;
+  directoriesTraversed: number;
+  apiRequestsCount: number;
 }
 
 export interface StaticRepoIngestionServiceOptions {
@@ -67,6 +84,10 @@ export class StaticRepoIngestionService {
   private maxFiles: number;
   private maxFileSizeBytes: number;
   private maxTotalBytes: number;
+  private maxTreeEntries: number;
+  private maxDirectoryTraversals: number;
+  private maxTreeApiRequests: number;
+  private maxWallClockMs: number;
 
   constructor(opts: StaticRepoIngestionServiceOptions) {
     this.githubClient = opts.githubClient;
@@ -82,55 +103,166 @@ export class StaticRepoIngestionService {
     this.maxFiles = opts.limits?.maxFiles ?? 200;
     this.maxFileSizeBytes = opts.limits?.maxFileSizeBytes ?? 512 * 1024; // 512 KB
     this.maxTotalBytes = opts.limits?.maxTotalBytes ?? 10 * 1024 * 1024; // 10 MB
+    this.maxTreeEntries = opts.limits?.maxTreeEntries ?? 5000;
+    this.maxDirectoryTraversals = opts.limits?.maxDirectoryTraversals ?? 100;
+    this.maxTreeApiRequests = opts.limits?.maxTreeApiRequests ?? 30;
+    this.maxWallClockMs = opts.limits?.maxWallClockMs ?? 30000;
   }
 
   /**
-   * Recursive tree traversal with fallback for GitHub's truncated trees.
-   * If a recursive tree lookup returns truncated: true, falls back to
-   * non-recursive directory-by-directory traversal.
+   * Bounded GitHub Tree Traversal.
+   * Enforces configurable budgets across:
+   * - Maximum total tree entries parsed (maxTreeEntries).
+   * - Maximum directory traversals during fallback (maxDirectoryTraversals).
+   * - Maximum tree API requests to GitHub (maxTreeApiRequests).
+   * - Maximum eligible source files (maxFiles) with immediate early termination.
+   * - Never constructs an unbounded in-memory list of repository entries.
    */
-  private async fetchCompleteTree(
+  private async fetchBoundedEligibleEntries(
     accessToken: string,
     owner: string,
     repo: string,
-    rootTreeSha: string
-  ): Promise<GitHubTreeEntry[]> {
-    // 1. Attempt single recursive traversal
-    const initial = await this.githubClient.getTree(accessToken, owner, repo, rootTreeSha, true);
-    if (!initial.truncated) {
-      return initial.tree;
+    rootTreeSha: string,
+    signal?: AbortSignal
+  ): Promise<BoundedTraversalResult> {
+    let apiRequestsCount = 0;
+    let directoriesTraversed = 0;
+    let totalTreeEntries = 0;
+    const eligibleEntries: EligibleTreeEntry[] = [];
+    const excludedDiagnostics: Record<string, string> = {};
+
+    // 1. Attempt single recursive traversal with budget checks
+    apiRequestsCount++;
+    if (apiRequestsCount > this.maxTreeApiRequests) {
+      throw new Error(`TREE_API_BUDGET_EXCEEDED: Exceeded GitHub tree API request budget of ${this.maxTreeApiRequests}`);
     }
 
-    // 2. Truncation detected: Fall back to iterative non-recursive traversal
-    const completeEntries: GitHubTreeEntry[] = [];
+    const initial = await this.githubClient.getTree(accessToken, owner, repo, rootTreeSha, true, signal);
+
+    if (!initial.truncated) {
+      totalTreeEntries = initial.tree.length;
+      if (totalTreeEntries > this.maxTreeEntries) {
+        throw new Error(
+          `TREE_ENTRY_BUDGET_EXCEEDED: Repository tree contains ${totalTreeEntries} entries, exceeding budget of ${this.maxTreeEntries}`
+        );
+      }
+
+      for (const entry of initial.tree) {
+        if (entry.type !== 'blob') continue;
+
+        if (entry.size !== undefined && entry.size > this.maxFileSizeBytes) {
+          excludedDiagnostics[entry.path] = `EXCLUDED_FILE_SIZE: Declared size ${entry.size} exceeds limit ${this.maxFileSizeBytes}`;
+          continue;
+        }
+
+        const evalRes = evaluateFileEligibility(entry.path, entry.mode);
+        if (evalRes.eligible && evalRes.canonicalPath) {
+          eligibleEntries.push({
+            entry,
+            canonicalPath: evalRes.canonicalPath,
+          });
+          // Early termination: abort immediately if eligible files budget is exceeded
+          if (eligibleEntries.length > this.maxFiles) {
+            throw new Error(
+              `FILE_COUNT_LIMIT_EXCEEDED: Repository contains more than ${this.maxFiles} eligible files, exceeding limit of ${this.maxFiles}`
+            );
+          }
+        } else {
+          excludedDiagnostics[entry.path] = evalRes.reason || 'EXCLUDED';
+        }
+      }
+
+      return {
+        eligibleEntries,
+        excludedDiagnostics,
+        totalTreeEntries,
+        directoriesTraversed: 0,
+        apiRequestsCount,
+      };
+    }
+
+    // 2. Truncation detected: Bounded iterative directory-by-directory traversal
     const treeQueue: Array<{ prefix: string; sha: string }> = [{ prefix: '', sha: rootTreeSha }];
     const visitedShas = new Set<string>();
 
     while (treeQueue.length > 0) {
+      if (signal?.aborted) {
+        throw new Error(`INGESTION_TIMEOUT: Traversal exceeded wall-clock duration budget of ${this.maxWallClockMs}ms`);
+      }
+
+      if (directoriesTraversed >= this.maxDirectoryTraversals) {
+        throw new Error(
+          `DIRECTORY_TRAVERSAL_BUDGET_EXCEEDED: Directory traversal budget of ${this.maxDirectoryTraversals} exceeded`
+        );
+      }
+
+      if (apiRequestsCount >= this.maxTreeApiRequests) {
+        throw new Error(
+          `TREE_API_BUDGET_EXCEEDED: GitHub tree API request budget of ${this.maxTreeApiRequests} exceeded`
+        );
+      }
+
       const current = treeQueue.shift()!;
       if (visitedShas.has(current.sha)) {
         continue; // Cycle protection
       }
       visitedShas.add(current.sha);
 
-      const treeRes = await this.githubClient.getTree(accessToken, owner, repo, current.sha, false);
+      apiRequestsCount++;
+      directoriesTraversed++;
+      const treeRes = await this.githubClient.getTree(accessToken, owner, repo, current.sha, false, signal);
+
       for (const item of treeRes.tree) {
+        totalTreeEntries++;
+        if (totalTreeEntries > this.maxTreeEntries) {
+          throw new Error(
+            `TREE_ENTRY_BUDGET_EXCEEDED: Repository tree entries reached ${totalTreeEntries}, exceeding budget of ${this.maxTreeEntries}`
+          );
+        }
+
         const fullPath = current.prefix ? `${current.prefix}/${item.path}` : item.path;
-        if (item.type === 'blob') {
-          completeEntries.push({
-            ...item,
-            path: fullPath,
-          });
-        } else if (item.type === 'tree') {
+
+        if (item.type === 'tree') {
           treeQueue.push({
             prefix: fullPath,
             sha: item.sha,
           });
+        } else if (item.type === 'blob') {
+          if (item.size !== undefined && item.size > this.maxFileSizeBytes) {
+            excludedDiagnostics[fullPath] = `EXCLUDED_FILE_SIZE: Declared size ${item.size} exceeds limit ${this.maxFileSizeBytes}`;
+            continue;
+          }
+
+          const evalRes = evaluateFileEligibility(fullPath, item.mode);
+          if (evalRes.eligible && evalRes.canonicalPath) {
+            eligibleEntries.push({
+              entry: {
+                ...item,
+                path: fullPath,
+              },
+              canonicalPath: evalRes.canonicalPath,
+            });
+
+            // Early termination check on each discovered file
+            if (eligibleEntries.length > this.maxFiles) {
+              throw new Error(
+                `FILE_COUNT_LIMIT_EXCEEDED: Repository contains more than ${this.maxFiles} eligible files, exceeding limit of ${this.maxFiles}`
+              );
+            }
+          } else {
+            excludedDiagnostics[fullPath] = evalRes.reason || 'EXCLUDED';
+          }
         }
       }
     }
 
-    return completeEntries;
+    return {
+      eligibleEntries,
+      excludedDiagnostics,
+      totalTreeEntries,
+      directoriesTraversed,
+      apiRequestsCount,
+    };
   }
 
   /**
@@ -161,6 +293,12 @@ export class StaticRepoIngestionService {
     }
 
     const ingestionId = crypto.randomUUID();
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => {
+      abortController.abort(
+        new Error(`INGESTION_TIMEOUT: Ingestion exceeded wall-clock duration budget of ${this.maxWallClockMs}ms`)
+      );
+    }, this.maxWallClockMs);
 
     try {
       // 2. PHASE 4: CONSENT-BEFORE-FETCH ENFORCEMENT
@@ -184,7 +322,12 @@ export class StaticRepoIngestionService {
       const accessToken = await this.githubAccountService.getDecryptedAccessToken(context, targetStudentId);
 
       // 4. Verify repository access permissions
-      const access = await this.githubClient.verifyRepositoryAccess(accessToken, request.owner, request.repo);
+      const access = await this.githubClient.verifyRepositoryAccess(
+        accessToken,
+        request.owner,
+        request.repo,
+        abortController.signal
+      );
       if (!access.accessible) {
         throw new Error(`REPOSITORY_ACCESS_DENIED: Linked GitHub account does not have access to ${request.owner}/${request.repo}`);
       }
@@ -240,12 +383,13 @@ export class StaticRepoIngestionService {
         accessToken,
         request.owner,
         request.repo,
-        request.ref
+        request.ref,
+        abortController.signal
       );
       const commitSha = commitInfo.commitSha;
       const treeSha = commitInfo.treeSha;
 
-      // 7. Complete Tree Traversal
+      // 9. Bounded Tree Traversal
       if (this.ingestionJobRepo) {
         await this.ingestionJobRepo.updateJob(context, ingestionId, 'fetching', {
           commitSha,
@@ -253,37 +397,15 @@ export class StaticRepoIngestionService {
         });
       }
 
-      const treeEntries = await this.fetchCompleteTree(accessToken, request.owner, request.repo, treeSha);
+      const { eligibleEntries, excludedDiagnostics } = await this.fetchBoundedEligibleEntries(
+        accessToken,
+        request.owner,
+        request.repo,
+        treeSha,
+        abortController.signal
+      );
 
-      // 8. Filter file entries and reject oversized entries before blob download
-      const eligibleEntries: Array<{ entry: GitHubTreeEntry; canonicalPath: string }> = [];
-      const excludedDiagnostics: Record<string, string> = {};
-
-      for (const entry of treeEntries) {
-        if (entry.type !== 'blob') continue;
-
-        // Reject oversized tree entries before blob download if declared size is available
-        if (entry.size !== undefined && entry.size > this.maxFileSizeBytes) {
-          excludedDiagnostics[entry.path] = `EXCLUDED_FILE_SIZE: Declared size ${entry.size} exceeds limit ${this.maxFileSizeBytes}`;
-          continue;
-        }
-
-        const evalRes = evaluateFileEligibility(entry.path, entry.mode);
-        if (evalRes.eligible && evalRes.canonicalPath) {
-          eligibleEntries.push({
-            entry,
-            canonicalPath: evalRes.canonicalPath,
-          });
-        } else {
-          excludedDiagnostics[entry.path] = evalRes.reason || 'EXCLUDED';
-        }
-      }
-
-      if (eligibleEntries.length > this.maxFiles) {
-        throw new Error(`FILE_COUNT_LIMIT_EXCEEDED: Repository contains ${eligibleEntries.length} eligible files, exceeding limit of ${this.maxFiles}`);
-      }
-
-      // 9. Fetch & Cryptographically Verify Each File
+      // 10. Fetch & Cryptographically Verify Each File
       if (this.ingestionJobRepo) {
         await this.ingestionJobRepo.updateJob(context, ingestionId, 'verifying', {
           fileCount: eligibleEntries.length,
@@ -300,7 +422,8 @@ export class StaticRepoIngestionService {
           accessToken,
           request.owner,
           request.repo,
-          entry.sha
+          entry.sha,
+          abortController.signal
         );
 
         const rawBytes =
@@ -440,16 +563,25 @@ export class StaticRepoIngestionService {
         },
       };
     } catch (err: any) {
+      const errorMessage =
+        abortController.signal.aborted && abortController.signal.reason?.message
+          ? abortController.signal.reason.message
+          : err.name === 'AbortError'
+          ? `INGESTION_TIMEOUT: Ingestion exceeded wall-clock duration budget of ${this.maxWallClockMs}ms`
+          : err.message;
+
       if (this.ingestionJobRepo) {
         try {
           await this.ingestionJobRepo.updateJob(context, ingestionId, 'failed', {
-            error: err.message,
+            error: errorMessage,
           });
         } catch {
           // preserve original error
         }
       }
-      throw err;
+      throw new Error(errorMessage, { cause: err });
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 

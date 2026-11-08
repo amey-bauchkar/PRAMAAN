@@ -198,6 +198,9 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       tokenCipher,
       credentialRepo: githubCredentialRepo,
     });
+    if (typeof (consentRepo as any).setProviderRevocationDelegate === 'function') {
+      (consentRepo as any).setProviderRevocationDelegate(githubAccountService);
+    }
     anchorService = new AnchorService({
       auditRepo,
       consentRepo,
@@ -321,6 +324,10 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       repositoryRepo,
       tenantRepo,
     });
+
+    if (typeof (consentRepo as any).setProviderRevocationDelegate === 'function') {
+      (consentRepo as any).setProviderRevocationDelegate(githubAccountService);
+    }
   }
 
   const authService = isProduction
@@ -513,6 +520,13 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     if (!result.success) {
       const statusCode = result.error === 'Grant not found.' ? 404 : 400;
       return reply.status(statusCode).send(result);
+    }
+
+    if (ingestionJobRepo && body.grantId) {
+      const targetGrant = await consentRepo.getGrant(context, body.grantId);
+      if (targetGrant) {
+        await ingestionJobRepo.cancelJobsForStudentOnRevocation(context, targetGrant.studentId);
+      }
     }
 
     return reply.send(result);
@@ -1095,6 +1109,12 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
         err.message.startsWith('FILE_COUNT_LIMIT_EXCEEDED') ||
         err.message.startsWith('FILE_SIZE_LIMIT_EXCEEDED') ||
         err.message.startsWith('TOTAL_SIZE_LIMIT_EXCEEDED') ||
+        err.message.startsWith('TREE_ENTRY_BUDGET_EXCEEDED') ||
+        err.message.startsWith('DIRECTORY_TRAVERSAL_BUDGET_EXCEEDED') ||
+        err.message.startsWith('TREE_API_BUDGET_EXCEEDED') ||
+        err.message.startsWith('MAX_ELIGIBLE_FILES_EXCEEDED') ||
+        err.message.startsWith('INGESTION_TIMEOUT') ||
+        err.message.startsWith('GITHUB_RATE_LIMIT_EXCEEDED') ||
         err.message.startsWith('INVALID_GITHUB_REPOSITORY') ||
         err.message.startsWith('REPOSITORY_ACCESS_DENIED') ||
         err.message.startsWith('PRIVATE_REPOSITORY_NOT_SUPPORTED') ||
