@@ -18,17 +18,16 @@ import { IGitHubCredentialRepository } from '../repositories/github-credential-r
  * - 'read:user': standard minimal read-only scope for student identity verification.
  * - 'user:email': read-only email access.
  * - 'public_repo': access to public repositories only.
- * - 'repo': grants broad read/write/admin access to private repositories.
- *   Emits an explicit warning when requested.
+ *
+ * Broad 'repo' scope is strictly rejected under public-repository-only architecture.
  */
 export const ALLOWED_GITHUB_OAUTH_SCOPES = [
   'read:user',
   'user:email',
   'public_repo',
-  'repo',
 ] as const;
 
-export const DEFAULT_GITHUB_OAUTH_SCOPES = ['read:user'];
+export const DEFAULT_GITHUB_OAUTH_SCOPES = ['read:user', 'public_repo'];
 
 export interface GitHubAccountServiceOptions {
   githubClient: IGitHubClient;
@@ -71,8 +70,10 @@ export class GitHubAccountService {
     }
 
     // Role check: Only students can connect their own GitHub identity
-    if (context.role === 'student' && context.userId !== studentId) {
-      throw new Error('FORBIDDEN_STUDENT_ACCESS: Students can only connect their own GitHub account.');
+    if (context.role !== 'student') {
+      throw new Error(
+        'FORBIDDEN_DELEGATED_CONNECTION: Delegated GitHub account connection is not supported. Only students may connect their own GitHub account.'
+      );
     }
 
     const scopesToRequest = requestedScopes ?? this.defaultScopes;
@@ -87,12 +88,6 @@ export class GitHubAccountService {
           `INVALID_GITHUB_SCOPE: Scope "${scope}" is invalid or excessive. Permitted scopes are: ${ALLOWED_GITHUB_OAUTH_SCOPES.join(', ')}`
         );
       }
-    }
-
-    if (scopesToRequest.includes('repo')) {
-      console.warn(
-        'WARNING: Broad "repo" scope requested for GitHub OAuth. This grants broad read/write/admin repository access under legacy OAuth Apps. Prefer fine-grained GitHub App permissions (contents:read, metadata:read) whenever possible.'
-      );
     }
 
     // Generate cryptographic state (32 bytes hex)
@@ -120,7 +115,7 @@ export class GitHubAccountService {
     const params = new URLSearchParams({
       client_id: this.clientId || 'pramaan_client_id',
       redirect_uri: redirectUri,
-      scope: scopesToRequest.join(','),
+      scope: scopesToRequest.join(' '),
       state,
       code_challenge: codeChallenge,
       code_challenge_method: 'S256',
@@ -141,8 +136,16 @@ export class GitHubAccountService {
   public async handleOAuthCallback(
     context: SessionContext,
     code: string,
-    state: string
+    state: string,
+    studentId?: string
   ): Promise<{ success: boolean; githubUsername: string; githubUserId: string }> {
+    // Role check: Only students can complete their own GitHub connection
+    if (context.role !== 'student') {
+      throw new Error(
+        'FORBIDDEN_DELEGATED_CONNECTION: Delegated GitHub account connection is not supported. Only students may connect their own GitHub account.'
+      );
+    }
+
     // 1. Atomically consume single-use state under tenant RLS context
     const storedState = await this.credentialRepo.consumeOAuthState(context, state);
     if (!storedState) {
@@ -153,7 +156,11 @@ export class GitHubAccountService {
     if (storedState.orgId !== context.orgId) {
       throw new Error('CROSS_TENANT_OAUTH_REJECTED: State orgId does not match session tenant.');
     }
-    if (context.role === 'student' && storedState.studentId !== context.userId) {
+    if (studentId) {
+      if (storedState.studentId !== studentId) {
+        throw new Error('FORBIDDEN_STUDENT_ACCESS: OAuth state belongs to a different student.');
+      }
+    } else if (storedState.studentId !== context.userId) {
       throw new Error('FORBIDDEN_STUDENT_ACCESS: OAuth state belongs to a different student.');
     }
 
@@ -170,7 +177,7 @@ export class GitHubAccountService {
       : [];
 
     const hasRequiredScope = grantedScopes.some((s) =>
-      ['read:user', 'public_repo', 'repo'].includes(s)
+      ['read:user', 'public_repo'].includes(s)
     );
     if (!hasRequiredScope) {
       throw new Error(

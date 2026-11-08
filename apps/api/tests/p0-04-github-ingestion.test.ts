@@ -6,6 +6,7 @@ import { AuthService } from '../src/services/auth-service.js';
 import { JwtVerifier } from '../src/services/jwt-verifier.js';
 import { InMemoryUserRepository } from '../src/repositories/user-repository.js';
 import { TenantStore } from '../src/services/tenant-store.js';
+import { InMemoryTenantRepository } from '../src/repositories/tenant-repository.js';
 import { AuditService } from '../src/services/audit-service.js';
 import { ConsentService } from '../src/services/consent-service.js';
 import { InMemoryAuditRepository } from '../src/repositories/audit-repository.js';
@@ -22,6 +23,7 @@ import { MockGitHubClient } from '../src/services/github-client.js';
 import { AesGcmTokenCipher } from '../src/services/token-cipher.js';
 import { InMemoryGitHubCredentialRepository } from '../src/repositories/github-credential-repository.js';
 import { InMemoryIngestionJobRepository } from '../src/repositories/ingestion-job-repository.js';
+import { InMemoryRepositoryRepository } from '../src/repositories/repository-repository.js';
 import { GitHubAccountService } from '../src/services/github-account-service.js';
 import { StaticRepoIngestionService } from '../src/services/static-repo-ingestion-service.js';
 import { AnchorService } from '../src/services/anchor-service.js';
@@ -38,6 +40,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
   let trustedIngestionStore: InMemoryTrustedIngestionStore;
   let githubCredentialRepo: InMemoryGitHubCredentialRepository;
   let ingestionJobRepo: InMemoryIngestionJobRepository;
+  let repositoryRepo: InMemoryRepositoryRepository;
   let mockGitHubClient: MockGitHubClient;
   let tokenCipher: AesGcmTokenCipher;
   let githubAccountService: GitHubAccountService;
@@ -50,6 +53,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
   const collegeAOrgId = '00000000-0000-0000-0000-000000000001';
   const collegeBOrgId = '00000000-0000-0000-0000-000000000002';
 
+  // Explicitly distinct users.id and students.id
   const studentUser1 = {
     id: '20000000-0000-0000-0000-000000000003',
     authSubject: 'sub-student-1',
@@ -57,6 +61,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
     fullName: 'Alice Student',
     createdAt: new Date().toISOString(),
   };
+  const student1RecordId = '10000000-0000-0000-0000-000000000003';
 
   const studentUser2 = {
     id: '20000000-0000-0000-0000-000000000004',
@@ -65,6 +70,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
     fullName: 'Bob Student',
     createdAt: new Date().toISOString(),
   };
+  const student2RecordId = '10000000-0000-0000-0000-000000000004';
 
   const officerUser = {
     id: '20000000-0000-0000-0000-000000000001',
@@ -73,6 +79,15 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
     fullName: 'Placement Officer',
     createdAt: new Date().toISOString(),
   };
+
+  const collegeBStudentUser = {
+    id: '20000000-0000-0000-0000-000000000099',
+    authSubject: 'sub-student-b',
+    email: 'student@college-b.edu',
+    fullName: 'College B Student',
+    createdAt: new Date().toISOString(),
+  };
+  const collegeBStudentRecordId = '10000000-0000-0000-0000-000000000099';
 
   let student1Token: string;
   let student2Token: string;
@@ -90,6 +105,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
     trustedIngestionStore = new InMemoryTrustedIngestionStore();
     githubCredentialRepo = new InMemoryGitHubCredentialRepository();
     ingestionJobRepo = new InMemoryIngestionJobRepository();
+    repositoryRepo = new InMemoryRepositoryRepository();
     mockGitHubClient = new MockGitHubClient();
     tokenCipher = new AesGcmTokenCipher({ encryptionKey: testKeyHex, keyVersion: 'v1' });
 
@@ -116,6 +132,8 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
       snapshotStore,
       anchorService,
       ingestionJobRepo,
+      repositoryRepo,
+      tenantRepo: new InMemoryTenantRepository(tenantStore),
     });
 
     // Seed users
@@ -135,6 +153,62 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
       });
     }
 
+    // Seed distinct student records in tenantStore
+    tenantStore.addStudent(
+      { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
+      {
+        id: student1RecordId,
+        orgId: collegeAOrgId,
+        userId: studentUser1.id,
+        departmentId: '10000000-0000-0000-0000-000000000001',
+        enrollment_no: 'ENR-STUDENT-1',
+        graduating_year: 2026,
+        program_level: 'undergraduate',
+        is_minor: false,
+        createdAt: new Date().toISOString(),
+      }
+    );
+
+    tenantStore.addStudent(
+      { orgId: collegeAOrgId, userId: studentUser2.id, role: 'student' },
+      {
+        id: student2RecordId,
+        orgId: collegeAOrgId,
+        userId: studentUser2.id,
+        departmentId: '10000000-0000-0000-0000-000000000001',
+        enrollment_no: 'ENR-STUDENT-2',
+        graduating_year: 2026,
+        program_level: 'undergraduate',
+        is_minor: false,
+        createdAt: new Date().toISOString(),
+      }
+    );
+
+    await userRepo.registerUser(collegeBStudentUser);
+    await userRepo.addMembership({
+      id: '30000000-0000-0000-0000-000000000099',
+      userId: collegeBStudentUser.id,
+      orgId: collegeBOrgId,
+      role: 'student',
+      status: 'active',
+      createdAt: new Date().toISOString(),
+    });
+
+    tenantStore.addStudent(
+      { orgId: collegeBOrgId, userId: collegeBStudentUser.id, role: 'student' },
+      {
+        id: collegeBStudentRecordId,
+        orgId: collegeBOrgId,
+        userId: collegeBStudentUser.id,
+        departmentId: '10000000-0000-0000-0000-000000000002',
+        enrollment_no: 'ENR-STUDENT-B',
+        graduating_year: 2026,
+        program_level: 'undergraduate',
+        is_minor: false,
+        createdAt: new Date().toISOString(),
+      }
+    );
+
     const jwtVerifier = new JwtVerifier(TEST_JWT_SECRET);
     authService = new AuthService({ userRepository: userRepo, jwtVerifier });
 
@@ -151,28 +225,12 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
       trustedIngestionStore,
       githubCredentialRepository: githubCredentialRepo,
       ingestionJobRepository: ingestionJobRepo,
+      repositoryRepository: repositoryRepo,
       tokenCipher,
       githubClient: mockGitHubClient,
       githubAccountService,
       staticRepoIngestionService,
       anchorService,
-    });
-
-    const collegeBStudentUser = {
-      id: '20000000-0000-0000-0000-000000000099',
-      authSubject: 'sub-student-b',
-      email: 'student@college-b.edu',
-      fullName: 'College B Student',
-      createdAt: new Date().toISOString(),
-    };
-    await userRepo.registerUser(collegeBStudentUser);
-    await userRepo.addMembership({
-      id: '30000000-0000-0000-0000-000000000099',
-      userId: collegeBStudentUser.id,
-      orgId: collegeBOrgId,
-      role: 'student',
-      status: 'active',
-      createdAt: new Date().toISOString(),
     });
 
     student1Token = await createTestToken({
@@ -227,7 +285,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
     it('1.2. Student cannot initiate GitHub connection on behalf of another student', async () => {
       const res = await app.inject({
         method: 'GET',
-        url: `/api/integrations/github/connect?studentId=${studentUser2.id}`,
+        url: `/api/integrations/github/connect?studentId=${student2RecordId}`,
         headers: {
           authorization: `Bearer ${student1Token}`,
           'x-org-id': collegeAOrgId,
@@ -238,7 +296,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
       expect(res.json().error).toContain('FORBIDDEN_STUDENT_ACCESS');
     });
 
-    it('1.3. Officer cannot connect GitHub account (only students)', async () => {
+    it('1.3. Officer cannot connect GitHub account (delegated connection prohibited)', async () => {
       const res = await app.inject({
         method: 'GET',
         url: '/api/integrations/github/connect',
@@ -248,8 +306,8 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
         },
       });
 
-      // Officer calling without studentId or role check:
-      expect(res.statusCode).toBe(200); // Officer connecting for target is allowed when target specified
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toContain('FORBIDDEN_DELEGATED_CONNECTION');
     });
 
     it('1.4. Callback consumes state, verifies PKCE, exchanges token, and encrypts credentials at rest', async () => {
@@ -295,10 +353,10 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
       expect(status.githubUsername).toBe('mock-student-gh');
       expect(status.accessToken).toBeUndefined(); // NEVER EXPOSED!
 
-      // 4. Verify token in repository is encrypted
+      // 4. Verify token in repository is encrypted and stored under verified student1RecordId
       const connected = await githubCredentialRepo.getConnectedAccount(
         { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' },
-        studentUser1.id,
+        student1RecordId,
         collegeAOrgId
       );
       expect(connected?.encryptedAccessToken).toBeDefined();
@@ -438,7 +496,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
       expect(() => tokenCipher.decrypt(tamperedTag)).toThrow(/AUTHENTICATED_DECRYPTION_FAILED/);
     });
 
-    it('1.10. Authorization URL generation uses default read-only scope "read:user" and rejects "repo:read"', async () => {
+    it('1.10. Authorization URL generation uses default read-only scope "read:user public_repo" space-separated', async () => {
       const initRes = await app.inject({
         method: 'GET',
         url: '/api/integrations/github/connect',
@@ -450,40 +508,40 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
 
       expect(initRes.statusCode).toBe(200);
       const url = new URL(initRes.json().url);
-      expect(url.searchParams.get('scope')).toBe('read:user');
+      expect(url.searchParams.get('scope')).toBe('read:user public_repo');
       expect(url.searchParams.get('scope')).not.toContain('repo:read');
     });
 
     it('1.11. Service allows configured allowed scopes and rejects invalid/excessive scopes', async () => {
       const sessionCtx = { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' as const };
 
-      // Valid custom scopes
+      // Valid custom scopes (space-separated per RFC 6749)
       const customRes = await githubAccountService.initiateConnection(
         sessionCtx,
-        studentUser1.id,
+        student1RecordId,
         'http://localhost:3000/api/integrations/github/callback',
         ['read:user', 'public_repo']
       );
       const customUrl = new URL(customRes.url);
-      expect(customUrl.searchParams.get('scope')).toBe('read:user,public_repo');
+      expect(customUrl.searchParams.get('scope')).toBe('read:user public_repo');
 
       // Invalid scope 'repo:read' rejected
       await expect(
         githubAccountService.initiateConnection(
           sessionCtx,
-          studentUser1.id,
+          student1RecordId,
           'http://localhost:3000/api/integrations/github/callback',
           ['repo:read']
         )
       ).rejects.toThrow(/INVALID_GITHUB_SCOPE/);
 
-      // Excessive scope 'delete_repo' rejected
+      // Excessive broad 'repo' scope rejected under public-only architecture
       await expect(
         githubAccountService.initiateConnection(
           sessionCtx,
-          studentUser1.id,
+          student1RecordId,
           'http://localhost:3000/api/integrations/github/callback',
-          ['read:user', 'delete_repo']
+          ['read:user', 'repo']
         )
       ).rejects.toThrow(/INVALID_GITHUB_SCOPE/);
     });
@@ -634,6 +692,131 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
         (process.env as any).NODE_ENV = originalEnv;
       }
     });
+
+    it('1.19. Browser redirect arriving without Authorization header returns 302 redirecting to frontend callback page', async () => {
+      const initRes = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/github/connect',
+        headers: {
+          authorization: `Bearer ${student1Token}`,
+          'x-org-id': collegeAOrgId,
+        },
+      });
+      const { state } = initRes.json();
+
+      // Browser GET redirect from GitHub without auth header
+      const redirectRes = await app.inject({
+        method: 'GET',
+        url: `/api/integrations/github/callback?code=mock-code-browser&state=${state}`,
+      });
+
+      expect(redirectRes.statusCode).toBe(302);
+      expect(redirectRes.headers.location).toContain('/integrations/github/callback?code=mock-code-browser&state=');
+      expect(redirectRes.headers.location).toContain(state);
+    });
+
+    it('1.20. Frontend submits authenticated POST /api/integrations/github/callback, completing handshake and rejecting replay', async () => {
+      const initRes = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/github/connect',
+        headers: {
+          authorization: `Bearer ${student1Token}`,
+          'x-org-id': collegeAOrgId,
+        },
+      });
+      const { state } = initRes.json();
+
+      // Authenticated POST request from frontend SPA
+      const postRes = await app.inject({
+        method: 'POST',
+        url: '/api/integrations/github/callback',
+        headers: {
+          authorization: `Bearer ${student1Token}`,
+          'x-org-id': collegeAOrgId,
+        },
+        payload: {
+          code: 'mock-code-spa',
+          state,
+        },
+      });
+
+      expect(postRes.statusCode).toBe(200);
+      const postData = postRes.json();
+      expect(postData.success).toBe(true);
+      expect(postData.githubUsername).toBe('mock-student-gh');
+      expect(postData.githubUserId).toBe('999999');
+
+      // Replay rejection on POST endpoint
+      const replayPostRes = await app.inject({
+        method: 'POST',
+        url: '/api/integrations/github/callback',
+        headers: {
+          authorization: `Bearer ${student1Token}`,
+          'x-org-id': collegeAOrgId,
+        },
+        payload: {
+          code: 'mock-code-spa',
+          state,
+        },
+      });
+      expect(replayPostRes.statusCode).toBe(400);
+      expect(replayPostRes.json().error).toContain('INVALID_OR_EXPIRED_OAUTH_STATE');
+    });
+
+    it('1.21. Officer or platform admin attempting POST /api/integrations/github/callback is rejected with 403 FORBIDDEN_DELEGATED_CONNECTION', async () => {
+      const postRes = await app.inject({
+        method: 'POST',
+        url: '/api/integrations/github/callback',
+        headers: {
+          authorization: `Bearer ${officerToken}`,
+          'x-org-id': collegeAOrgId,
+        },
+        payload: {
+          code: 'mock-code-officer',
+          state: 'some-state',
+        },
+      });
+
+      expect(postRes.statusCode).toBe(403);
+      expect(postRes.json().error).toContain('FORBIDDEN_DELEGATED_CONNECTION');
+    });
+
+    it('1.22. User without student profile in tenant receives 404 STUDENT_RECORD_NOT_FOUND', async () => {
+      // Create user with student role in membership, but no students table record
+      const noStudentRecordUser = {
+        id: '20000000-0000-0000-0000-000000000088',
+        authSubject: 'sub-student-no-record',
+        email: 'ghost@college-a.edu',
+        fullName: 'Ghost Student',
+        createdAt: new Date().toISOString(),
+      };
+      await userRepo.registerUser(noStudentRecordUser);
+      await userRepo.addMembership({
+        id: '30000000-0000-0000-0000-000000000088',
+        userId: noStudentRecordUser.id,
+        orgId: collegeAOrgId,
+        role: 'student',
+        status: 'active',
+        createdAt: new Date().toISOString(),
+      });
+
+      const ghostToken = await createTestToken({
+        sub: noStudentRecordUser.authSubject,
+        email: noStudentRecordUser.email,
+      });
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/github/connect',
+        headers: {
+          authorization: `Bearer ${ghostToken}`,
+          'x-org-id': collegeAOrgId,
+        },
+      });
+
+      expect(res.statusCode).toBe(404);
+      expect(res.json().error).toContain('STUDENT_RECORD_NOT_FOUND');
+    });
   });
 
   // =========================================================================
@@ -679,7 +862,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
 
       // CRITICAL ASSERTION: STRICT ZERO GITHUB CALLS
       expect(mockGitHubClient.totalCallCount).toBe(0);
-      expect(snapshotStore.hasSnapshot('repo', 'sha', 'src/math.ts', collegeAOrgId, studentUser1.id)).toBe(false);
+      expect(snapshotStore.hasSnapshot('repo', 'sha', 'src/math.ts', collegeAOrgId, student1RecordId)).toBe(false);
     });
 
     it('2.2. Ingestion fails closed when consent is revoked with ZERO GitHub API calls', async () => {
@@ -695,9 +878,9 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
         headers: { authorization: `Bearer ${student1Token}`, 'x-org-id': collegeAOrgId },
       });
 
-      // Grant then immediately revoke consent
+      // Grant then immediately revoke consent for verified student1RecordId
       const ctx = { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' as const };
-      const grant = await consentRepo.grantConsent(ctx, studentUser1.id, 'repo_verification');
+      const grant = await consentRepo.grantConsent(ctx, student1RecordId, 'repo_verification');
       await consentRepo.revokeConsent(ctx, grant.id, 'Student revoked');
 
       mockGitHubClient.totalCallCount = 0;
@@ -802,7 +985,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
 
       // Grant consent
       const ctx = { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' as const };
-      await consentRepo.grantConsent(ctx, studentUser1.id, 'repo_verification');
+      await consentRepo.grantConsent(ctx, student1RecordId, 'repo_verification');
 
       // Seed mock repository
       mockGitHubClient.seedCommit('alice', 'my-project', 'main', {
@@ -889,7 +1072,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
         commitSha,
         'src/math.ts',
         collegeAOrgId,
-        studentUser1.id
+        student1RecordId
       );
       expect(mathSnap).toBeDefined();
       expect(mathSnap?.blobSha).toBe(file1BlobSha);
@@ -901,7 +1084,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
         collegeAOrgId,
         resData.repositoryId,
         commitSha,
-        studentUser1.id
+        student1RecordId
       );
       expect(record).toBeDefined();
       expect(record?.manifest.length).toBe(2);
@@ -933,7 +1116,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
 
       // Zero snapshots registered due to fail-closed atomic abort
       expect(
-        snapshotStore.hasSnapshot('any', commitSha, 'src/math.ts', collegeAOrgId, studentUser1.id)
+        snapshotStore.hasSnapshot('any', commitSha, 'src/math.ts', collegeAOrgId, student1RecordId)
       ).toBe(false);
     });
 
@@ -996,7 +1179,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
         commitSha,
         'src/nested.ts',
         collegeAOrgId,
-        studentUser1.id
+        student1RecordId
       );
       expect(snap).toBeDefined();
       expect(snap?.filePath).toBe('src/nested.ts');
@@ -1046,6 +1229,8 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
         snapshotStore,
         anchorService,
         ingestionJobRepo,
+        repositoryRepo,
+        tenantRepo: new InMemoryTenantRepository(tenantStore),
         limits: { maxFiles: 1 },
       });
 
@@ -1075,6 +1260,31 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
 
       expect(ingestRes.statusCode).toBe(400);
       expect(ingestRes.json().error).toContain('FILE_COUNT_LIMIT_EXCEEDED');
+    });
+
+    it('3.6. Private repository ingestion is rejected fail-closed with 400 PRIVATE_REPOSITORY_NOT_SUPPORTED', async () => {
+      mockGitHubClient.seedRepoAccess('alice', 'my-private-repo', {
+        accessible: true,
+        repoId: 888888,
+        isPrivate: true,
+      });
+
+      const privRes = await app.inject({
+        method: 'POST',
+        url: '/api/evidence/repositories/ingest',
+        headers: {
+          authorization: `Bearer ${student1Token}`,
+          'x-org-id': collegeAOrgId,
+        },
+        payload: {
+          owner: 'alice',
+          repo: 'my-private-repo',
+          ref: 'main',
+        },
+      });
+
+      expect(privRes.statusCode).toBe(400);
+      expect(privRes.json().error).toContain('PRIVATE_REPOSITORY_NOT_SUPPORTED');
     });
   });
 
@@ -1109,7 +1319,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
       });
 
       const ctx = { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' as const };
-      await consentRepo.grantConsent(ctx, studentUser1.id, 'repo_verification');
+      await consentRepo.grantConsent(ctx, student1RecordId, 'repo_verification');
 
       mockGitHubClient.seedCommit('alice', 'calc-repo', 'main', { sha: commitSha, treeSha });
       mockGitHubClient.seedTree('alice', 'calc-repo', treeSha, [
@@ -1147,7 +1357,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
       const anchor: ExactCodeAnchor = {
         id: crypto.randomUUID(),
         orgId: collegeAOrgId,
-        studentId: studentUser1.id,
+        studentId: student1RecordId,
         repositoryId,
         commitSha,
         filePath,
@@ -1171,7 +1381,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
         },
         payload: {
           anchor,
-          studentId: studentUser1.id,
+          studentId: student1RecordId,
           options: {
             authoritative: true,
           },
@@ -1185,7 +1395,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
       expect(resolveData.provenance).toBe('trusted_ingestion_pipeline');
     });
 
-    it('4.2. Exact duplicate re-ingestion is idempotent', async () => {
+    it('4.2. Exact duplicate re-ingestion is idempotent and returns same repositoryId', async () => {
       const runIngest = () =>
         app.inject({
           method: 'POST',
@@ -1203,10 +1413,43 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
 
       const first = await runIngest();
       expect(first.statusCode).toBe(201);
+      const firstRepoId = first.json().repositoryId;
 
       const second = await runIngest();
       expect(second.statusCode).toBe(201);
       expect(second.json().fileCount).toBe(1);
+      expect(second.json().repositoryId).toBe(firstRepoId);
+    });
+
+    it('4.3. Cross-student repository ID substitution is rejected with 403 CROSS_STUDENT_REPOSITORY_FORBIDDEN', async () => {
+      // Create repository belonging to student 2
+      const ctxStudent2 = { orgId: collegeAOrgId, userId: studentUser2.id, role: 'student' as const };
+      const student2Grant = await consentRepo.grantConsent(ctxStudent2, student2RecordId, 'repo_verification');
+      const student2Repo = await repositoryRepo.getOrCreateRepository(ctxStudent2, {
+        studentId: student2RecordId,
+        providerRepoId: '999999999',
+        url: 'https://github.com/bob/bob-repo',
+        consentGrantId: student2Grant.id,
+      });
+
+      // Student 1 attempts to ingest using student 2's repository ID
+      const crossRes = await app.inject({
+        method: 'POST',
+        url: '/api/evidence/repositories/ingest',
+        headers: {
+          authorization: `Bearer ${student1Token}`,
+          'x-org-id': collegeAOrgId,
+        },
+        payload: {
+          owner: 'alice',
+          repo: 'calc-repo',
+          ref: 'main',
+          repositoryId: student2Repo.id,
+        },
+      });
+
+      expect(crossRes.statusCode).toBe(403);
+      expect(crossRes.json().error).toContain('CROSS_STUDENT_REPOSITORY_FORBIDDEN');
     });
   });
 
@@ -1228,7 +1471,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
         headers: { authorization: `Bearer ${student1Token}`, 'x-org-id': collegeAOrgId },
       });
       const ctx = { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' as const };
-      await consentRepo.grantConsent(ctx, studentUser1.id, 'repo_verification');
+      await consentRepo.grantConsent(ctx, student1RecordId, 'repo_verification');
 
       const commitSha = '1111111111111111111111111111111111111111';
       const treeSha = '2222222222222222222222222222222222222222';
@@ -1299,7 +1542,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
         headers: { authorization: `Bearer ${student1Token}`, 'x-org-id': collegeAOrgId },
       });
       const ctx = { orgId: collegeAOrgId, userId: studentUser1.id, role: 'student' as const };
-      await consentRepo.grantConsent(ctx, studentUser1.id, 'repo_verification');
+      await consentRepo.grantConsent(ctx, student1RecordId, 'repo_verification');
     });
 
     it('6.1. Repository with 200 eligible files succeeds within the 200-file limit', async () => {
@@ -1341,6 +1584,7 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
       );
       expect(job?.status).toBe('completed');
       expect(job?.fileCount).toBe(200);
+      expect(job?.studentId).toBe(student1RecordId);
     });
 
     it('6.2. Repository with 201 eligible files fails closed with FILE_COUNT_LIMIT_EXCEEDED', async () => {
@@ -1458,6 +1702,8 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
         snapshotStore,
         anchorService,
         ingestionJobRepo,
+        repositoryRepo,
+        tenantRepo: new InMemoryTenantRepository(tenantStore),
         limits: {
           maxFiles: 200,
           maxFileSizeBytes: 512 * 1024,
@@ -1469,12 +1715,14 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
         persistenceMode: 'in-memory',
         authService,
         userRepository: userRepo,
+        tenantStore,
         consentRepository: consentRepo,
         auditRepository: auditRepo,
         snapshotStore,
         trustedIngestionStore,
         githubCredentialRepository: githubCredentialRepo,
         ingestionJobRepository: ingestionJobRepo,
+        repositoryRepository: repositoryRepo,
         tokenCipher,
         githubClient: mockGitHubClient,
         githubAccountService,
@@ -1516,14 +1764,14 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
         commitSha,
         'src/f1.ts',
         collegeAOrgId,
-        studentUser1.id
+        student1RecordId
       );
       const hasSnap2 = await snapshotStore.hasSnapshot(
         'alice/repo-over-aggregate',
         commitSha,
         'src/f2.ts',
         collegeAOrgId,
-        studentUser1.id
+        student1RecordId
       );
       expect(hasSnap1).toBe(false);
       expect(hasSnap2).toBe(false);

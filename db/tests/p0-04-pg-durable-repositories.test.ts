@@ -14,6 +14,9 @@ import {
   PgIngestionJobRepository,
 } from '../../apps/api/src/repositories/ingestion-job-repository.js';
 import {
+  PgRepositoryRepository,
+} from '../../apps/api/src/repositories/repository-repository.js';
+import {
   SourceSnapshot,
   TrustedIngestionRecord,
   SessionContext,
@@ -61,6 +64,7 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
   let trustedIngestionStore: PgTrustedIngestionStore;
   let credentialRepo: PgGitHubCredentialRepository;
   let jobRepo: PgIngestionJobRepository;
+  let repoRepository: PgRepositoryRepository;
 
   const cleanupFixtures = async () => {
     const client = await pool.connect();
@@ -71,7 +75,7 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
         DELETE FROM ingestion_jobs WHERE org_id IN ('${COLLEGE_A}', '${COLLEGE_B}');
         DELETE FROM github_oauth_states WHERE org_id IN ('${COLLEGE_A}', '${COLLEGE_B}');
         DELETE FROM connected_accounts WHERE student_id IN ('${STUDENT_A}', '${STUDENT_B}');
-        DELETE FROM repositories WHERE id IN ('${REPO_A}', '${REPO_B}');
+        DELETE FROM repositories WHERE student_id IN ('${STUDENT_A}', '${STUDENT_B}') OR id IN ('${REPO_A}', '${REPO_B}');
         DELETE FROM consent_grants WHERE id IN ('${CONSENT_A}', '${CONSENT_B}');
         DELETE FROM students WHERE id IN ('${STUDENT_A}', '${STUDENT_B}');
         DELETE FROM departments WHERE id IN ('${DEPT_A}', '${DEPT_B}');
@@ -93,6 +97,7 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
     trustedIngestionStore = new PgTrustedIngestionStore(pool);
     credentialRepo = new PgGitHubCredentialRepository(pool);
     jobRepo = new PgIngestionJobRepository(pool);
+    repoRepository = new PgRepositoryRepository(pool);
 
     // Initial cleanup
     await cleanupFixtures();
@@ -519,6 +524,223 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
       expect(completed?.status).toBe('completed');
       expect(completed?.fileCount).toBe(5);
       expect(completed?.registeredSnapshotsCount).toBe(5);
+    });
+  });
+
+  // =========================================================================
+  // 5. PgRepositoryRepository (Canonical Repository Database Records)
+  // =========================================================================
+
+  describe('5. PgRepositoryRepository (Canonical Repository Database Records)', () => {
+    const ctxA: SessionContext = {
+      orgId: COLLEGE_A,
+      userId: STUDENT_A,
+      role: 'student',
+    };
+
+    const ctxB: SessionContext = {
+      orgId: COLLEGE_B,
+      userId: STUDENT_B,
+      role: 'student',
+    };
+
+    it('5.1. First-time repository registration via getOrCreateRepository creates canonical row', async () => {
+      const repo = await repoRepository.getOrCreateRepository(ctxA, {
+        studentId: STUDENT_A,
+        providerRepoId: '123456789',
+        url: 'https://github.com/alice/test-repo',
+        defaultBranch: 'main',
+        consentGrantId: CONSENT_A,
+      });
+
+      expect(repo).toBeDefined();
+      expect(repo.id).toBeDefined();
+      expect(repo.studentId).toBe(STUDENT_A);
+      expect(repo.provider).toBe('github');
+      expect(repo.providerRepoId).toBe('123456789');
+      expect(repo.url).toBe('https://github.com/alice/test-repo');
+      expect(repo.defaultBranch).toBe('main');
+      expect(repo.consentGrantId).toBe(CONSENT_A);
+
+      const fetched = await repoRepository.getRepositoryById(ctxA, repo.id);
+      expect(fetched).not.toBeNull();
+      expect(fetched?.id).toBe(repo.id);
+    });
+
+    it('5.2. Re-ingestion of an already registered repository returns the same ID (idempotency)', async () => {
+      const repoFirst = await repoRepository.getOrCreateRepository(ctxA, {
+        studentId: STUDENT_A,
+        providerRepoId: '987654321',
+        url: 'https://github.com/alice/idempotent-repo',
+        defaultBranch: 'main',
+        consentGrantId: CONSENT_A,
+      });
+
+      const repoSecond = await repoRepository.getOrCreateRepository(ctxA, {
+        studentId: STUDENT_A,
+        providerRepoId: '987654321',
+        url: 'https://github.com/alice/idempotent-repo',
+        defaultBranch: 'main',
+        consentGrantId: CONSENT_A,
+      });
+
+      expect(repoSecond.id).toBe(repoFirst.id);
+    });
+
+    it('5.3. Cross-student repository ID substitution throws CROSS_STUDENT_REPOSITORY_FORBIDDEN', async () => {
+      // Create repository belonging to Student A
+      const repoA = await repoRepository.getOrCreateRepository(ctxA, {
+        studentId: STUDENT_A,
+        providerRepoId: '555555555',
+        url: 'https://github.com/alice/student-a-repo',
+        defaultBranch: 'main',
+        consentGrantId: CONSENT_A,
+      });
+
+      // Student B attempts to reuse Student A's repository ID
+      await expect(
+        repoRepository.getOrCreateRepository(ctxA, {
+          studentId: STUDENT_B,
+          providerRepoId: '555555555',
+          url: 'https://github.com/alice/student-a-repo',
+          defaultBranch: 'main',
+          consentGrantId: CONSENT_A,
+          requestedRepositoryId: repoA.id,
+        })
+      ).rejects.toThrow(/CROSS_STUDENT_REPOSITORY_FORBIDDEN/);
+    });
+
+    it('5.4. Cross-tenant repository ID query fails under RLS (REPOSITORY_NOT_FOUND)', async () => {
+      // Repository created in College A
+      const repoA = await repoRepository.getOrCreateRepository(ctxA, {
+        studentId: STUDENT_A,
+        providerRepoId: '777777777',
+        url: 'https://github.com/alice/college-a-repo',
+        defaultBranch: 'main',
+        consentGrantId: CONSENT_A,
+      });
+
+      // College B attempts to access it via getRepositoryById under College B context
+      const crossTenantFetch = await repoRepository.getRepositoryById(ctxB, repoA.id);
+      expect(crossTenantFetch).toBeNull();
+
+      // College B attempts to pass it as requestedRepositoryId
+      await expect(
+        repoRepository.getOrCreateRepository(ctxB, {
+          studentId: STUDENT_B,
+          providerRepoId: '777777777',
+          url: 'https://github.com/alice/college-a-repo',
+          defaultBranch: 'main',
+          consentGrantId: CONSENT_B,
+          requestedRepositoryId: repoA.id,
+        })
+      ).rejects.toThrow(/REPOSITORY_NOT_FOUND/);
+    });
+
+    it('5.5. Missing or invalid consent grant throws foreign key error', async () => {
+      const fakeConsentId = randomUUID();
+      await expect(
+        repoRepository.getOrCreateRepository(ctxA, {
+          studentId: STUDENT_A,
+          providerRepoId: '444444444',
+          url: 'https://github.com/alice/no-consent-repo',
+          defaultBranch: 'main',
+          consentGrantId: fakeConsentId,
+        })
+      ).rejects.toThrow();
+    });
+
+    it('5.6. Correct foreign-key relationships for ingestion_jobs, trusted_ingestion_records, and source_snapshots referencing created repository', async () => {
+      const canonicalRepo = await repoRepository.getOrCreateRepository(ctxA, {
+        studentId: STUDENT_A,
+        providerRepoId: '333333333',
+        url: 'https://github.com/alice/relational-repo',
+        defaultBranch: 'main',
+        consentGrantId: CONSENT_A,
+      });
+
+      const ingestionId = randomUUID();
+      const commitSha = 'ca70000000000000000000000000000000000001';
+      const treeSha = 'bee0000000000000000000000000000000000002';
+      const fileBytes = Buffer.from('export const test = 1;\n', 'utf8');
+      const blobSha = computeGitBlobSha(fileBytes);
+      const rawFileHash = computeRawFileHash(fileBytes);
+
+      // Ingestion job referencing canonical repository
+      await jobRepo.createJob({
+        ingestionId,
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: canonicalRepo.id,
+        owner: 'alice',
+        repo: 'relational-repo',
+        ref: 'main',
+        status: 'persisted',
+        fileCount: 1,
+        retainedBytes: fileBytes.length,
+        registeredSnapshotsCount: 0,
+        createdAt: new Date().toISOString(),
+      });
+
+      // Trusted ingestion record referencing canonical repository
+      const record: TrustedIngestionRecord = {
+        ingestionId,
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: canonicalRepo.id,
+        commitSha,
+        treeSha,
+        verifiedAt: new Date().toISOString(),
+        provenance: 'trusted_ingestion_pipeline',
+        manifest: [
+          {
+            filePath: 'src/test.ts',
+            blobSha,
+            rawFileHash,
+            byteSize: fileBytes.length,
+          },
+        ],
+      };
+      await trustedIngestionStore.saveRecord(record);
+
+      // Source snapshot referencing canonical repository
+      const snapshot: SourceSnapshot = {
+        snapshotId: randomUUID(),
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: canonicalRepo.id,
+        commitSha,
+        filePath: 'src/test.ts',
+        rawBytes: fileBytes,
+        rawFileHash,
+        blobSha,
+        capturedAt: new Date().toISOString(),
+        provenance: 'trusted_ingestion_pipeline',
+        ingestionId,
+        registrationState: 'audit_committed',
+      };
+      await snapshotStore.saveSnapshot(snapshot);
+
+      // Verify all 3 persisted and retrievable
+      const fetchedJob = await jobRepo.getJob(ctxA, ingestionId);
+      expect(fetchedJob?.repositoryId).toBe(canonicalRepo.id);
+
+      const fetchedRecord = await trustedIngestionStore.getRecord(
+        COLLEGE_A,
+        canonicalRepo.id,
+        commitSha,
+        STUDENT_A
+      );
+      expect(fetchedRecord?.repositoryId).toBe(canonicalRepo.id);
+
+      const fetchedSnapshot = await snapshotStore.getSnapshot(
+        canonicalRepo.id,
+        commitSha,
+        'src/test.ts',
+        COLLEGE_A,
+        STUDENT_A
+      );
+      expect(fetchedSnapshot?.repositoryId).toBe(canonicalRepo.id);
     });
   });
 });

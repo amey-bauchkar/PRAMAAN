@@ -391,7 +391,7 @@ export class MockGitHubClient implements IGitHubClient {
     return {
       accessToken: `gho_mock_token_for_${code}`,
       tokenType: 'bearer',
-      scope: this.mockScopeOverride ?? 'read:user',
+      scope: this.mockScopeOverride ?? 'read:user public_repo',
       expiresIn: 28800,
     };
   }
@@ -572,5 +572,25 @@ export class MockGitHubClient implements IGitHubClient {
       rawHash,
       byteSize: rawBytes.length,
     };
+  }
+
+  /**
+   * Helper to seed repository access metadata into the mock client.
+   */
+  public seedRepoAccess(
+    owner: string,
+    repo: string,
+    access: Partial<GitHubRepoAccessResponse>
+  ): void {
+    const key = `${owner}/${repo}`.toLowerCase();
+    this.mockRepos.set(key, {
+      accessible: access.accessible ?? true,
+      repoId: access.repoId ?? 1234567,
+      owner,
+      name: repo,
+      defaultBranch: access.defaultBranch ?? 'main',
+      isPrivate: access.isPrivate ?? false,
+      permissions: access.permissions ?? { pull: true },
+    });
   }
 }

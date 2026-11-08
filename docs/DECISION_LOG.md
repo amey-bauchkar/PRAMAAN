@@ -227,6 +227,42 @@
   6. **Synchronous Request Lifecycle Documentation:** Accurately documented the request lifecycle as synchronous execution within HTTP timeout boundaries with durable relational tracking in `ingestion_jobs`, providing auditability, idempotent status polling via `GET /api/evidence/repositories/ingest/:id`, and the architectural foundation for a future decoupled daemon.
 - **Consequences:** Eliminates OAuth scope confusion, closes cross-tenant OAuth state exposure, prevents DoS/zip-bomb attacks via pre-download tree size filtering, enables zero-downtime token key rotation, and secures OAuth callback redirection against spoofing.
 
+---
+
+## ADR-18: User ID vs Student ID Disambiguation, Browser OAuth Redirect Architecture, Delegated Connection Prohibition, and Canonical Repository Relational Records
+
+- **Status:** Approved
+- **Context:** An independent integration review of PR #2 identified four critical architectural issues and one capability constraint:
+  1. *User ID vs Student ID Disambiguation:* `SessionContext.userId` represents `users.id`. In PostgreSQL schema migrations 003 and 011, foreign keys in `repositories`, `connected_accounts`, `github_oauth_states`, `source_snapshots`, `trusted_ingestion_records`, and `ingestion_jobs` reference `students(id)`. Code using `context.userId` directly as a student ID broke relational foreign key integrity.
+  2. *Browser OAuth Redirect Architecture:* Browsers redirected from GitHub back to the server cannot send custom Authorization Bearer headers. An unauthenticated browser GET to `/api/integrations/github/callback` failed or required unauthenticated token exchange.
+  3. *Prohibition of Delegated GitHub Connections:* Staff members (placement officers, platform admins) attempting to initiate OAuth on behalf of students would erroneously link staff GitHub identities to student records.
+  4. *Canonical Repository Database Records:* The static ingestion engine generated unbacked random repository UUIDs on every ingestion, missing persistent repository records, consent grant linkage, and cross-student ownership verification.
+  5. *Public-Repository-Only Scope (Option B):* Requesting broad `repo` write scopes for public repositories violated least privilege.
+- **Decision:**
+  1. **User ID vs Student ID Disambiguation:**
+     - Extended `ITenantRepository`, `InMemoryTenantRepository`, and `PgTenantRepository` with `getStudentByUserId(context, userId)`.
+     - In `apps/api/src/app.ts`, student endpoints resolve `student = await tenantRepo.getStudentByUserId(context, context.userId)` server-side.
+     - Enforce that client-supplied `studentId` cannot override or substitute verified student identity (`FORBIDDEN_STUDENT_ACCESS`, 403).
+     - Bound all database foreign keys in `repositories`, `connected_accounts`, `github_oauth_states`, `source_snapshots`, `trusted_ingestion_records`, and `ingestion_jobs` strictly to `students.id`.
+     - Adapted `AnchorService.resolveAnchor` and `StaticRepoIngestionService` to respect canonical student profile identity while preserving frozen P0-05 resolver core.
+  2. **Browser OAuth Redirect Architecture:**
+     - Implemented dedicated client component page `apps/web/app/integrations/github/callback/page.tsx` wrapped in React `<Suspense>`.
+     - `GET /api/integrations/github/callback` without Authorization header issues HTTP 302 Found redirect to `/integrations/github/callback?code=...&state=...`.
+     - Frontend extracts code and state and issues authenticated `POST /api/integrations/github/callback` with Bearer JWT, executing PKCE verification, token exchange, credential encryption, and audit logging.
+  3. **Prohibition of Delegated Connection:**
+     - Only students (`context.role === 'student'`) may connect their GitHub account.
+     - Officer and administrator attempts to initiate or complete connection fail closed with 403 `FORBIDDEN_DELEGATED_CONNECTION`.
+  4. **Canonical Repository Relational Records:**
+     - Implemented `IRepositoryRepository`, `InMemoryRepositoryRepository`, and `PgRepositoryRepository` backed by `repositories` table with `getOrCreateRepository`, `getRepositoryById`, and `findRepositoryByProviderId`.
+     - Repository registration links `student_id`, `provider: 'github'`, `provider_repo_id`, `url`, `default_branch`, and verified `consent_grant_id`.
+     - Idempotent re-ingestion returns the existing canonical `repositoryId`.
+     - Cross-student repository ID substitution throws `CROSS_STUDENT_REPOSITORY_FORBIDDEN` (403). Cross-tenant lookup fails closed under PostgreSQL RLS (`REPOSITORY_NOT_FOUND`).
+  5. **Public-Repository-Only Scope (Option B):**
+     - Declared public-repository-only scope: default scopes set to `['read:user', 'public_repo']` space-separated per RFC 6749.
+     - Broad `repo` write scope is excluded.
+     - Ingestion of private repositories is rejected fail-closed with 400 `PRIVATE_REPOSITORY_NOT_SUPPORTED`.
+- **Consequences:** Restores 100% relational foreign-key integrity in PostgreSQL, eliminates browser OAuth token leaks, prevents delegated identity misattribution, establishes canonical repository tracking, and enforces least-privilege OAuth scopes.
+
 
 
 

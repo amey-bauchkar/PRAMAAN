@@ -36,6 +36,11 @@ import {
   PgIngestionJobRepository,
 } from './repositories/ingestion-job-repository.js';
 import {
+  IRepositoryRepository,
+  InMemoryRepositoryRepository,
+  PgRepositoryRepository,
+} from './repositories/repository-repository.js';
+import {
   IGitHubClient,
   DefaultGitHubClient,
 } from './services/github-client.js';
@@ -60,6 +65,7 @@ export interface AppOptions {
   githubAccountService?: GitHubAccountService;
   staticRepoIngestionService?: StaticRepoIngestionService;
   ingestionJobRepository?: IIngestionJobRepository;
+  repositoryRepository?: IRepositoryRepository;
   githubOAuthRedirectUri?: string;
   githubOAuthRedirectAllowlist?: string[];
   // Legacy / convenience options for tests:
@@ -95,7 +101,8 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       opts.tokenCipher ||
       opts.githubAccountService ||
       opts.staticRepoIngestionService ||
-      opts.ingestionJobRepository
+      opts.ingestionJobRepository ||
+      opts.repositoryRepository
     ) {
       throw new Error(
         'FATAL: Production mode prohibits injecting custom repositories or mock stores. All production repositories must be constructed internally using the restricted runtime pool.'
@@ -165,6 +172,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
   let trustedIngestionStore: ITrustedIngestionStore;
   let githubCredentialRepo: IGitHubCredentialRepository;
   let ingestionJobRepo: IIngestionJobRepository;
+  let repositoryRepo: IRepositoryRepository;
   let tokenCipher: ITokenCipher;
   let githubClient: IGitHubClient;
   let githubAccountService: GitHubAccountService;
@@ -182,6 +190,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     trustedIngestionStore = new PgTrustedIngestionStore(runtimePool);
     githubCredentialRepo = new PgGitHubCredentialRepository(runtimePool);
     ingestionJobRepo = new PgIngestionJobRepository(runtimePool);
+    repositoryRepo = new PgRepositoryRepository(runtimePool);
     tokenCipher = new AesGcmTokenCipher();
     githubClient = new DefaultGitHubClient();
     githubAccountService = new GitHubAccountService({
@@ -204,6 +213,8 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       snapshotStore,
       anchorService,
       ingestionJobRepo,
+      repositoryRepo,
+      tenantRepo,
     });
   } else {
     if (opts.tenantRepository) {
@@ -277,6 +288,14 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       ingestionJobRepo = new InMemoryIngestionJobRepository();
     }
 
+    if (opts.repositoryRepository) {
+      repositoryRepo = opts.repositoryRepository;
+    } else if (usePostgres) {
+      repositoryRepo = new PgRepositoryRepository(getDbPool());
+    } else {
+      repositoryRepo = new InMemoryRepositoryRepository();
+    }
+
     tokenCipher = opts.tokenCipher ?? new AesGcmTokenCipher();
     githubClient = opts.githubClient ?? new DefaultGitHubClient();
     githubAccountService = opts.githubAccountService ?? new GitHubAccountService({
@@ -299,6 +318,8 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       snapshotStore,
       anchorService,
       ingestionJobRepo,
+      repositoryRepo,
+      tenantRepo,
     });
   }
 
@@ -315,6 +336,8 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
   (app as any).githubClient = githubClient;
   (app as any).githubAccountService = githubAccountService;
   (app as any).staticRepoIngestionService = staticRepoIngestionService;
+  (app as any).repositoryRepository = repositoryRepo;
+  (app as any).tenantRepository = tenantRepo;
 
   const canonicalRedirectUri =
     opts.githubOAuthRedirectUri ||
@@ -567,7 +590,15 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       snapshot = snapParse.data;
     }
 
-    const result = await anchorService.resolveAnchor(context, parseResult.data, snapshot);
+    let effectiveContext = context;
+    if (context.role === 'student') {
+      const student = await tenantRepo.getStudentByUserId(context, context.userId);
+      if (student) {
+        effectiveContext = { ...context, userId: student.id };
+      }
+    }
+
+    const result = await anchorService.resolveAnchor(effectiveContext, parseResult.data, snapshot);
 
     if (
       result.error === 'CROSS_TENANT_ACCESS_REJECTED' ||
@@ -704,21 +735,26 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
   // =========================================================================
 
   // Initiate GitHub OAuth Connection with PKCE S256
-  // Positive RBAC: student (own identity), officer, platform_admin
+  // Positive RBAC: Student ONLY (delegated identity linking strictly forbidden)
   app.get('/api/integrations/github/connect', async (req, reply) => {
     const context = await resolveSessionContext(req, reply);
     if (!context) return;
 
-    const allowedRoles: UserRole[] = ['student', 'officer', 'platform_admin'];
-    if (!allowedRoles.includes(context.role as UserRole)) {
+    if (context.role !== 'student') {
       return reply.status(403).send({
-        error: `FORBIDDEN_ROLE: Role '${context.role}' cannot connect GitHub accounts.`,
+        error: 'FORBIDDEN_DELEGATED_CONNECTION: Delegated GitHub account connection is not supported. Only students may connect their own GitHub account.',
+      });
+    }
+
+    const student = await tenantRepo.getStudentByUserId(context, context.userId);
+    if (!student) {
+      return reply.status(404).send({
+        error: 'STUDENT_RECORD_NOT_FOUND: No student profile found for current user in this institution.',
       });
     }
 
     const query = req.query as any;
-    const targetStudentId = query?.studentId || context.userId;
-    if (context.role === 'student' && targetStudentId !== context.userId) {
+    if (query?.studentId && query.studentId !== student.id) {
       return reply.status(403).send({
         error: 'FORBIDDEN_STUDENT_ACCESS: Students can only connect their own GitHub account.',
       });
@@ -735,37 +771,59 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     }
 
     try {
-      const initRes = await githubAccountService.initiateConnection(context, targetStudentId, redirectUri);
+      const initRes = await githubAccountService.initiateConnection(context, student.id, redirectUri);
       return reply.status(200).send(initRes);
     } catch (err: any) {
       if (err.message.startsWith('TENANT_CONTEXT_REQUIRED') || err.message.startsWith('INVALID_GITHUB_SCOPE')) {
         return reply.status(400).send({ error: err.message });
       }
-      if (err.message.startsWith('FORBIDDEN_STUDENT_ACCESS')) {
+      if (err.message.startsWith('FORBIDDEN_DELEGATED_CONNECTION') || err.message.startsWith('FORBIDDEN_STUDENT_ACCESS')) {
         return reply.status(403).send({ error: err.message });
       }
       return reply.status(500).send({ error: err.message });
     }
   });
 
-  // Handle GitHub OAuth Callback with PKCE Verifier & Token Encryption
+  // Handle GitHub OAuth Browser Redirect & Direct GET Callback
   app.get('/api/integrations/github/callback', async (req, reply) => {
-    const context = await resolveSessionContext(req, reply);
-    if (!context) return;
-
     const query = req.query as any;
     if (!query?.code || !query?.state) {
       return reply.status(400).send({ error: 'Missing required OAuth callback parameters: code, state' });
     }
 
+    const authHeader = req.headers['authorization'];
+    if (!authHeader) {
+      // Browser redirect from GitHub lacks Bearer token; 302 redirect to frontend callback handler
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+      const target = `${frontendUrl}/integrations/github/callback?code=${encodeURIComponent(query.code)}&state=${encodeURIComponent(query.state)}`;
+      return reply.status(302).redirect(target);
+    }
+
+    const context = await resolveSessionContext(req, reply);
+    if (!context) return;
+
+    if (context.role !== 'student') {
+      return reply.status(403).send({
+        error: 'FORBIDDEN_DELEGATED_CONNECTION: Delegated GitHub account connection is not supported. Only students may connect their own GitHub account.',
+      });
+    }
+
+    const student = await tenantRepo.getStudentByUserId(context, context.userId);
+    if (!student) {
+      return reply.status(404).send({
+        error: 'STUDENT_RECORD_NOT_FOUND: No student profile found for current user in this institution.',
+      });
+    }
+
     try {
-      const result = await githubAccountService.handleOAuthCallback(context, query.code, query.state);
+      const result = await githubAccountService.handleOAuthCallback(context, query.code, query.state, student.id);
       await auditRepo.log(
         context,
         'integration.github.connected',
         'github_connection',
         result.githubUserId,
         {
+          studentId: student.id,
           githubUsername: result.githubUsername,
           githubUserId: result.githubUserId,
         }
@@ -778,7 +836,66 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       if (err.message.startsWith('INSUFFICIENT_GITHUB_PERMISSIONS')) {
         return reply.status(403).send({ error: err.message });
       }
-      if (err.message.startsWith('CROSS_TENANT_OAUTH_REJECTED') || err.message.startsWith('FORBIDDEN_STUDENT_ACCESS')) {
+      if (
+        err.message.startsWith('CROSS_TENANT_OAUTH_REJECTED') ||
+        err.message.startsWith('FORBIDDEN_STUDENT_ACCESS') ||
+        err.message.startsWith('FORBIDDEN_DELEGATED_CONNECTION')
+      ) {
+        return reply.status(403).send({ error: err.message });
+      }
+      return reply.status(500).send({ error: err.message });
+    }
+  });
+
+  // Authenticated POST Callback for Frontend SPA OAuth Handshake
+  app.post('/api/integrations/github/callback', async (req, reply) => {
+    const context = await resolveSessionContext(req, reply);
+    if (!context) return;
+
+    if (context.role !== 'student') {
+      return reply.status(403).send({
+        error: 'FORBIDDEN_DELEGATED_CONNECTION: Delegated GitHub account connection is not supported. Only students may connect their own GitHub account.',
+      });
+    }
+
+    const body = req.body as any;
+    if (!body?.code || !body?.state) {
+      return reply.status(400).send({ error: 'Missing required OAuth callback parameters: code, state' });
+    }
+
+    const student = await tenantRepo.getStudentByUserId(context, context.userId);
+    if (!student) {
+      return reply.status(404).send({
+        error: 'STUDENT_RECORD_NOT_FOUND: No student profile found for current user in this institution.',
+      });
+    }
+
+    try {
+      const result = await githubAccountService.handleOAuthCallback(context, body.code, body.state, student.id);
+      await auditRepo.log(
+        context,
+        'integration.github.connected',
+        'github_connection',
+        result.githubUserId,
+        {
+          studentId: student.id,
+          githubUsername: result.githubUsername,
+          githubUserId: result.githubUserId,
+        }
+      );
+      return reply.status(200).send(result);
+    } catch (err: any) {
+      if (err.message.startsWith('INVALID_OR_EXPIRED_OAUTH_STATE')) {
+        return reply.status(400).send({ error: err.message });
+      }
+      if (err.message.startsWith('INSUFFICIENT_GITHUB_PERMISSIONS')) {
+        return reply.status(403).send({ error: err.message });
+      }
+      if (
+        err.message.startsWith('CROSS_TENANT_OAUTH_REJECTED') ||
+        err.message.startsWith('FORBIDDEN_STUDENT_ACCESS') ||
+        err.message.startsWith('FORBIDDEN_DELEGATED_CONNECTION')
+      ) {
         return reply.status(403).send({ error: err.message });
       }
       return reply.status(500).send({ error: err.message });
@@ -790,12 +907,29 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     const context = await resolveSessionContext(req, reply);
     if (!context) return;
 
-    const query = req.query as any;
-    const targetStudentId = query?.studentId || context.userId;
-    if (context.role === 'student' && targetStudentId !== context.userId) {
-      return reply.status(403).send({
-        error: 'FORBIDDEN_STUDENT_ACCESS: Students can only view their own connection status.',
-      });
+    let targetStudentId: string;
+    if (context.role === 'student') {
+      const student = await tenantRepo.getStudentByUserId(context, context.userId);
+      if (!student) {
+        return reply.status(404).send({
+          error: 'STUDENT_RECORD_NOT_FOUND: No student profile found for current user in this institution.',
+        });
+      }
+      targetStudentId = student.id;
+    } else {
+      const query = req.query as any;
+      if (!query?.studentId) {
+        return reply.status(400).send({
+          error: 'STUDENT_ID_REQUIRED: Placement officers and administrators must specify a studentId.',
+        });
+      }
+      const targetStudent = await tenantRepo.getStudent(context, query.studentId);
+      if (!targetStudent) {
+        return reply.status(404).send({
+          error: `STUDENT_RECORD_NOT_FOUND: Student '${query.studentId}' not found in active institution.`,
+        });
+      }
+      targetStudentId = targetStudent.id;
     }
 
     try {
@@ -811,12 +945,29 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     const context = await resolveSessionContext(req, reply);
     if (!context) return;
 
-    const query = req.query as any;
-    const targetStudentId = query?.studentId || context.userId;
-    if (context.role === 'student' && targetStudentId !== context.userId) {
-      return reply.status(403).send({
-        error: 'FORBIDDEN_STUDENT_ACCESS: Students can only unlink their own connection.',
-      });
+    let targetStudentId: string;
+    if (context.role === 'student') {
+      const student = await tenantRepo.getStudentByUserId(context, context.userId);
+      if (!student) {
+        return reply.status(404).send({
+          error: 'STUDENT_RECORD_NOT_FOUND: No student profile found for current user in this institution.',
+        });
+      }
+      targetStudentId = student.id;
+    } else {
+      const query = req.query as any;
+      if (!query?.studentId) {
+        return reply.status(400).send({
+          error: 'STUDENT_ID_REQUIRED: Placement officers and administrators must specify a studentId.',
+        });
+      }
+      const targetStudent = await tenantRepo.getStudent(context, query.studentId);
+      if (!targetStudent) {
+        return reply.status(404).send({
+          error: `STUDENT_RECORD_NOT_FOUND: Student '${query.studentId}' not found in active institution.`,
+        });
+      }
+      targetStudentId = targetStudent.id;
     }
 
     try {
@@ -839,7 +990,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
   // bounded by standard gateway/request timeouts, while durably tracking state transitions ('queued', 'resolving',
   // 'fetching', 'verifying', 'persisted', 'completed', or 'failed') in the relational `ingestion_jobs` table.
   // This provides immediate feedback, reliable progress auditability, and foundation for a future background daemon.
-  // Enforces consent-before-fetch, raw Git blob SHA verification, and authoritative snapshot registration
+  // Enforces consent-before-fetch, raw Git blob SHA verification, canonical repository resolution, and authoritative snapshot registration
   app.post('/api/evidence/repositories/ingest', async (req, reply) => {
     const context = await resolveSessionContext(req, reply);
     if (!context) return;
@@ -860,15 +1011,40 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     }
 
     const request = parseResult.data;
-    const targetStudentId = request.studentId || context.userId;
-    if (context.role === 'student' && targetStudentId !== context.userId) {
-      return reply.status(403).send({
-        error: 'FORBIDDEN_STUDENT_ACCESS: Students can only ingest repositories for their own account.',
-      });
+    let targetStudentId: string;
+    if (context.role === 'student') {
+      const student = await tenantRepo.getStudentByUserId(context, context.userId);
+      if (!student) {
+        return reply.status(404).send({
+          error: 'STUDENT_RECORD_NOT_FOUND: No student profile found for current user in this institution.',
+        });
+      }
+      if (request.studentId && request.studentId !== student.id) {
+        return reply.status(403).send({
+          error: 'FORBIDDEN_STUDENT_ACCESS: Students can only ingest repositories for their own account.',
+        });
+      }
+      targetStudentId = student.id;
+    } else {
+      if (!request.studentId) {
+        return reply.status(400).send({
+          error: 'STUDENT_ID_REQUIRED: Placement officers and administrators must specify a studentId.',
+        });
+      }
+      const targetStudent = await tenantRepo.getStudent(context, request.studentId);
+      if (!targetStudent) {
+        return reply.status(404).send({
+          error: `STUDENT_RECORD_NOT_FOUND: Student '${request.studentId}' not found in active institution.`,
+        });
+      }
+      targetStudentId = targetStudent.id;
     }
 
     try {
-      const result = await staticRepoIngestionService.ingestRepository(context, request);
+      const result = await staticRepoIngestionService.ingestRepository(context, {
+        ...request,
+        studentId: targetStudentId,
+      });
       return reply.status(201).send(result);
     } catch (err: any) {
       if (
@@ -889,7 +1065,10 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       ) {
         return reply.status(422).send({ error: err.message });
       }
-      if (err.message.startsWith('FORBIDDEN_STUDENT_ACCESS')) {
+      if (
+        err.message.startsWith('FORBIDDEN_STUDENT_ACCESS') ||
+        err.message.startsWith('CROSS_STUDENT_REPOSITORY_FORBIDDEN')
+      ) {
         return reply.status(403).send({ error: err.message });
       }
       if (
@@ -898,7 +1077,10 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
         err.message.startsWith('FILE_SIZE_LIMIT_EXCEEDED') ||
         err.message.startsWith('TOTAL_SIZE_LIMIT_EXCEEDED') ||
         err.message.startsWith('INVALID_GITHUB_REPOSITORY') ||
-        err.message.startsWith('REPOSITORY_ACCESS_DENIED')
+        err.message.startsWith('REPOSITORY_ACCESS_DENIED') ||
+        err.message.startsWith('PRIVATE_REPOSITORY_NOT_SUPPORTED') ||
+        err.message.startsWith('REPOSITORY_NOT_FOUND') ||
+        err.message.startsWith('REPOSITORY_PROVIDER_MISMATCH')
       ) {
         return reply.status(400).send({ error: err.message });
       }
@@ -933,8 +1115,11 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
         return reply.status(404).send({ error: 'Ingestion job not found.' });
       }
       // Student isolation:
-      if (context.role === 'student' && job.studentId !== context.userId) {
-        return reply.status(403).send({ error: 'FORBIDDEN_STUDENT_ACCESS: Cannot view ingestion job of another student.' });
+      if (context.role === 'student') {
+        const student = await tenantRepo.getStudentByUserId(context, context.userId);
+        if (!student || job.studentId !== student.id) {
+          return reply.status(403).send({ error: 'FORBIDDEN_STUDENT_ACCESS: Cannot view ingestion job of another student.' });
+        }
       }
       return reply.status(200).send(job);
     } catch (err: any) {

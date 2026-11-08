@@ -8,6 +8,7 @@ export interface ITenantRepository {
   listOrganizations(context: SessionContext): Promise<OrganizationDiscovery[]>;
   listStudents(context: SessionContext): Promise<Student[]>;
   getStudent(context: SessionContext, studentId: string): Promise<Student | null>;
+  getStudentByUserId(context: SessionContext, userId: string): Promise<Student | null>;
 }
 
 export class InMemoryTenantRepository implements ITenantRepository {
@@ -62,6 +63,10 @@ export class InMemoryTenantRepository implements ITenantRepository {
 
   public async getStudent(context: SessionContext, studentId: string): Promise<Student | null> {
     return this.store.getStudent(context, studentId);
+  }
+
+  public async getStudentByUserId(context: SessionContext, userId: string): Promise<Student | null> {
+    return this.store.getStudentByUserId(context, userId);
   }
 }
 
@@ -175,6 +180,42 @@ export class PgTenantRepository implements ITenantRepository {
       if (context.role === 'student') {
         query += ` AND user_id = $2`;
         params.push(context.userId);
+      }
+
+      const res = await client.query(query, params);
+      if (res.rows.length === 0) return null;
+      const row = res.rows[0];
+      return {
+        id: row.id,
+        orgId: row.org_id,
+        userId: row.user_id,
+        departmentId: row.department_id,
+        enrollment_no: row.enrollment_no,
+        graduating_year: row.graduating_year,
+        program_level: row.program_level,
+        is_minor: row.is_minor,
+        age_verified_at: row.age_verified_at ? new Date(row.age_verified_at).toISOString() : null,
+        createdAt: new Date(row.created_at).toISOString()
+      };
+    }, this.pool);
+  }
+
+  public async getStudentByUserId(context: SessionContext, userId: string): Promise<Student | null> {
+    // RLS-06: University admin gets 0 student-level rows
+    if (context.role === 'university_admin') {
+      return null;
+    }
+
+    return withTenantTransaction(context, async (client) => {
+      const query = `
+        SELECT id, org_id, user_id, department_id, enrollment_no, graduating_year, program_level, is_minor, age_verified_at, created_at
+        FROM students
+        WHERE user_id = $1 AND org_id = current_app_org_id()
+      `;
+      const params: any[] = [userId];
+
+      if (context.role === 'student' && userId !== context.userId) {
+        return null;
       }
 
       const res = await client.query(query, params);

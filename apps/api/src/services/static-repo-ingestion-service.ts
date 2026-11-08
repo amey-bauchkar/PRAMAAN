@@ -18,6 +18,8 @@ import { IGitHubClient, GitHubTreeEntry } from './github-client.js';
 import { GitHubAccountService } from './github-account-service.js';
 import { IConsentRepository } from '../repositories/consent-repository.js';
 import { IIngestionJobRepository } from '../repositories/ingestion-job-repository.js';
+import { IRepositoryRepository } from '../repositories/repository-repository.js';
+import { ITenantRepository } from '../repositories/tenant-repository.js';
 import { AnchorService } from './anchor-service.js';
 
 export interface IngestionLimits {
@@ -34,6 +36,8 @@ export interface StaticRepoIngestionServiceOptions {
   snapshotStore: ISourceSnapshotStore;
   anchorService: AnchorService;
   ingestionJobRepo?: IIngestionJobRepository;
+  repositoryRepo?: IRepositoryRepository;
+  tenantRepo?: ITenantRepository;
   limits?: IngestionLimits;
 }
 
@@ -57,6 +61,8 @@ export class StaticRepoIngestionService {
   private snapshotStore: ISourceSnapshotStore;
   private anchorService: AnchorService;
   private ingestionJobRepo?: IIngestionJobRepository;
+  private repositoryRepo?: IRepositoryRepository;
+  private tenantRepo?: ITenantRepository;
 
   private maxFiles: number;
   private maxFileSizeBytes: number;
@@ -70,6 +76,8 @@ export class StaticRepoIngestionService {
     this.snapshotStore = opts.snapshotStore;
     this.anchorService = opts.anchorService;
     this.ingestionJobRepo = opts.ingestionJobRepo;
+    this.repositoryRepo = opts.repositoryRepo;
+    this.tenantRepo = opts.tenantRepo;
 
     this.maxFiles = opts.limits?.maxFiles ?? 200;
     this.maxFileSizeBytes = opts.limits?.maxFileSizeBytes ?? 512 * 1024; // 512 KB
@@ -139,66 +147,91 @@ export class StaticRepoIngestionService {
     }
 
     // 1. Resolve student ownership
-    const targetStudentId = context.role === 'student' ? context.userId : (request.studentId || context.userId);
+    const targetStudentId = request.studentId;
     if (!targetStudentId) {
       throw new Error('STUDENT_OWNERSHIP_REQUIRED: Ingestion requires an identified student owner.');
     }
 
-    // Role check: If caller is student, cannot ingest for other students
-    if (context.role === 'student' && context.userId !== targetStudentId) {
-      throw new Error('FORBIDDEN_STUDENT_ACCESS: Students can only ingest repositories for their own account.');
+    // Role check: If caller is student and tenantRepo is available, enforce ownership against student record
+    if (context.role === 'student' && this.tenantRepo) {
+      const student = await this.tenantRepo.getStudentByUserId(context, context.userId);
+      if (!student || student.id !== targetStudentId) {
+        throw new Error('FORBIDDEN_STUDENT_ACCESS: Students can only ingest repositories for their own account.');
+      }
     }
 
-    const repositoryId = request.repositoryId || crypto.randomUUID();
     const ingestionId = crypto.randomUUID();
 
-    // 2. Initialize tracking job if outbox/job repo is available
-    if (this.ingestionJobRepo) {
-      const initialJob: IngestionJobProgress = {
-        ingestionId,
-        orgId,
-        studentId: targetStudentId,
-        repositoryId,
-        owner: request.owner,
-        repo: request.repo,
-        ref: request.ref,
-        status: 'queued',
-        fileCount: 0,
-        retainedBytes: 0,
-        registeredSnapshotsCount: 0,
-        createdAt: new Date().toISOString(),
-      };
-      await this.ingestionJobRepo.createJob(initialJob);
-    }
-
     try {
-      // 3. PHASE 4: CONSENT-BEFORE-FETCH ENFORCEMENT
+      // 2. PHASE 4: CONSENT-BEFORE-FETCH ENFORCEMENT
       // Must verify active purpose-specific 'repo_verification' consent BEFORE ANY GITHUB API CALL!
-      let hasConsent: boolean;
+      let activeGrant: any;
       try {
-        hasConsent = await this.consentRepo.hasActiveConsent(context, targetStudentId, 'repo_verification');
+        activeGrant = await this.consentRepo.getActiveGrant(context, targetStudentId, 'repo_verification');
       } catch (err: any) {
         throw new Error(`CONSENT_SERVICE_UNAVAILABLE: Failed to evaluate consent for student '${targetStudentId}': ${err.message}`, {
           cause: err,
         });
       }
 
-      if (!hasConsent) {
+      if (!activeGrant) {
         throw new Error(
           `CONSENT_REQUIRED_OR_REVOKED: Student '${targetStudentId}' has not granted active consent for purpose 'repo_verification'`
         );
       }
 
-      // 4. Resolve authenticated GitHub access token
+      // 3. Resolve authenticated GitHub access token
       const accessToken = await this.githubAccountService.getDecryptedAccessToken(context, targetStudentId);
 
-      // 5. Verify repository access permissions
+      // 4. Verify repository access permissions
       const access = await this.githubClient.verifyRepositoryAccess(accessToken, request.owner, request.repo);
       if (!access.accessible) {
         throw new Error(`REPOSITORY_ACCESS_DENIED: Linked GitHub account does not have access to ${request.owner}/${request.repo}`);
       }
 
-      // 6. Commit & Tree Resolution
+      // 5. Option B: Reject private repositories under public-repository-only architecture
+      if (access.isPrivate) {
+        throw new Error(
+          'PRIVATE_REPOSITORY_NOT_SUPPORTED: Private repository ingestion requires GitHub App installation. Only public repositories are supported in this release.'
+        );
+      }
+
+      // 6. Resolve or create canonical repository record in database
+      let repositoryId: string;
+      if (this.repositoryRepo) {
+        const repoRecord = await this.repositoryRepo.getOrCreateRepository(context, {
+          studentId: targetStudentId,
+          providerRepoId: String(access.repoId),
+          url: `https://github.com/${request.owner}/${request.repo}`,
+          defaultBranch: access.defaultBranch || request.ref || 'main',
+          consentGrantId: activeGrant.id,
+          requestedRepositoryId: request.repositoryId,
+        });
+        repositoryId = repoRecord.id;
+      } else {
+        repositoryId = request.repositoryId || crypto.randomUUID();
+      }
+
+      // 7. Initialize tracking job if outbox/job repo is available
+      if (this.ingestionJobRepo) {
+        const initialJob: IngestionJobProgress = {
+          ingestionId,
+          orgId,
+          studentId: targetStudentId,
+          repositoryId,
+          owner: request.owner,
+          repo: request.repo,
+          ref: request.ref,
+          status: 'queued',
+          fileCount: 0,
+          retainedBytes: 0,
+          registeredSnapshotsCount: 0,
+          createdAt: new Date().toISOString(),
+        };
+        await this.ingestionJobRepo.createJob(initialJob);
+      }
+
+      // 8. Commit & Tree Resolution
       if (this.ingestionJobRepo) {
         await this.ingestionJobRepo.updateJob(context, ingestionId, 'resolving');
       }
@@ -341,14 +374,21 @@ export class StaticRepoIngestionService {
       }
 
       // 11. Create & Persist Trusted Ingestion Record
+      const existingRecord = await this.trustedIngestionStore.getRecord(
+        orgId,
+        repositoryId,
+        commitSha,
+        targetStudentId
+      );
+
       const verifiedRecord: TrustedIngestionRecord = {
-        ingestionId,
+        ingestionId: existingRecord ? existingRecord.ingestionId : ingestionId,
         orgId,
         repositoryId,
         commitSha,
         treeSha,
         studentId: targetStudentId,
-        verifiedAt: new Date().toISOString(),
+        verifiedAt: existingRecord ? existingRecord.verifiedAt : new Date().toISOString(),
         provenance: 'trusted_ingestion_pipeline',
         manifest: manifestEntries,
       };
@@ -364,8 +404,12 @@ export class StaticRepoIngestionService {
 
       // 12. Register Snapshots via AnchorService authoritative flow
       let registeredCount = 0;
+      const anchorContext: SessionContext = {
+        ...context,
+        userId: targetStudentId,
+      };
       for (const snapshot of verifiedSnapshots) {
-        await this.anchorService.registerTrustedSnapshot(context, verifiedRecord, snapshot);
+        await this.anchorService.registerTrustedSnapshot(anchorContext, verifiedRecord, snapshot);
         registeredCount++;
       }
 

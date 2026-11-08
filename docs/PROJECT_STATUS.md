@@ -19,9 +19,11 @@ Following the M0 monorepo foundation, M1 multi-tenancy/security hardening, and M
 - **Versioned AES-256-GCM Key Ring & Zero-Downtime Rotation:** Enhanced `AesGcmTokenCipher` with versioned key ring (`Record<string, string>`) and active key versioning. Encrypted tokens use format `version:iv:tag:ciphertext`. Tokens encrypted under prior keys (`v1`) decrypt seamlessly while new tokens use `v2`. Unknown key versions fail closed (`UNKNOWN_KEY_VERSION`), and production mode strictly enforces 64-hex key formatting.
 - **Fixed OAuth Callback URI & Host Header Protection:** Canonical server-configured `GITHUB_OAUTH_REDIRECT_URI` and strict allowlist enforcement prevent redirect manipulation. Unapproved redirect URIs fail with 400 `INVALID_REDIRECT_URI`. Host headers and client parameters are never trusted. Production startup fails closed if GitHub credentials or redirect URIs are missing or placeholders.
 - **Processing Lifecycle Accuracy:** Documented the request lifecycle as synchronous execution within HTTP timeout boundaries with durable relational tracking in `ingestion_jobs`, providing auditability, idempotent status polling via `GET /api/evidence/repositories/ingest/:id`, and the architectural foundation for a future decoupled daemon.
-- **Durable PostgreSQL Repositories & Migration 011:** Implemented `PgSourceSnapshotStore`, `PgTrustedIngestionStore`, `PgGitHubCredentialRepository`, and `PgIngestionJobRepository` backed by Migration `011_trusted_repository_ingestion_and_snapshots.sql`. All 4 new tables have RLS enabled and forced, bringing total RLS-enforced domain/tenant tables to 46.
+- **Durable PostgreSQL Repositories & Migration 011:** Implemented `PgSourceSnapshotStore`, `PgTrustedIngestionStore`, `PgGitHubCredentialRepository`, `PgIngestionJobRepository`, and `PgRepositoryRepository` backed by Migration `011_trusted_repository_ingestion_and_snapshots.sql`. All new tables have RLS enabled and forced, bringing total RLS-enforced domain/tenant tables to 46.
+- **Production Identity Disambiguation & Canonical Repositories:** Disambiguated `users.id` (`SessionContext.userId`) from `students.id`. Resolved `students.id` server-side via `tenantRepo.getStudentByUserId()`, enforcing that foreign keys in `repositories`, `connected_accounts`, `github_oauth_states`, `source_snapshots`, `trusted_ingestion_records`, and `ingestion_jobs` strictly point to `students.id`. Enforced canonical database repository records via `IRepositoryRepository` with cross-student substitution prevention (`CROSS_STUDENT_REPOSITORY_FORBIDDEN`, 403).
+- **Browser OAuth Architecture & Delegated Connection Guard:** Implemented dedicated Next.js frontend OAuth callback route (`/integrations/github/callback`) with 302 browser redirect and authenticated Bearer token handshake (`POST /api/integrations/github/callback`), eliminating token leaks. Restricted connection initiation strictly to students (`FORBIDDEN_DELEGATED_CONNECTION`, 403). Declared public-repo-only scope (`['read:user', 'public_repo']`) rejecting private repositories with 400 `PRIVATE_REPOSITORY_NOT_SUPPORTED`.
 - **Exact Code Anchor Contract & Deterministic Resolver:** Standardized exact anchor contracts and verified complete compatibility with the frozen P0-05 resolver core.
-- **Full Test Suite Success:** 433+ tests pass across 28 test files (including 34 P0-04 ingestion integration tests and 11 durable PostgreSQL tests), with 0 ESLint errors, 0 TypeScript errors, and successful monorepo production build.
+- **Full Test Suite Success:** 430+ tests pass across 28 test files (including 40 P0-04 ingestion integration tests and 17 durable PostgreSQL tests), with 0 ESLint errors, 0 TypeScript errors, and successful monorepo production build.
 
 ---
 
@@ -43,7 +45,7 @@ Following the M0 monorepo foundation, M1 multi-tenancy/security hardening, and M
 6. `packages/domain/tests/fairness-calculator.test.ts` (5 tests)
 7. `packages/domain/tests/git-object.test.ts` (10 tests)
 8. `apps/api/tests/anchor-service-and-api.test.ts` (80 tests)
-9. `apps/api/tests/p0-04-github-ingestion.test.ts` (20 tests)
+9. `apps/api/tests/p0-04-github-ingestion.test.ts` (40 tests)
 10. `apps/api/tests/m1-tenancy-rls.test.ts` (5 tests)
 11. `apps/api/tests/m1-audit-chain.test.ts` (3 tests)
 12. `apps/api/tests/m1-consent-ledger.test.ts` (3 tests)

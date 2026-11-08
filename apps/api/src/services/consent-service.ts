@@ -95,6 +95,15 @@ export class ConsentService {
     return false;
   }
 
+  public getActiveGrant(studentId: string, purpose: ConsentPurposeCode): ConsentGrant | null {
+    for (const grant of this.grants.values()) {
+      if (grant.studentId === studentId && grant.purpose === purpose && !grant.revokedAt) {
+        return grant;
+      }
+    }
+    return null;
+  }
+
   /**
    * Connects an external repository OAuth token.
    * Fails if student has not granted 'repo_verification' consent.

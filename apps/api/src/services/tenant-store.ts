@@ -98,6 +98,24 @@ export class TenantStore {
     return student;
   }
 
+  public getStudentByUserId(context: SessionContext, userId: string): Student | null {
+    // RLS-06: University Admin cannot read student-level rows
+    if (context.role === 'university_admin') {
+      return null;
+    }
+
+    // Student can only read own record
+    if (context.role === 'student' && userId !== context.userId) {
+      return null;
+    }
+
+    return (
+      Array.from(this.students.values()).find(
+        (student) => student.orgId === context.orgId && student.userId === userId
+      ) ?? null
+    );
+  }
+
   public listStudents(context: SessionContext): Student[] {
     // RLS-06: University admin gets 0 student-level rows
     if (context.role === 'university_admin') {

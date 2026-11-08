@@ -23,6 +23,11 @@ export interface IConsentRepository {
     studentId: string,
     purpose: ConsentPurposeCode
   ): Promise<boolean>;
+  getActiveGrant(
+    context: SessionContext,
+    studentId: string,
+    purpose: ConsentPurposeCode
+  ): Promise<ConsentGrant | null>;
   revokeConsent(
     context: SessionContext,
     grantId: string,
@@ -49,6 +54,14 @@ export class InMemoryConsentRepository implements IConsentRepository {
     purpose: ConsentPurposeCode
   ): Promise<boolean> {
     return this.service.hasActiveConsent(studentId, purpose);
+  }
+
+  public async getActiveGrant(
+    _context: SessionContext,
+    studentId: string,
+    purpose: ConsentPurposeCode
+  ): Promise<ConsentGrant | null> {
+    return this.service.getActiveGrant(studentId, purpose);
   }
 
   public async getGrant(_context: SessionContext, grantId: string): Promise<ConsentGrant | null> {
@@ -156,6 +169,34 @@ export class PgConsentRepository implements IConsentRepository {
       `;
       const res = await client.query(query, [studentId, purpose]);
       return res.rows.length > 0;
+    }, this.pool);
+  }
+
+  public async getActiveGrant(
+    context: SessionContext,
+    studentId: string,
+    purpose: ConsentPurposeCode
+  ): Promise<ConsentGrant | null> {
+    return withTenantTransaction(context, async (client) => {
+      const query = `
+        SELECT id, student_id, purpose, notice_version, scope, granted_at, revoked_at
+        FROM consent_grants
+        WHERE student_id = $1 AND purpose = $2 AND revoked_at IS NULL
+        ORDER BY granted_at DESC
+        LIMIT 1;
+      `;
+      const res = await client.query(query, [studentId, purpose]);
+      if (res.rows.length === 0) return null;
+      const r = res.rows[0];
+      return {
+        id: r.id,
+        studentId: r.student_id,
+        purpose: r.purpose,
+        noticeVersion: r.notice_version,
+        scope: r.scope,
+        grantedAt: new Date(r.granted_at).toISOString(),
+        revokedAt: r.revoked_at ? new Date(r.revoked_at).toISOString() : null,
+      };
     }, this.pool);
   }
 

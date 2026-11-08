@@ -82,11 +82,16 @@
     5. Static repository ingestion engine & resource bounds: fetches commit SHA, traverses Git trees with recursive `truncated: true` fallback, applies strict file filtering (source extensions only; rejects symlinks, submodules, binaries, vendor/build dirs, secret/env files, path traversals), and enforces operational limits (200 files maximum, 512 KB per file with pre-download tree size check, and 10 MB aggregate retained bytes).
     6. Exact Git object verification: canonical Git blob formatting (`blob ${byteLength}\0${rawBytes}`), Git blob SHA-1 computation matching remote tree SHA, and raw SHA-256 content hashing.
     7. Canonical manifest generation (`TrustedIngestionRecordSchema`) and durable write-once storage.
-    8. Durable PostgreSQL repositories: `PgSourceSnapshotStore`, `PgTrustedIngestionStore`, `PgGitHubCredentialRepository`, and `PgIngestionJobRepository` backed by Migration 011 with RLS enabled and forced across all tables.
+    8. Durable PostgreSQL repositories: `PgSourceSnapshotStore`, `PgTrustedIngestionStore`, `PgGitHubCredentialRepository`, `PgIngestionJobRepository`, and `PgRepositoryRepository` backed by Migration 011 with RLS enabled and forced across all tables.
     9. Fixed OAuth callback URI & Host header protection: server-configured canonical `GITHUB_OAUTH_REDIRECT_URI` and strict allowlist validation; host headers and client parameters are never trusted.
-    10. Fastify API route endpoints with documented synchronous request lifecycle and durable relational progress tracking in `ingestion_jobs`.
-    11. Production fail-closed application composition in `buildApp()`.
-    12. 100% passing test coverage: 34 comprehensive unit/integration tests in `apps/api/tests/p0-04-github-ingestion.test.ts` and 11 real PostgreSQL tests in `db/tests/p0-04-pg-durable-repositories.test.ts`. Zero untrusted code execution.
+    10. Dedicated Frontend OAuth Callback Route (`apps/web/app/integrations/github/callback/page.tsx`) with 302 redirect and authenticated Bearer POST callback (`POST /api/integrations/github/callback`).
+    11. User ID vs Student ID Disambiguation: server-side resolution via `tenantRepo.getStudentByUserId()` and foreign key binding to `students.id`.
+    12. Prohibition of Delegated Connection: officer/admin connection attempts rejected with 403 `FORBIDDEN_DELEGATED_CONNECTION`.
+    13. Canonical Repository Relational Records: managed via `IRepositoryRepository` with cross-student substitution prevention (`CROSS_STUDENT_REPOSITORY_FORBIDDEN`, 403) and active consent grant linkage.
+    14. Public-Repository-Only Scope (Option B): scopes `['read:user', 'public_repo']`; private repos rejected fail-closed with 400 `PRIVATE_REPOSITORY_NOT_SUPPORTED`.
+    15. Fastify API route endpoints with documented synchronous request lifecycle and durable relational progress tracking in `ingestion_jobs`.
+    16. Production fail-closed application composition in `buildApp()`.
+    17. 100% passing test coverage: 40 comprehensive unit/integration tests in `apps/api/tests/p0-04-github-ingestion.test.ts` and 17 real PostgreSQL tests in `db/tests/p0-04-pg-durable-repositories.test.ts`. Zero untrusted code execution.
 
 ---
 
