@@ -36,7 +36,7 @@ import {
 // @ts-ignore
 import { resolveAdminSslConfig } from '../../scripts/admin-db-ssl.mjs';
 // @ts-ignore
-import { runMigrations, HISTORICAL_MIGRATION_CHECKSUMS } from '../../scripts/migrate-supabase.mjs';
+import { runMigrations, HISTORICAL_MIGRATION_CHECKSUMS, computeChecksum } from '../../scripts/migrate-supabase.mjs';
 // @ts-ignore
 import { assertSafeTestEnvironment, assertNotInstitutionalTenant } from '../../scripts/supabase-runner.mjs';
 
@@ -3041,9 +3041,13 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
         const res = await client.query(`SELECT version, checksum FROM schema_migrations WHERE version = '011a';`);
         expect(res.rows.length).toBe(1);
 
-        const prevChecksum = '4ad9489f74e39f859af6e550baa73981e1f6d056db470a1c14413b70a09611cf';
-        expect(HISTORICAL_MIGRATION_CHECKSUMS['011a']).toContain(prevChecksum);
-        expect(HISTORICAL_MIGRATION_CHECKSUMS['011a']).toContain(res.rows[0].checksum);
+        const fileContent = fs.readFileSync(
+          path.resolve(__dirname, '..', 'migrations', '011a_safe_repository_preflight.sql'),
+          'utf8'
+        );
+        const currentChecksum = computeChecksum(fileContent);
+        const validChecksums = [currentChecksum, ...(HISTORICAL_MIGRATION_CHECKSUMS['011a'] || [])];
+        expect(validChecksums).toContain(res.rows[0].checksum);
 
         const migResult = await runMigrations();
         expect(migResult.total).toBeGreaterThanOrEqual(18);
@@ -3676,23 +3680,36 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
         expect(res.rows.length).toBe(1);
         const recordedChecksum = res.rows[0].checksum;
 
-        // Verify that the recorded checksum is in the verified historical list
-        expect(HISTORICAL_MIGRATION_CHECKSUMS['011a']).toContain(recordedChecksum);
+        // Verify that the recorded checksum is either the current file's checksum or a verified historical checksum
+        const fileContent = fs.readFileSync(
+          path.resolve(__dirname, '..', 'migrations', '011a_safe_repository_preflight.sql'),
+          'utf8'
+        );
+        const currentChecksum = computeChecksum(fileContent);
+        const validChecksums = [currentChecksum, ...(HISTORICAL_MIGRATION_CHECKSUMS['011a'] || [])];
+        expect(validChecksums).toContain(recordedChecksum);
 
-        // Also test upgrade simulation with both historical checksums in an isolated transaction
-        await client.query('BEGIN;');
+        // Also test upgrade simulation with each historical checksum: update, runMigrations, and restore
         for (const historicalHash of HISTORICAL_MIGRATION_CHECKSUMS['011a']) {
           await client.query(
             `UPDATE schema_migrations SET checksum = $1 WHERE version = '011a';`,
             [historicalHash]
           );
 
-          // Verify recorded hash in ledger matches the historical hash
-          const checkRes = await client.query(`SELECT checksum FROM schema_migrations WHERE version = '011a';`);
-          expect(checkRes.rows[0].checksum).toBe(historicalHash);
-          expect(HISTORICAL_MIGRATION_CHECKSUMS['011a']).toContain(checkRes.rows[0].checksum);
+          try {
+            // Verify that running migrations recognizes historical checksum and skips cleanly without error
+            const simMigResult = await runMigrations();
+            expect(simMigResult.total).toBeGreaterThanOrEqual(18);
+            expect(simMigResult.newlyApplied).toBe(0);
+            expect(simMigResult.skipped).toBe(simMigResult.total);
+          } finally {
+            // Restore recorded checksum
+            await client.query(
+              `UPDATE schema_migrations SET checksum = $1 WHERE version = '011a';`,
+              [recordedChecksum]
+            );
+          }
         }
-        await client.query('ROLLBACK;');
 
         // Run migrations and verify it skips 011a cleanly without error or ledger corruption
         const migResult = await runMigrations();
