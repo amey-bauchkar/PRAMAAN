@@ -60,6 +60,19 @@ export class PgSourceSnapshotStore implements ISourceSnapshotStore {
         );
       }
 
+      // Snapshots cannot be directly persisted into terminal/transition lifecycle states;
+      // initial save is always pending_audit, and transitions must use updateRegistrationState()
+      if (snapshot.registrationState === 'quarantined') {
+        throw new Error(
+          'INVALID_REGISTRATION_STATE: Snapshots cannot be saved directly as quarantined; use updateRegistrationState() for quarantine transitions'
+        );
+      }
+      if (snapshot.registrationState === 'audit_committed') {
+        throw new Error(
+          'INVALID_REGISTRATION_STATE: Snapshots cannot be saved directly as audit_committed; use updateRegistrationState() for audit promotion'
+        );
+      }
+
       // 1. Check for existing snapshot within this ingestion generation
       const selectQuery = `
         SELECT snapshot_id, raw_file_hash, registration_state
@@ -79,6 +92,13 @@ export class PgSourceSnapshotStore implements ISourceSnapshotStore {
       if (res.rows.length > 0) {
         const existing = res.rows[0];
 
+        // Lifecycle immutability: quarantined snapshots are sealed and cannot be modified, un-quarantined, or re-saved
+        if (existing.registration_state === 'quarantined') {
+          throw new Error(
+            `IMMUTABLE_SNAPSHOT_MUTATION_REJECTED: Quarantined snapshot ${existing.snapshot_id} is immutable and cannot be re-saved, modified, or un-quarantined`
+          );
+        }
+
         // Immutability check: cannot overwrite with divergent hash
         if (existing.raw_file_hash.toLowerCase() !== snapshot.rawFileHash.toLowerCase()) {
           throw new Error(
@@ -86,42 +106,31 @@ export class PgSourceSnapshotStore implements ISourceSnapshotStore {
           );
         }
 
-        // State update if existing was not audit_committed or matching snapshotId
-        if (existing.registration_state !== 'audit_committed') {
-          const updateQuery = `
-            UPDATE source_snapshots
-            SET snapshot_id = $1,
-                registration_state = $2,
-                ingestion_id = $3,
-                captured_at = $4
-            WHERE org_id = $5 AND student_id = $6 AND repository_id = $7 AND LOWER(commit_sha) = LOWER($8) AND file_path = $9
-              AND (ingestion_id = $3 OR ingestion_id IS NULL);
-          `;
-          await client.query(updateQuery, [
-            snapshot.snapshotId,
-            snapshot.registrationState || 'pending_audit',
-            snapshot.ingestionId || null,
-            snapshot.capturedAt,
-            orgId,
-            studentId,
-            snapshot.repositoryId,
-            snapshot.commitSha.toLowerCase(),
-            canonicalPath,
-          ]);
-        } else if (existing.snapshot_id === snapshot.snapshotId && snapshot.registrationState) {
-          await client.query(
-            `UPDATE source_snapshots SET registration_state = $1 WHERE org_id = $2 AND student_id = $3 AND repository_id = $4 AND LOWER(commit_sha) = LOWER($5) AND file_path = $6 AND snapshot_id = $7;`,
-            [
-              snapshot.registrationState,
-              orgId,
-              studentId,
-              snapshot.repositoryId,
-              snapshot.commitSha.toLowerCase(),
-              canonicalPath,
-              snapshot.snapshotId,
-            ]
-          );
+        // If existing is already audit_committed, write is an idempotent no-op
+        if (existing.registration_state === 'audit_committed') {
+          return;
         }
+
+        // Idempotent re-save of pending_audit snapshot (strictly maintains pending_audit state)
+        const updateQuery = `
+          UPDATE source_snapshots
+          SET snapshot_id = $1,
+              ingestion_id = $2,
+              captured_at = $3
+          WHERE org_id = $4 AND student_id = $5 AND repository_id = $6 AND LOWER(commit_sha) = LOWER($7) AND file_path = $8
+            AND (ingestion_id = $2 OR ingestion_id IS NULL)
+            AND registration_state = 'pending_audit';
+        `;
+        await client.query(updateQuery, [
+          snapshot.snapshotId,
+          snapshot.ingestionId || null,
+          snapshot.capturedAt,
+          orgId,
+          studentId,
+          snapshot.repositoryId,
+          snapshot.commitSha.toLowerCase(),
+          canonicalPath,
+        ]);
         return; // Idempotent write
       }
 

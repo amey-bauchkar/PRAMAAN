@@ -320,6 +320,42 @@
      - Transitions all in-progress jobs (`queued`, `resolving`, `fetching`, `verifying`, `persisted`) to `status = 'failed'` with `error = 'CONSENT_REVOKED'`, `diagnostics.revocation_reason = 'CONSENT_REVOKED'`, and `completed_at = CURRENT_TIMESTAMP`. Completed and already-failed jobs are untouched.
 - **Consequences:** Eliminates external network calls inside database transactions, prevents duplicate active consent grants while preserving audit trail, protects historical student evidence from migration data loss, caps ingestion resource consumption, and guarantees that consent revocation immediately cancels in-flight ingestion jobs.
 
+---
+
+## ADR-20: Atomic Database-Level Consent Gates, Terminal Ingestion State Machines, and Migration 015 Re-Consent Support
+
+- **Status:** Approved & Verified
+- **Context:** An independent review identified risks where in-flight ingestion could persist snapshots after consent revocation had begun, where migration 011a preflight reconciliation needed to handle snapshot registration states, and where re-ingesting the same Git commit under fresh consent collided with unique constraints.
+- **Decision:**
+  1. **Atomic Database-Level Consent Gates:** In `PgSourceSnapshotStore.saveSnapshot()` and `updateRegistrationState()`, and `PgTrustedIngestionStore.saveRecord()`, enforced active consent checks within the same transaction under `FOR SHARE` row locks (`SELECT id FROM consent_grants ... FOR SHARE`). Ingestion operations fail closed immediately with `CONSENT_REQUIRED_OR_REVOKED` if consent was revoked.
+  2. **Strict Ingestion Job State Machine:** Enforced exact lifecycle progression (`queued -> resolving -> fetching -> verifying -> persisted -> completed` or `failed`). Creating jobs in non-queued states throws `INVALID_INITIAL_JOB_STATE`. Skipping lifecycle states throws `INVALID_JOB_TRANSITION`. Terminal states (`completed`, `failed`) cannot be modified or transitioned.
+  3. **Consent Generation & Fresh Re-Ingestion (Migration 015):** Authored forward-only migration `015_consent_generation_and_fresh_reingestion.sql`. Added `consent_grant_id` to `trusted_ingestion_records`. Replaced rigid unique constraints with partial unique indexes (`uq_trusted_ingestion_active_commit WHERE status != 'revoked'` and `uq_source_snapshots_active_commit_path WHERE registration_state != 'quarantined'`). Enables fresh re-ingestion of the same or new commit under fresh consent while preserving historical revoked records.
+  4. **Deterministic Concurrency Tests:** Reworked concurrency tests using PostgreSQL lock detection via `pg_stat_activity` and explicit promise latches, eliminating arbitrary `setTimeout` delays.
+- **Consequences:** Eliminates time-of-check to time-of-use (TOCTOU) races between revocation and persistence, seals the ingestion job lifecycle graph, and allows compliant students to re-ingest code under fresh consent without unique constraint conflicts.
+
+---
+
+## ADR-21: Migration 011a Checksum Immutability, Transition Checksum Support, Migration 016 Safe Generation Reconciliation, and Hardened Snapshot Immutability
+
+- **Status:** Approved & Verified
+- **Context:** A final migration-integrity and acceptance review identified that `011a_safe_repository_preflight.sql` had drifted from its canonical baseline between transition commits, which threatened checksum immutability in persistent migration ledgers. Furthermore, pre-existing duplicate repository rows across distinct consent generations required forward-only reconciliation without data loss, and `PgSourceSnapshotStore.saveSnapshot()` needed strict lifecycle immutability guards.
+- **Decision:**
+  1. **Canonical Migration 011a Restoration & Transition Checksum Support:**
+     - Restored `011a_safe_repository_preflight.sql` byte-for-byte to its canonical `c6261af` baseline (SHA-256: `4ad9489f74e39f859af6e550baa73981e1f6d056db470a1c14413b70a09611cf`).
+     - Enhanced `scripts/migrate-supabase.mjs` with `HISTORICAL_MIGRATION_CHECKSUMS` export to recognize historical checksums recorded in transition ledgers (including intermediate commit `8cc43e72...`) without drift failure or manual ledger rewriting.
+  2. **Migration 016 Safe Generation Reconciliation:**
+     - Authored forward-only migration `016_safe_generation_reconciliation.sql` executed strictly after 015.
+     - Resolves NULL `consent_grant_id` before deduplication decisions; fails closed with `[DATA_LOSS_PREVENTION] Ambiguous consent generation` if a student has multiple candidate grants.
+     - Preserves distinct consent generations and historical revoked records under the canonical repository without deletion.
+     - Deduplicates snapshots and trusted ingestion records only when genuinely equivalent within the same consent generation (`commit_sha` AND `consent_grant_id`).
+     - Handles potential snapshot collisions on `(commit_sha, file_path, ingestion_id)` before re-parenting, strictly preventing unique index violations.
+  3. **Strict Snapshot Lifecycle & Immutability Hardening:**
+     - Direct writes via `PgSourceSnapshotStore.saveSnapshot()` cannot specify `quarantined` or `audit_committed` (`INVALID_REGISTRATION_STATE`), requiring initial persistence as `pending_audit` and transitions via `updateRegistrationState()`.
+     - Attempting to re-save, modify, or un-quarantine an existing quarantined snapshot throws `IMMUTABLE_SNAPSHOT_MUTATION_REJECTED`.
+     - Re-ingestion under fresh consent preserves historical quarantined snapshot IDs, registration states, and raw bytes immutably.
+- **Consequences:** Guarantees absolute migration ledger immutability across historical and fresh environments, prevents silent data loss during legacy repository reconciliation, and enforces cryptographic immutability of quarantined source snapshots.
+
+
 
 
 

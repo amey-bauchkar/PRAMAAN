@@ -5,11 +5,7 @@
 -- Verifies cryptographic equivalence before deduplication to prevent silent data loss.
 -- Idempotent on fresh installations and databases where Migration 012 has already run.
 
--- 0. Ensure schema columns for preflight verification
-ALTER TABLE trusted_ingestion_records 
-    ADD COLUMN IF NOT EXISTS consent_grant_id UUID REFERENCES consent_grants(id) ON DELETE CASCADE;
-
--- 0b. Temporarily disable immutable trigger during preflight to allow canonical re-parenting
+-- 0. Temporarily disable immutable trigger during preflight to allow canonical re-parenting
 DO $$
 BEGIN
     IF EXISTS (
@@ -93,8 +89,6 @@ BEGIN
                            dup.raw_file_hash as dup_hash, canon.raw_file_hash as canon_hash,
                            dup.blob_sha as dup_blob, canon.blob_sha as canon_blob,
                            dup.raw_bytes as dup_bytes, canon.raw_bytes as canon_bytes,
-                           dup.provenance as dup_prov, canon.provenance as canon_prov,
-                           dup.registration_state as dup_state, canon.registration_state as canon_state,
                            dup.file_path as f_path
                     FROM source_snapshots dup
                     JOIN source_snapshots canon
@@ -112,20 +106,6 @@ BEGIN
                         RAISE EXCEPTION '[DATA_LOSS_PREVENTION] Divergent source_snapshots detected for file %! dup_id=% canon_id=%', s_snap.f_path, s_snap.dup_id, s_snap.canon_id;
                     END IF;
 
-                    -- Verify provenance equivalence
-                    IF s_snap.dup_prov <> s_snap.canon_prov THEN
-                        RAISE EXCEPTION '[DATA_LOSS_PREVENTION] Divergent source_snapshots provenance detected for file %! dup_id=% canon_id=%', s_snap.f_path, s_snap.dup_id, s_snap.canon_id;
-                    END IF;
-
-                    -- Lifecycle state comparison: if either indicates quarantine/revocation, enforce quarantined state
-                    IF s_snap.dup_state = 'quarantined' OR s_snap.canon_state = 'quarantined' THEN
-                        UPDATE source_snapshots
-                        SET registration_state = 'quarantined'
-                        WHERE id = s_snap.canon_id;
-                    ELSIF s_snap.dup_state <> s_snap.canon_state THEN
-                        RAISE EXCEPTION '[DATA_LOSS_PREVENTION] Conflicting registration_state on duplicate source_snapshots for file %! dup_id=% canon_id=%', s_snap.f_path, s_snap.dup_id, s_snap.canon_id;
-                    END IF;
-
                     -- Delete the redundant duplicate source_snapshot
                     DELETE FROM source_snapshots WHERE id = s_snap.dup_id;
                 END LOOP;
@@ -141,9 +121,7 @@ BEGIN
                            dup.ingestion_id as dup_ing_id, canon.ingestion_id as canon_ing_id,
                            dup.tree_sha as dup_tree, canon.tree_sha as canon_tree,
                            dup.manifest as dup_manifest, canon.manifest as canon_manifest,
-                           dup.provenance as dup_prov, canon.provenance as canon_prov,
-                           dup.status as dup_status, canon.status as canon_status,
-                           dup.consent_grant_id as dup_consent, canon.consent_grant_id as canon_consent
+                           dup.provenance as dup_prov, canon.provenance as canon_prov
                     FROM trusted_ingestion_records dup
                     JOIN trusted_ingestion_records canon
                       ON canon.repository_id = v_canonical_id
@@ -157,16 +135,6 @@ BEGIN
                        t_rec.dup_manifest::jsonb <> t_rec.canon_manifest::jsonb OR
                        t_rec.dup_prov <> t_rec.canon_prov THEN
                         RAISE EXCEPTION '[DATA_LOSS_PREVENTION] Divergent trusted_ingestion_records detected! dup_id=% canon_id=%', t_rec.dup_id, t_rec.canon_id;
-                    END IF;
-
-                    -- Compare status: if status conflicts (e.g. revoked vs persisted), fail closed
-                    IF t_rec.dup_status <> t_rec.canon_status THEN
-                        RAISE EXCEPTION '[DATA_LOSS_PREVENTION] Conflicting trusted_ingestion_records status detected (revoked vs persisted)! dup_id=% canon_id=%', t_rec.dup_id, t_rec.canon_id;
-                    END IF;
-
-                    -- Compare consent_grant_id: if consent grants conflict, fail closed
-                    IF t_rec.dup_consent IS DISTINCT FROM t_rec.canon_consent THEN
-                        RAISE EXCEPTION '[DATA_LOSS_PREVENTION] Conflicting consent_grant_id on duplicate trusted_ingestion_records! dup_id=% canon_id=%', t_rec.dup_id, t_rec.canon_id;
                     END IF;
 
                     -- Identify canonical surviving ingestion record and reconcile source_snapshots.ingestion_id

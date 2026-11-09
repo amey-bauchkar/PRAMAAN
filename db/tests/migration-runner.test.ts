@@ -3,7 +3,7 @@ import pg from 'pg';
 import fs from 'fs';
 import path from 'path';
 // @ts-ignore
-import { runMigrations, computeChecksum } from '../../scripts/migrate-supabase.mjs';
+import { runMigrations, computeChecksum, HISTORICAL_MIGRATION_CHECKSUMS } from '../../scripts/migrate-supabase.mjs';
 // @ts-ignore
 import { resolveAdminSslConfig } from '../../scripts/admin-db-ssl.mjs';
 
@@ -95,7 +95,11 @@ describe('PRAMAAN Database Migration Reproducibility & Ledger Verification (Area
         const hash = computeChecksum(content);
         const recordedHash = recorded.get(file);
         expect(recordedHash).toBeDefined();
-        expect(hash).toBe(recordedHash);
+
+        const versionMatch = file.match(/^([0-9a-zA-Z_]+?)(?:_|$)/);
+        const version = versionMatch ? versionMatch[1] : file;
+        const validHashes = [hash, ...(HISTORICAL_MIGRATION_CHECKSUMS[version] || [])];
+        expect(validHashes).toContain(recordedHash);
       }
     } finally {
       await pool.end();

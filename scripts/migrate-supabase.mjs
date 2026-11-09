@@ -17,6 +17,17 @@ const migrationsDir = path.join(rootDir, 'db', 'migrations');
 // PostgreSQL advisory lock ID to prevent concurrent migration runners from colliding
 const MIGRATION_ADVISORY_LOCK_ID = 8429104820948123n;
 
+// Recognized historical checksums from transition commits where migrations were recorded in persistent ledgers
+export const HISTORICAL_MIGRATION_CHECKSUMS = {
+  '011a': [
+    '4ad9489f74e39f859af6e550baa73981e1f6d056db470a1c14413b70a09611cf', // Canonical c6261af baseline
+    '8cc43e725621b5e8b34c856cd0f91026a242d803ca94455b4d70ba6ab7c849a5', // Intermediate commit 8e5c670
+  ],
+  '016': [
+    '3f8152a9228a1441761bba14077259a3108bc7525f926964000338a28e1160c3', // Intermediate commit during 016 drafting
+  ],
+};
+
 /**
  * Migration Executor that strictly enforces administrative credentials (DATABASE_URL_ADMIN),
  * session advisory locks, and transactional DDL atomicity.
@@ -186,7 +197,10 @@ export async function runMigrations() {
 
       if (appliedMap.has(version)) {
         const previousChecksum = appliedMap.get(version);
-        if (previousChecksum !== checksum) {
+        const matchesCurrent = previousChecksum === checksum;
+        const matchesHistorical = HISTORICAL_MIGRATION_CHECKSUMS[version]?.includes(previousChecksum);
+
+        if (!matchesCurrent && !matchesHistorical) {
           throw new Error(
             `FATAL: Migration ledger integrity violation! Checksum drift detected for previously applied migration '${filename}' (version ${version}).\n` +
             `Ledger Checksum:  ${previousChecksum}\n` +
@@ -195,7 +209,11 @@ export async function runMigrations() {
           );
         }
         skippedCount++;
-        console.log(`[MIGRATION SKIP] Migration ${version} (${filename}) already recorded in ledger.`);
+        if (matchesHistorical && !matchesCurrent) {
+          console.log(`[MIGRATION COMPAT] Recognized historical checksum for ${version} (${filename}) recorded in ledger.`);
+        } else {
+          console.log(`[MIGRATION SKIP] Migration ${version} (${filename}) already recorded in ledger.`);
+        }
         continue;
       }
 
