@@ -91,18 +91,21 @@ export class PgTrustedIngestionStore implements ITrustedIngestionStore {
           `CONSENT_REQUIRED_OR_REVOKED: Active repo_verification consent required to persist trusted ingestion record for student '${parsed.studentId}'`
         );
       }
+      const activeConsentGrantId = consentCheck.rows[0].id;
 
-      // 1. Check for existing record
+      // 1. Check for existing record within this consent generation
       const selectQuery = `
-        SELECT ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, verified_at, provenance, manifest
+        SELECT ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, verified_at, provenance, manifest, status, consent_grant_id
         FROM trusted_ingestion_records
-        WHERE org_id = $1 AND repository_id = $2 AND LOWER(commit_sha) = LOWER($3) AND student_id = $4;
+        WHERE org_id = $1 AND repository_id = $2 AND LOWER(commit_sha) = LOWER($3) AND student_id = $4
+          AND (consent_grant_id = $5 OR (consent_grant_id IS NULL AND status != 'revoked'));
       `;
       const res = await client.query(selectQuery, [
         parsed.orgId,
         parsed.repositoryId,
         parsed.commitSha.toLowerCase(),
         parsed.studentId,
+        activeConsentGrantId,
       ]);
 
       if (res.rows.length > 0) {
@@ -117,6 +120,8 @@ export class PgTrustedIngestionStore implements ITrustedIngestionStore {
           verifiedAt: new Date(row.verified_at).toISOString(),
           provenance: row.provenance,
           manifest: typeof row.manifest === 'string' ? JSON.parse(row.manifest) : row.manifest,
+          consentGrantId: row.consent_grant_id || undefined,
+          status: row.status,
         };
 
         if (this.isExactDuplicate(existingRecord, parsed, canonicalManifest)) {
@@ -128,7 +133,7 @@ export class PgTrustedIngestionStore implements ITrustedIngestionStore {
         );
       }
 
-      // 2. Insert new record
+      // 2. Insert new record with active consent grant binding
       const insertQuery = `
         INSERT INTO trusted_ingestion_records (
           ingestion_id,
@@ -140,8 +145,9 @@ export class PgTrustedIngestionStore implements ITrustedIngestionStore {
           verified_at,
           provenance,
           manifest,
-          status
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'persisted');
+          status,
+          consent_grant_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'persisted', $10);
       `;
 
       await client.query(insertQuery, [
@@ -154,6 +160,7 @@ export class PgTrustedIngestionStore implements ITrustedIngestionStore {
         parsed.verifiedAt,
         parsed.provenance,
         JSON.stringify(canonicalManifest),
+        activeConsentGrantId,
       ]);
     }, this.pool);
   }
@@ -172,10 +179,12 @@ export class PgTrustedIngestionStore implements ITrustedIngestionStore {
 
     return withTenantTransaction(context, async (client) => {
       const query = `
-        SELECT ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, verified_at, provenance, manifest
+        SELECT ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, verified_at, provenance, manifest, status, consent_grant_id
         FROM trusted_ingestion_records
         WHERE org_id = $1 AND repository_id = $2 AND LOWER(commit_sha) = LOWER($3) AND student_id = $4
-          AND status != 'revoked';
+          AND status != 'revoked'
+        ORDER BY verified_at DESC, created_at DESC
+        LIMIT 1;
       `;
       const res = await client.query(query, [
         orgId,
@@ -197,6 +206,8 @@ export class PgTrustedIngestionStore implements ITrustedIngestionStore {
         verifiedAt: new Date(row.verified_at).toISOString(),
         provenance: row.provenance,
         manifest: typeof row.manifest === 'string' ? JSON.parse(row.manifest) : row.manifest,
+        consentGrantId: row.consent_grant_id || undefined,
+        status: row.status,
       };
     }, this.pool);
   }

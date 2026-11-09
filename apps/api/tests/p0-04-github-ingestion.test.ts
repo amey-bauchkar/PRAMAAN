@@ -2119,12 +2119,14 @@ describe('P0-04: Trusted Static GitHub Repository Ingestion Pipeline', () => {
         owner: 'alice',
         repo: 'test-in-flight',
         ref: 'main',
-        status: 'fetching',
+        status: 'queued',
         fileCount: 3,
         retainedBytes: 500,
         registeredSnapshotsCount: 0,
         createdAt: new Date().toISOString(),
       });
+      await ingestionJobRepo.updateJob({ orgId: collegeAOrgId, userId: 'u1', role: 'student' }, inFlightJobId, 'resolving');
+      await ingestionJobRepo.updateJob({ orgId: collegeAOrgId, userId: 'u1', role: 'student' }, inFlightJobId, 'fetching');
 
       // 4. Revoke consent
       mockGitHubClient.mockRevokeBehavior = async () => ({

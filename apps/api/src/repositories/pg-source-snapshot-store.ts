@@ -41,31 +41,31 @@ export class PgSourceSnapshotStore implements ISourceSnapshotStore {
 
     await withTenantTransaction(context, async (client) => {
       // 0. Atomic Database-Level Consent Gate: check active consent under row lock
-      if (snapshot.registrationState !== 'quarantined') {
-        const consentCheck = await client.query(
-          `
-          SELECT id
-          FROM consent_grants
-          WHERE student_id = $1
-            AND purpose = 'repo_verification'
-            AND revoked_at IS NULL
-          FOR SHARE;
-        `,
-          [studentId]
-        );
+      // Unconditionally enforced for all new snapshot writes (including quarantined)
+      const consentCheck = await client.query(
+        `
+        SELECT id
+        FROM consent_grants
+        WHERE student_id = $1
+          AND purpose = 'repo_verification'
+          AND revoked_at IS NULL
+        FOR SHARE;
+      `,
+        [studentId]
+      );
 
-        if (consentCheck.rows.length === 0) {
-          throw new Error(
-            `CONSENT_REQUIRED_OR_REVOKED: Active repo_verification consent required to persist source snapshot for student '${studentId}'`
-          );
-        }
+      if (consentCheck.rows.length === 0) {
+        throw new Error(
+          `CONSENT_REQUIRED_OR_REVOKED: Active repo_verification consent required to persist source snapshot for student '${studentId}'`
+        );
       }
 
-      // 1. Check for existing snapshot
+      // 1. Check for existing snapshot within this ingestion generation
       const selectQuery = `
         SELECT snapshot_id, raw_file_hash, registration_state
         FROM source_snapshots
-        WHERE org_id = $1 AND student_id = $2 AND repository_id = $3 AND LOWER(commit_sha) = LOWER($4) AND file_path = $5;
+        WHERE org_id = $1 AND student_id = $2 AND repository_id = $3 AND LOWER(commit_sha) = LOWER($4) AND file_path = $5
+          AND (ingestion_id = $6 OR ingestion_id IS NULL);
       `;
       const res = await client.query(selectQuery, [
         orgId,
@@ -73,6 +73,7 @@ export class PgSourceSnapshotStore implements ISourceSnapshotStore {
         snapshot.repositoryId,
         snapshot.commitSha.toLowerCase(),
         canonicalPath,
+        snapshot.ingestionId || null,
       ]);
 
       if (res.rows.length > 0) {
@@ -93,7 +94,8 @@ export class PgSourceSnapshotStore implements ISourceSnapshotStore {
                 registration_state = $2,
                 ingestion_id = $3,
                 captured_at = $4
-            WHERE org_id = $5 AND student_id = $6 AND repository_id = $7 AND LOWER(commit_sha) = LOWER($8) AND file_path = $9;
+            WHERE org_id = $5 AND student_id = $6 AND repository_id = $7 AND LOWER(commit_sha) = LOWER($8) AND file_path = $9
+              AND (ingestion_id = $3 OR ingestion_id IS NULL);
           `;
           await client.query(updateQuery, [
             snapshot.snapshotId,
@@ -201,7 +203,13 @@ export class PgSourceSnapshotStore implements ISourceSnapshotStore {
           ingestion_id,
           registration_state
         FROM source_snapshots
-        WHERE org_id = $1 AND student_id = $2 AND repository_id = $3 AND LOWER(commit_sha) = LOWER($4) AND file_path = $5;
+        WHERE org_id = $1 AND student_id = $2 AND repository_id = $3 AND LOWER(commit_sha) = LOWER($4) AND file_path = $5
+        ORDER BY CASE 
+          WHEN registration_state = 'audit_committed' THEN 1 
+          WHEN registration_state = 'pending_audit' THEN 2 
+          ELSE 3 
+        END, captured_at DESC, id DESC
+        LIMIT 1;
       `;
       const res = await client.query(query, [
         orgId,
@@ -265,6 +273,11 @@ export class PgSourceSnapshotStore implements ISourceSnapshotStore {
           registration_state
         FROM source_snapshots
         WHERE org_id = $1 AND student_id = $2 AND LOWER(raw_file_hash) = LOWER($3)
+        ORDER BY CASE 
+          WHEN registration_state = 'audit_committed' THEN 1 
+          WHEN registration_state = 'pending_audit' THEN 2 
+          ELSE 3 
+        END, captured_at DESC, id DESC
         LIMIT 1;
       `;
       const res = await client.query(query, [

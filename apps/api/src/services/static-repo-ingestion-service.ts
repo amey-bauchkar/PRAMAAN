@@ -514,6 +514,8 @@ export class StaticRepoIngestionService {
         verifiedAt: existingRecord ? existingRecord.verifiedAt : new Date().toISOString(),
         provenance: 'trusted_ingestion_pipeline',
         manifest: manifestEntries,
+        consentGrantId: activeGrant.id,
+        status: 'persisted',
       };
 
       if (this.ingestionJobRepo) {

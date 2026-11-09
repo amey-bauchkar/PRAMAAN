@@ -23,7 +23,12 @@ export class InMemoryIngestionJobRepository implements IIngestionJobRepository {
   private jobs = new Map<string, IngestionJobProgress>();
 
   public async createJob(job: IngestionJobProgress): Promise<void> {
-    this.jobs.set(job.ingestionId, { ...job });
+    if (job.status && job.status !== 'queued') {
+      throw new Error(
+        `INVALID_INITIAL_JOB_STATE: Ingestion jobs must be created in 'queued' state, received '${job.status}'.`
+      );
+    }
+    this.jobs.set(job.ingestionId, { ...job, status: 'queued' });
   }
 
   public async updateJob(
@@ -49,7 +54,7 @@ export class InMemoryIngestionJobRepository implements IIngestionJobRepository {
     }
 
     const validTransitions: Record<IngestionJobStatus, IngestionJobStatus[]> = {
-      queued: ['queued', 'resolving', 'failed', 'completed'],
+      queued: ['queued', 'resolving', 'failed'],
       resolving: ['resolving', 'fetching', 'failed'],
       fetching: ['fetching', 'verifying', 'failed'],
       verifying: ['verifying', 'persisted', 'failed'],
@@ -115,6 +120,12 @@ export class PgIngestionJobRepository implements IIngestionJobRepository {
   constructor(private pool: pg.Pool = getDbPool()) {}
 
   public async createJob(job: IngestionJobProgress): Promise<void> {
+    if (job.status && job.status !== 'queued') {
+      throw new Error(
+        `INVALID_INITIAL_JOB_STATE: Ingestion jobs must be created in 'queued' state, received '${job.status}'.`
+      );
+    }
+
     const context: SessionContext = {
       orgId: job.orgId,
       userId: job.studentId,
@@ -201,7 +212,7 @@ export class PgIngestionJobRepository implements IIngestionJobRepository {
 
       // 3. Valid transition check
       const validTransitions: Record<IngestionJobStatus, IngestionJobStatus[]> = {
-        queued: ['queued', 'resolving', 'failed', 'completed'],
+        queued: ['queued', 'resolving', 'failed'],
         resolving: ['resolving', 'fetching', 'failed'],
         fetching: ['fetching', 'verifying', 'failed'],
         verifying: ['verifying', 'persisted', 'failed'],

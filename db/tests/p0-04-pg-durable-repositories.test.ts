@@ -530,7 +530,7 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
   describe('4. PgIngestionJobRepository (Ingestion jobs & outbox tracking)', () => {
     const ingestionId = randomUUID();
 
-    it('4.1. Creates job, updates status to completed, and retrieves progress', async () => {
+    it('4.1. Creates job in queued state, advances through exact lifecycle graph, and completes', async () => {
       const ctx: SessionContext = {
         orgId: COLLEGE_A,
         userId: USER_A,
@@ -556,7 +556,19 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
       expect(initial).not.toBeNull();
       expect(initial?.status).toBe('queued');
 
-      // Update to completed
+      // Exact step-by-step transition progression: queued -> resolving -> fetching -> verifying -> persisted -> completed
+      await jobRepo.updateJob(ctx, ingestionId, 'resolving');
+      expect((await jobRepo.getJob(ctx, ingestionId))?.status).toBe('resolving');
+
+      await jobRepo.updateJob(ctx, ingestionId, 'fetching');
+      expect((await jobRepo.getJob(ctx, ingestionId))?.status).toBe('fetching');
+
+      await jobRepo.updateJob(ctx, ingestionId, 'verifying');
+      expect((await jobRepo.getJob(ctx, ingestionId))?.status).toBe('verifying');
+
+      await jobRepo.updateJob(ctx, ingestionId, 'persisted');
+      expect((await jobRepo.getJob(ctx, ingestionId))?.status).toBe('persisted');
+
       await jobRepo.updateJob(ctx, ingestionId, 'completed', {
         commitSha: 'fa7a000000000000000000000000000000000001',
         treeSha: 'bee7000000000000000000000000000000000002',
@@ -569,6 +581,53 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
       expect(completed?.status).toBe('completed');
       expect(completed?.fileCount).toBe(5);
       expect(completed?.registeredSnapshotsCount).toBe(5);
+    });
+
+    it('4.2. Rejects invalid initial job state and skipped transitions in lifecycle graph', async () => {
+      const ctx: SessionContext = {
+        orgId: COLLEGE_A,
+        userId: USER_A,
+        role: 'student',
+      };
+
+      const invalidInitId = randomUUID();
+      await expect(
+        jobRepo.createJob({
+          ingestionId: invalidInitId,
+          orgId: COLLEGE_A,
+          studentId: STUDENT_A,
+          repositoryId: REPO_A,
+          owner: 'test-org',
+          repo: 'test-repo',
+          ref: 'main',
+          status: 'resolving',
+          fileCount: 0,
+          retainedBytes: 0,
+          registeredSnapshotsCount: 0,
+          createdAt: new Date().toISOString(),
+        })
+      ).rejects.toThrow(/INVALID_INITIAL_JOB_STATE/);
+
+      const skipId = randomUUID();
+      await jobRepo.createJob({
+        ingestionId: skipId,
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: REPO_A,
+        owner: 'test-org',
+        repo: 'test-repo',
+        ref: 'main',
+        status: 'queued',
+        fileCount: 0,
+        retainedBytes: 0,
+        registeredSnapshotsCount: 0,
+        createdAt: new Date().toISOString(),
+      });
+
+      // Skipping resolving and jumping directly to fetching or completed is forbidden
+      await expect(jobRepo.updateJob(ctx, skipId, 'fetching')).rejects.toThrow(/INVALID_JOB_TRANSITION/);
+      await expect(jobRepo.updateJob(ctx, skipId, 'completed')).rejects.toThrow(/INVALID_JOB_TRANSITION/);
+      await expect(jobRepo.updateJob(ctx, skipId, 'persisted')).rejects.toThrow(/INVALID_JOB_TRANSITION/);
     });
   });
 
@@ -720,12 +779,16 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
         owner: 'alice',
         repo: 'relational-repo',
         ref: 'main',
-        status: 'persisted',
+        status: 'queued',
         fileCount: 1,
         retainedBytes: fileBytes.length,
         registeredSnapshotsCount: 0,
         createdAt: new Date().toISOString(),
       });
+      await jobRepo.updateJob(ctxA, ingestionId, 'resolving');
+      await jobRepo.updateJob(ctxA, ingestionId, 'fetching');
+      await jobRepo.updateJob(ctxA, ingestionId, 'verifying');
+      await jobRepo.updateJob(ctxA, ingestionId, 'persisted');
 
       // Trusted ingestion record referencing canonical repository
       const record: TrustedIngestionRecord = {
@@ -1216,10 +1279,10 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
   });
 
   // =========================================================================
-  // 8. Ingestion Job Status Transitions on Revocation
+  // 8. Ingestion Job Status Transitions & Consent Invariant Guarantees
   // =========================================================================
 
-  describe('8. Ingestion Job Status Transitions on Revocation', () => {
+  describe('8. Ingestion Job Status Transitions & Consent Invariant Guarantees', () => {
     const ctxA: SessionContext = {
       orgId: COLLEGE_A,
       userId: USER_A,
@@ -1254,12 +1317,27 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
           owner: 'test-owner',
           repo: `test-repo-${st}`,
           ref: 'main',
-          status: st,
+          status: 'queued',
           fileCount: 0,
           retainedBytes: 0,
           registeredSnapshotsCount: 0,
           createdAt: new Date().toISOString(),
         });
+        if (st === 'resolving') {
+          await jobRepo.updateJob(ctxA, jId, 'resolving');
+        } else if (st === 'fetching') {
+          await jobRepo.updateJob(ctxA, jId, 'resolving');
+          await jobRepo.updateJob(ctxA, jId, 'fetching');
+        } else if (st === 'verifying') {
+          await jobRepo.updateJob(ctxA, jId, 'resolving');
+          await jobRepo.updateJob(ctxA, jId, 'fetching');
+          await jobRepo.updateJob(ctxA, jId, 'verifying');
+        } else if (st === 'persisted') {
+          await jobRepo.updateJob(ctxA, jId, 'resolving');
+          await jobRepo.updateJob(ctxA, jId, 'fetching');
+          await jobRepo.updateJob(ctxA, jId, 'verifying');
+          await jobRepo.updateJob(ctxA, jId, 'persisted');
+        }
       }
 
       // Create a completed job and an unrelated failed job
@@ -1272,11 +1350,20 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
         owner: 'test-owner',
         repo: 'test-repo-completed',
         ref: 'main',
-        status: 'completed',
+        status: 'queued',
+        fileCount: 0,
+        retainedBytes: 0,
+        registeredSnapshotsCount: 0,
+        createdAt: new Date().toISOString(),
+      });
+      await jobRepo.updateJob(ctxA, completedJobId, 'resolving');
+      await jobRepo.updateJob(ctxA, completedJobId, 'fetching');
+      await jobRepo.updateJob(ctxA, completedJobId, 'verifying');
+      await jobRepo.updateJob(ctxA, completedJobId, 'persisted');
+      await jobRepo.updateJob(ctxA, completedJobId, 'completed', {
         fileCount: 5,
         retainedBytes: 1000,
         registeredSnapshotsCount: 5,
-        createdAt: new Date().toISOString(),
         completedAt: new Date().toISOString(),
       });
 
@@ -1289,12 +1376,14 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
         owner: 'test-owner',
         repo: 'test-repo-other-failed',
         ref: 'main',
-        status: 'failed',
+        status: 'queued',
         fileCount: 0,
         retainedBytes: 0,
         registeredSnapshotsCount: 0,
-        error: 'PARSER_SYNTAX_ERROR',
         createdAt: new Date().toISOString(),
+      });
+      await jobRepo.updateJob(ctxA, failedJobId, 'failed', {
+        error: 'PARSER_SYNTAX_ERROR',
         completedAt: new Date().toISOString(),
       });
 
@@ -1308,12 +1397,14 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
         owner: 'test-owner',
         repo: 'test-repo-student-b',
         ref: 'main',
-        status: 'fetching',
-        fileCount: 2,
-        retainedBytes: 200,
+        status: 'queued',
+        fileCount: 0,
+        retainedBytes: 0,
         registeredSnapshotsCount: 0,
         createdAt: new Date().toISOString(),
       });
+      await jobRepo.updateJob(ctxB, studentBJobId, 'resolving');
+      await jobRepo.updateJob(ctxB, studentBJobId, 'fetching', { fileCount: 2, retainedBytes: 200 });
 
       // Execute revocation cancellation for STUDENT_A
       const cancelledCount = await jobRepo.cancelJobsForStudentOnRevocation(ctxA, STUDENT_A);
@@ -1353,12 +1444,14 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
         owner: 'test-owner',
         repo: 'test-repo-term',
         ref: 'main',
-        status: 'fetching',
+        status: 'queued',
         fileCount: 0,
         retainedBytes: 0,
         registeredSnapshotsCount: 0,
         createdAt: new Date().toISOString(),
       });
+      await jobRepo.updateJob(ctxA, jId, 'resolving');
+      await jobRepo.updateJob(ctxA, jId, 'fetching');
 
       // Revocation cancels in-progress job
       await jobRepo.cancelJobsForStudentOnRevocation(ctxA, STUDENT_A);
@@ -1424,6 +1517,10 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
         createdAt: new Date().toISOString(),
       });
 
+      await jobRepo.updateJob(ctxA, jId, 'resolving');
+      await jobRepo.updateJob(ctxA, jId, 'fetching');
+      await jobRepo.updateJob(ctxA, jId, 'verifying');
+      await jobRepo.updateJob(ctxA, jId, 'persisted');
       await jobRepo.updateJob(ctxA, jId, 'completed');
 
       await expect(jobRepo.updateJob(ctxA, jId, 'resolving')).rejects.toThrow(/JOB_ALREADY_COMPLETED/);
@@ -1440,12 +1537,13 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
         owner: 'test-owner',
         repo: 'test-repo-invalid',
         ref: 'main',
-        status: 'resolving',
+        status: 'queued',
         fileCount: 0,
         retainedBytes: 0,
         registeredSnapshotsCount: 0,
         createdAt: new Date().toISOString(),
       });
+      await jobRepo.updateJob(ctxA, jId, 'resolving');
 
       // Cannot skip fetching and jump to persisted
       await expect(jobRepo.updateJob(ctxA, jId, 'persisted')).rejects.toThrow(/INVALID_JOB_TRANSITION/);
@@ -1461,12 +1559,13 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
         owner: 'test-owner',
         repo: 'test-repo-retry',
         ref: 'main',
-        status: 'resolving',
+        status: 'queued',
         fileCount: 0,
         retainedBytes: 0,
         registeredSnapshotsCount: 0,
         createdAt: new Date().toISOString(),
       });
+      await jobRepo.updateJob(ctxA, originalId, 'resolving');
 
       // Mark original failed
       await jobRepo.updateJob(ctxA, originalId, 'failed', { error: 'GITHUB_RATE_LIMIT_EXCEEDED' });
@@ -1496,6 +1595,150 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
 
       const retryJob = await jobRepo.getJob(ctxA, retryId);
       expect(retryJob?.status).toBe('completed');
+    });
+
+    it('8.7. P0: Eliminates quarantined snapshot write bypass — new snapshot write with quarantined state without active consent is strictly rejected', async () => {
+      // Ensure student A has no active consent
+      const active = await consentRepo.getActiveGrant(ctxA, STUDENT_A, 'repo_verification');
+      if (active) {
+        await consentRepo.revokeConsent(ctxA, active.id);
+      }
+
+      const rawBytes = Buffer.from('const forbidden = "quarantined_write_bypass";\n', 'utf8');
+      const snap: SourceSnapshot = {
+        snapshotId: randomUUID(),
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: REPO_A,
+        commitSha: '8877000000000000000000000000000000000001',
+        filePath: 'src/quarantine-bypass.ts',
+        rawBytes,
+        rawFileHash: computeRawFileHash(rawBytes),
+        blobSha: computeGitBlobSha(rawBytes),
+        capturedAt: new Date().toISOString(),
+        provenance: 'trusted_ingestion_pipeline',
+        ingestionId: randomUUID(),
+        registrationState: 'quarantined', // Explicitly trying to bypass consent check
+      };
+
+      // Writing newly persisted snapshot marked 'quarantined' must fail closed
+      await expect(snapshotStore.saveSnapshot(snap)).rejects.toThrow(/CONSENT_REQUIRED_OR_REVOKED/);
+    });
+
+    it('8.8. Dedicated state-transition method updateRegistrationState() allows quarantining existing snapshots even without active consent', async () => {
+      // 1. Grant consent to create initial pending snapshot
+      const grant = await consentRepo.grantConsent(ctxA, STUDENT_A, 'repo_verification', 1);
+      const commitSha = '8888000000000000000000000000000000000002';
+      const snapId = randomUUID();
+      const rawBytes = Buffer.from('const valid = "initial_snapshot";\n', 'utf8');
+      const snap: SourceSnapshot = {
+        snapshotId: snapId,
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: REPO_A,
+        commitSha,
+        filePath: 'src/valid-quarantine.ts',
+        rawBytes,
+        rawFileHash: computeRawFileHash(rawBytes),
+        blobSha: computeGitBlobSha(rawBytes),
+        capturedAt: new Date().toISOString(),
+        provenance: 'trusted_ingestion_pipeline',
+        ingestionId: randomUUID(),
+        registrationState: 'pending_audit',
+      };
+      await snapshotStore.saveSnapshot(snap);
+
+      // 2. Revoke consent grant directly so no active grant exists
+      const revokeClient = await pool.connect();
+      try {
+        await revokeClient.query(`UPDATE consent_grants SET revoked_at = CURRENT_TIMESTAMP WHERE id = $1;`, [grant.id]);
+      } finally {
+        revokeClient.release();
+      }
+
+      // Verify no active consent exists
+      const hasActive = await consentRepo.hasActiveConsent(ctxA, STUDENT_A, 'repo_verification');
+      expect(hasActive).toBe(false);
+
+      // 3. Quarantining the existing snapshot must succeed without active consent
+      const quarantined = await snapshotStore.updateRegistrationState(
+        REPO_A,
+        commitSha,
+        'src/valid-quarantine.ts',
+        COLLEGE_A,
+        STUDENT_A,
+        snapId,
+        'quarantined'
+      );
+      expect(quarantined).toBe(true);
+
+      const client = await pool.connect();
+      try {
+        const res = await client.query(`SELECT registration_state FROM source_snapshots WHERE snapshot_id = $1;`, [snapId]);
+        expect(res.rows[0].registration_state).toBe('quarantined');
+      } finally {
+        client.release();
+      }
+    });
+
+    it('8.9. Quarantined snapshots can never be promoted directly to audit_committed', async () => {
+      const commitSha = '8899000000000000000000000000000000000003';
+      const snapId = randomUUID();
+
+      // Ensure active consent exists
+      const active = await consentRepo.getActiveGrant(ctxA, STUDENT_A, 'repo_verification');
+      if (!active) {
+        await consentRepo.grantConsent(ctxA, STUDENT_A, 'repo_verification', 1);
+      }
+
+      const rawBytes = Buffer.from('const quarantined = "cannot_promote";\n', 'utf8');
+      const snap: SourceSnapshot = {
+        snapshotId: snapId,
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: REPO_A,
+        commitSha,
+        filePath: 'src/quarantine-promote.ts',
+        rawBytes,
+        rawFileHash: computeRawFileHash(rawBytes),
+        blobSha: computeGitBlobSha(rawBytes),
+        capturedAt: new Date().toISOString(),
+        provenance: 'trusted_ingestion_pipeline',
+        ingestionId: randomUUID(),
+        registrationState: 'pending_audit',
+      };
+      await snapshotStore.saveSnapshot(snap);
+
+      // Transition to quarantined
+      await snapshotStore.updateRegistrationState(
+        REPO_A,
+        commitSha,
+        'src/quarantine-promote.ts',
+        COLLEGE_A,
+        STUDENT_A,
+        snapId,
+        'quarantined'
+      );
+
+      // Attempt to promote from quarantined to audit_committed
+      const promoted = await snapshotStore.updateRegistrationState(
+        REPO_A,
+        commitSha,
+        'src/quarantine-promote.ts',
+        COLLEGE_A,
+        STUDENT_A,
+        snapId,
+        'audit_committed'
+      );
+      expect(promoted).toBe(false);
+
+      const client = await pool.connect();
+      try {
+        const res = await client.query(`SELECT registration_state FROM source_snapshots WHERE snapshot_id = $1;`, [snapId]);
+        expect(res.rows[0].registration_state).toBe('quarantined');
+      } finally {
+        client.release();
+      }
     });
   });
 
@@ -1552,8 +1795,19 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
           // Signal that ingestion holds the consent lock
           latchIngestionLocked.resolve();
 
-          // Brief pause to allow revocation to issue its query and block on FOR UPDATE
-          await new Promise((r) => setTimeout(r, 100));
+          // Wait deterministically until revocation's query is actively waiting for the row lock
+          for (let i = 0; i < 50; i++) {
+            const waitRes = await client.query(`
+              SELECT count(*)::int as cnt FROM pg_stat_activity
+              WHERE pid <> pg_backend_pid()
+                AND wait_event_type = 'Lock'
+                AND query ILIKE '%consent_grants%FOR UPDATE%';
+            `);
+            if (waitRes.rows[0].cnt > 0) {
+              break;
+            }
+            await new Promise((resolve) => setImmediate(resolve));
+          }
 
           // Insert source snapshot
           await client.query(`
@@ -1739,11 +1993,19 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
         owner: 'test-owner',
         repo: 'test-race-job',
         ref: 'main',
-        status: 'persisted',
+        status: 'queued',
+        fileCount: 0,
+        retainedBytes: 0,
+        registeredSnapshotsCount: 0,
+        createdAt: new Date().toISOString(),
+      });
+      await jobRepo.updateJob(ctxA, jId, 'resolving');
+      await jobRepo.updateJob(ctxA, jId, 'fetching');
+      await jobRepo.updateJob(ctxA, jId, 'verifying');
+      await jobRepo.updateJob(ctxA, jId, 'persisted', {
         fileCount: 3,
         retainedBytes: 500,
         registeredSnapshotsCount: 3,
-        createdAt: new Date().toISOString(),
       });
 
       // Cancellation occurs
@@ -2205,6 +2467,402 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
         await client.query('ROLLBACK;').catch(() => {});
         client.release();
       }
+    });
+
+    it('10.12. Conflicting source_snapshots provenance on duplicate repositories: aborts with exception and preserves data', async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN;');
+        await client.query('ALTER TABLE repositories DROP CONSTRAINT IF EXISTS uq_repositories_student_provider_repo;');
+
+        const repo1 = randomUUID();
+        const repo2 = randomUUID();
+        const providerRepoId = 'mig_dup_test_12';
+        const commitSha = 'cccccccccccccccccccccccccccccccccccccccc';
+
+        await client.query(`
+          INSERT INTO repositories (id, student_id, provider, provider_repo_id, url, default_branch, consent_grant_id, imported_at) VALUES
+            ('${repo1}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo1', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP - INTERVAL '10 seconds'),
+            ('${repo2}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo2', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP);
+        `);
+
+        const b = Buffer.from('file identical bytes', 'utf8');
+        await client.query(`
+          INSERT INTO source_snapshots (id, snapshot_id, org_id, student_id, repository_id, commit_sha, file_path, raw_bytes, raw_file_hash, blob_sha, captured_at, provenance, ingestion_id, registration_state) VALUES
+            ('${randomUUID()}', '${randomUUID()}', '${COLLEGE_A}', '${STUDENT_A}', '${repo1}', '${commitSha}', 'src/prov.ts', $1, '${computeRawFileHash(b)}', '${computeGitBlobSha(b)}', CURRENT_TIMESTAMP, 'trusted_ingestion_pipeline', '${randomUUID()}', 'audit_committed'),
+            ('${randomUUID()}', '${randomUUID()}', '${COLLEGE_A}', '${STUDENT_A}', '${repo2}', '${commitSha}', 'src/prov.ts', $1, '${computeRawFileHash(b)}', '${computeGitBlobSha(b)}', CURRENT_TIMESTAMP, 'unverified_client_input', '${randomUUID()}', 'audit_committed');
+        `, [b]);
+
+        await expect(client.query(migration011aSql)).rejects.toThrow(/Divergent source_snapshots provenance detected/);
+
+        await client.query('ROLLBACK;');
+      } catch (err) {
+        await client.query('ROLLBACK;').catch(() => {});
+        throw err;
+      } finally {
+        await client.query('ROLLBACK;').catch(() => {});
+        client.release();
+      }
+    });
+
+    it('10.13. Conflicting registration_state on duplicate source_snapshots (quarantined vs audit_committed): conservatively updates canonical to quarantined', async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN;');
+        await client.query('ALTER TABLE repositories DROP CONSTRAINT IF EXISTS uq_repositories_student_provider_repo;');
+
+        const repo1 = randomUUID();
+        const repo2 = randomUUID();
+        const providerRepoId = 'mig_dup_test_13';
+        const commitSha = 'dddddddddddddddddddddddddddddddddddddddd';
+
+        await client.query(`
+          INSERT INTO repositories (id, student_id, provider, provider_repo_id, url, default_branch, consent_grant_id, imported_at) VALUES
+            ('${repo1}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo1', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP - INTERVAL '10 seconds'),
+            ('${repo2}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo2', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP);
+        `);
+
+        const b = Buffer.from('file state check', 'utf8');
+        const snap1 = randomUUID();
+        const snap2 = randomUUID();
+        await client.query(`
+          INSERT INTO source_snapshots (id, snapshot_id, org_id, student_id, repository_id, commit_sha, file_path, raw_bytes, raw_file_hash, blob_sha, captured_at, provenance, ingestion_id, registration_state) VALUES
+            ('${randomUUID()}', '${snap1}', '${COLLEGE_A}', '${STUDENT_A}', '${repo1}', '${commitSha}', 'src/state.ts', $1, '${computeRawFileHash(b)}', '${computeGitBlobSha(b)}', CURRENT_TIMESTAMP, 'trusted_ingestion_pipeline', '${randomUUID()}', 'audit_committed'),
+            ('${randomUUID()}', '${snap2}', '${COLLEGE_A}', '${STUDENT_A}', '${repo2}', '${commitSha}', 'src/state.ts', $1, '${computeRawFileHash(b)}', '${computeGitBlobSha(b)}', CURRENT_TIMESTAMP, 'trusted_ingestion_pipeline', '${randomUUID()}', 'quarantined');
+        `, [b]);
+
+        await client.query(migration011aSql);
+
+        const res = await client.query(`SELECT snapshot_id, registration_state FROM source_snapshots WHERE repository_id = $1 AND commit_sha = $2;`, [repo1, commitSha]);
+        expect(res.rows.length).toBe(1);
+        expect(res.rows[0].snapshot_id).toBe(snap1);
+        // Canonical snapshot must be conservatively updated to quarantined!
+        expect(res.rows[0].registration_state).toBe('quarantined');
+
+        await client.query('ROLLBACK;');
+      } catch (err) {
+        await client.query('ROLLBACK;').catch(() => {});
+        throw err;
+      } finally {
+        await client.query('ROLLBACK;').catch(() => {});
+        client.release();
+      }
+    });
+
+    it('10.14. Conflicting trusted_ingestion_records status (revoked vs persisted): aborts fail-closed and preserves data', async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN;');
+        await client.query('ALTER TABLE repositories DROP CONSTRAINT IF EXISTS uq_repositories_student_provider_repo;');
+
+        const repo1 = randomUUID();
+        const repo2 = randomUUID();
+        const providerRepoId = 'mig_dup_test_14';
+        const commitSha = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+        const treeSha = '1111000000000000000000000000000000000001';
+
+        await client.query(`
+          INSERT INTO repositories (id, student_id, provider, provider_repo_id, url, default_branch, consent_grant_id, imported_at) VALUES
+            ('${repo1}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo1', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP - INTERVAL '10 seconds'),
+            ('${repo2}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo2', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP);
+        `);
+
+        const manifest = JSON.stringify([{ filePath: 'src/file.ts', blobSha: 'a', rawFileHash: 'b', byteSize: 5 }]);
+
+        await client.query(`
+          INSERT INTO trusted_ingestion_records (id, ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, manifest, provenance, status, consent_grant_id) VALUES
+            ('${randomUUID()}', '${randomUUID()}', '${COLLEGE_A}', '${STUDENT_A}', '${repo1}', '${commitSha}', '${treeSha}', $1::jsonb, 'trusted_ingestion_pipeline', 'persisted', '${CONSENT_A}'),
+            ('${randomUUID()}', '${randomUUID()}', '${COLLEGE_A}', '${STUDENT_A}', '${repo2}', '${commitSha}', '${treeSha}', $1::jsonb, 'trusted_ingestion_pipeline', 'revoked', '${CONSENT_A}');
+        `, [manifest]);
+
+        await expect(client.query(migration011aSql)).rejects.toThrow(/Conflicting trusted_ingestion_records status detected/);
+
+        await client.query('ROLLBACK;');
+      } catch (err) {
+        await client.query('ROLLBACK;').catch(() => {});
+        throw err;
+      } finally {
+        await client.query('ROLLBACK;').catch(() => {});
+        client.release();
+      }
+    });
+
+    it('10.15. Conflicting consent_grant_id on duplicate trusted_ingestion_records: aborts fail-closed and preserves data', async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN;');
+        await client.query('ALTER TABLE repositories DROP CONSTRAINT IF EXISTS uq_repositories_student_provider_repo;');
+
+        const repo1 = randomUUID();
+        const repo2 = randomUUID();
+        const providerRepoId = 'mig_dup_test_15';
+        const commitSha = 'ffffffffffffffffffffffffffffffffffffffff';
+        const treeSha = '2222000000000000000000000000000000000002';
+
+        await client.query(`
+          INSERT INTO repositories (id, student_id, provider, provider_repo_id, url, default_branch, consent_grant_id, imported_at) VALUES
+            ('${repo1}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo1', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP - INTERVAL '10 seconds'),
+            ('${repo2}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo2', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP);
+        `);
+
+        const manifest = JSON.stringify([{ filePath: 'src/file.ts', blobSha: 'a', rawFileHash: 'b', byteSize: 5 }]);
+
+        await client.query(`
+          INSERT INTO trusted_ingestion_records (id, ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, manifest, provenance, status, consent_grant_id) VALUES
+            ('${randomUUID()}', '${randomUUID()}', '${COLLEGE_A}', '${STUDENT_A}', '${repo1}', '${commitSha}', '${treeSha}', $1::jsonb, 'trusted_ingestion_pipeline', 'persisted', '${CONSENT_A}'),
+            ('${randomUUID()}', '${randomUUID()}', '${COLLEGE_A}', '${STUDENT_A}', '${repo2}', '${commitSha}', '${treeSha}', $1::jsonb, 'trusted_ingestion_pipeline', 'persisted', '${CONSENT_B}');
+        `, [manifest]);
+
+        await expect(client.query(migration011aSql)).rejects.toThrow(/Conflicting consent_grant_id on duplicate trusted_ingestion_records/);
+
+        await client.query('ROLLBACK;');
+      } catch (err) {
+        await client.query('ROLLBACK;').catch(() => {});
+        throw err;
+      } finally {
+        await client.query('ROLLBACK;').catch(() => {});
+        client.release();
+      }
+    });
+  });
+
+  // =========================================================================
+  // 11. End-to-End Fresh Re-ingestion After Re-Consent (Migration 015)
+  // =========================================================================
+
+  describe('11. End-to-End Fresh Re-ingestion After Re-Consent (Migration 015)', () => {
+    const ctxA: SessionContext = {
+      orgId: COLLEGE_A,
+      userId: USER_A,
+      role: 'student',
+    };
+
+    it('11.1. Same-commit re-ingestion after revocation and re-consent creates distinct generation, preserves revoked history, and resolves active generation', async () => {
+      // 1. Initial consent grant
+      const grant1 = await consentRepo.grantConsent(ctxA, STUDENT_A, 'repo_verification', 1);
+      expect(grant1.id).toBeDefined();
+
+      const commitSha = 'c001000000000000000000000000000000000001';
+      const treeSha = '1001000000000000000000000000000000000001';
+      const filePath = 'src/reingest.ts';
+      const rawBytes1 = Buffer.from('console.log("generation 1");\n', 'utf8');
+      const rawFileHash1 = computeRawFileHash(rawBytes1);
+      const blobSha1 = computeGitBlobSha(rawBytes1);
+
+      const ingestionId1 = randomUUID();
+      const snapId1 = randomUUID();
+
+      // Save initial snapshot and trusted record under grant1
+      const snap1: SourceSnapshot = {
+        snapshotId: snapId1,
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: REPO_A,
+        commitSha,
+        filePath,
+        rawBytes: rawBytes1,
+        rawFileHash: rawFileHash1,
+        blobSha: blobSha1,
+        capturedAt: new Date().toISOString(),
+        provenance: 'trusted_ingestion_pipeline',
+        ingestionId: ingestionId1,
+        registrationState: 'pending_audit',
+      };
+      await snapshotStore.saveSnapshot(snap1);
+
+      // Promote to audit_committed
+      await snapshotStore.updateRegistrationState(
+        REPO_A,
+        commitSha,
+        filePath,
+        COLLEGE_A,
+        STUDENT_A,
+        snapId1,
+        'audit_committed'
+      );
+
+      const record1: TrustedIngestionRecord = {
+        ingestionId: ingestionId1,
+        orgId: COLLEGE_A,
+        repositoryId: REPO_A,
+        commitSha,
+        treeSha,
+        studentId: STUDENT_A,
+        verifiedAt: new Date().toISOString(),
+        provenance: 'trusted_ingestion_pipeline',
+        manifest: [{ filePath, blobSha: blobSha1, rawFileHash: rawFileHash1, byteSize: rawBytes1.length }],
+        consentGrantId: grant1.id,
+        status: 'persisted',
+      };
+      await trustedIngestionStore.saveRecord(record1);
+
+      // Verify generation 1 resolves as active
+      const fetchedRecord1 = await trustedIngestionStore.getRecord(COLLEGE_A, REPO_A, commitSha, STUDENT_A);
+      expect(fetchedRecord1).not.toBeNull();
+      expect(fetchedRecord1?.ingestionId).toBe(ingestionId1);
+      expect(fetchedRecord1?.status).toBe('persisted');
+
+      const fetchedSnap1 = await snapshotStore.getSnapshot(REPO_A, commitSha, filePath, COLLEGE_A, STUDENT_A);
+      expect(fetchedSnap1?.registrationState).toBe('audit_committed');
+
+      // 2. Revoke consent
+      const revRes = await consentRepo.revokeConsent(ctxA, grant1.id, 'Testing re-ingestion');
+      expect(revRes.success).toBe(true);
+
+      // Verify generation 1 is now revoked and quarantined
+      const client = await pool.connect();
+      try {
+        const tirCheck = await client.query(`SELECT status FROM trusted_ingestion_records WHERE ingestion_id = $1;`, [ingestionId1]);
+        expect(tirCheck.rows[0].status).toBe('revoked');
+
+        const snapCheck = await client.query(`SELECT registration_state FROM source_snapshots WHERE snapshot_id = $1;`, [snapId1]);
+        expect(snapCheck.rows[0].registration_state).toBe('quarantined');
+      } finally {
+        client.release();
+      }
+
+      // 3. Student grants new consent (Generation 2)
+      const grant2 = await consentRepo.grantConsent(ctxA, STUDENT_A, 'repo_verification', 2);
+      expect(grant2.id).not.toBe(grant1.id);
+
+      // 4. Ingest the SAME Git commit under Generation 2
+      const ingestionId2 = randomUUID();
+      const snapId2 = randomUUID();
+
+      const snap2: SourceSnapshot = {
+        snapshotId: snapId2,
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: REPO_A,
+        commitSha, // SAME commit SHA!
+        filePath,
+        rawBytes: rawBytes1,
+        rawFileHash: rawFileHash1,
+        blobSha: blobSha1,
+        capturedAt: new Date().toISOString(),
+        provenance: 'trusted_ingestion_pipeline',
+        ingestionId: ingestionId2, // Fresh generation ingestionId
+        registrationState: 'pending_audit',
+      };
+      await snapshotStore.saveSnapshot(snap2);
+
+      const record2: TrustedIngestionRecord = {
+        ingestionId: ingestionId2,
+        orgId: COLLEGE_A,
+        repositoryId: REPO_A,
+        commitSha, // SAME commit SHA!
+        treeSha,
+        studentId: STUDENT_A,
+        verifiedAt: new Date().toISOString(),
+        provenance: 'trusted_ingestion_pipeline',
+        manifest: [{ filePath, blobSha: blobSha1, rawFileHash: rawFileHash1, byteSize: rawBytes1.length }],
+        consentGrantId: grant2.id,
+        status: 'persisted',
+      };
+      await trustedIngestionStore.saveRecord(record2);
+
+      // Promote new snapshot to audit_committed
+      await snapshotStore.updateRegistrationState(
+        REPO_A,
+        commitSha,
+        filePath,
+        COLLEGE_A,
+        STUDENT_A,
+        snapId2,
+        'audit_committed'
+      );
+
+      // 5. Verify database state: both historical and active rows are preserved
+      const client2 = await pool.connect();
+      try {
+        // Exactly 2 trusted ingestion records for this commit
+        const tirAll = await client2.query(
+          `SELECT ingestion_id, consent_grant_id, status FROM trusted_ingestion_records WHERE repository_id = $1 AND commit_sha = $2 ORDER BY verified_at ASC;`,
+          [REPO_A, commitSha]
+        );
+        expect(tirAll.rows.length).toBe(2);
+        expect(tirAll.rows[0].ingestion_id).toBe(ingestionId1);
+        expect(tirAll.rows[0].status).toBe('revoked');
+        expect(tirAll.rows[0].consent_grant_id).toBe(grant1.id);
+        expect(tirAll.rows[1].ingestion_id).toBe(ingestionId2);
+        expect(tirAll.rows[1].status).toBe('persisted');
+        expect(tirAll.rows[1].consent_grant_id).toBe(grant2.id);
+
+        // Exactly 2 source snapshots for this commit & path
+        const snapAll = await client2.query(
+          `SELECT snapshot_id, ingestion_id, registration_state FROM source_snapshots WHERE repository_id = $1 AND commit_sha = $2 AND file_path = $3 ORDER BY captured_at ASC;`,
+          [REPO_A, commitSha, filePath]
+        );
+        expect(snapAll.rows.length).toBe(2);
+        expect(snapAll.rows[0].snapshot_id).toBe(snapId1);
+        expect(snapAll.rows[0].registration_state).toBe('quarantined');
+        expect(snapAll.rows[1].snapshot_id).toBe(snapId2);
+        expect(snapAll.rows[1].registration_state).toBe('audit_committed');
+      } finally {
+        client2.release();
+      }
+
+      // 6. Verify store lookups return active generation 2
+      const activeRecord = await trustedIngestionStore.getRecord(COLLEGE_A, REPO_A, commitSha, STUDENT_A);
+      expect(activeRecord).not.toBeNull();
+      expect(activeRecord?.ingestionId).toBe(ingestionId2);
+      expect(activeRecord?.status).toBe('persisted');
+
+      const activeSnapshot = await snapshotStore.getSnapshot(REPO_A, commitSha, filePath, COLLEGE_A, STUDENT_A);
+      expect(activeSnapshot).not.toBeNull();
+      expect(activeSnapshot?.snapshotId).toBe(snapId2);
+      expect(activeSnapshot?.registrationState).toBe('audit_committed');
+    });
+
+    it('11.2. Different-commit re-ingestion under active re-consent succeeds cleanly alongside previous generations', async () => {
+      const activeGrant = await consentRepo.getActiveGrant(ctxA, STUDENT_A, 'repo_verification');
+      expect(activeGrant).not.toBeNull();
+
+      const commitSha2 = 'c002000000000000000000000000000000000002';
+      const treeSha2 = '2002000000000000000000000000000000000002';
+      const filePath2 = 'src/diff_commit.ts';
+      const rawBytes2 = Buffer.from('console.log("diff commit");\n', 'utf8');
+      const rawFileHash2 = computeRawFileHash(rawBytes2);
+      const blobSha2 = computeGitBlobSha(rawBytes2);
+
+      const ingestionId3 = randomUUID();
+      const snapId3 = randomUUID();
+
+      const snap3: SourceSnapshot = {
+        snapshotId: snapId3,
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: REPO_A,
+        commitSha: commitSha2,
+        filePath: filePath2,
+        rawBytes: rawBytes2,
+        rawFileHash: rawFileHash2,
+        blobSha: blobSha2,
+        capturedAt: new Date().toISOString(),
+        provenance: 'trusted_ingestion_pipeline',
+        ingestionId: ingestionId3,
+        registrationState: 'pending_audit',
+      };
+      await snapshotStore.saveSnapshot(snap3);
+
+      const record3: TrustedIngestionRecord = {
+        ingestionId: ingestionId3,
+        orgId: COLLEGE_A,
+        repositoryId: REPO_A,
+        commitSha: commitSha2,
+        treeSha: treeSha2,
+        studentId: STUDENT_A,
+        verifiedAt: new Date().toISOString(),
+        provenance: 'trusted_ingestion_pipeline',
+        manifest: [{ filePath: filePath2, blobSha: blobSha2, rawFileHash: rawFileHash2, byteSize: rawBytes2.length }],
+        consentGrantId: activeGrant!.id,
+        status: 'persisted',
+      };
+      await trustedIngestionStore.saveRecord(record3);
+
+      const activeRecord2 = await trustedIngestionStore.getRecord(COLLEGE_A, REPO_A, commitSha2, STUDENT_A);
+      expect(activeRecord2?.ingestionId).toBe(ingestionId3);
+      expect(activeRecord2?.status).toBe('persisted');
     });
   });
 });
