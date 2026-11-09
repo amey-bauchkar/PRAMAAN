@@ -73,6 +73,25 @@ export class PgTrustedIngestionStore implements ITrustedIngestionStore {
     };
 
     await withTenantTransaction(context, async (client) => {
+      // 0. Atomic Database-Level Consent Gate: check active consent under row lock
+      const consentCheck = await client.query(
+        `
+        SELECT id
+        FROM consent_grants
+        WHERE student_id = $1
+          AND purpose = 'repo_verification'
+          AND revoked_at IS NULL
+        FOR SHARE;
+      `,
+        [parsed.studentId]
+      );
+
+      if (consentCheck.rows.length === 0) {
+        throw new Error(
+          `CONSENT_REQUIRED_OR_REVOKED: Active repo_verification consent required to persist trusted ingestion record for student '${parsed.studentId}'`
+        );
+      }
+
       // 1. Check for existing record
       const selectQuery = `
         SELECT ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, verified_at, provenance, manifest
@@ -155,7 +174,8 @@ export class PgTrustedIngestionStore implements ITrustedIngestionStore {
       const query = `
         SELECT ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, verified_at, provenance, manifest
         FROM trusted_ingestion_records
-        WHERE org_id = $1 AND repository_id = $2 AND LOWER(commit_sha) = LOWER($3) AND student_id = $4;
+        WHERE org_id = $1 AND repository_id = $2 AND LOWER(commit_sha) = LOWER($3) AND student_id = $4
+          AND status != 'revoked';
       `;
       const res = await client.query(query, [
         orgId,

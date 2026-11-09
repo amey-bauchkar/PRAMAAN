@@ -420,6 +420,13 @@ export class PgConsentRepository implements IConsentRepository {
         `, [grant.student_id]);
         quarantinedSnapshotCount = snapRes.rowCount ?? 0;
 
+        // D2. Mark trusted ingestion records revoked to ensure they cannot be used for authoritative resolution
+        await client.query(`
+          UPDATE trusted_ingestion_records
+          SET status = 'revoked'
+          WHERE student_id = $1;
+        `, [grant.student_id]);
+
         // E. Cancel all applicable in-progress ingestion jobs
         await client.query(`
           UPDATE ingestion_jobs

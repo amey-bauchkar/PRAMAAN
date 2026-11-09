@@ -19,7 +19,7 @@ Following the M0 monorepo foundation, M1 multi-tenancy/security hardening, and M
 - **Bounded GitHub Tree Traversal & Fail-Closed Rate Limiting:** Enforces strict execution bounds: `maxTreeEntries = 5000`, `maxDirectoryTraversals = 100`, `maxTreeApiRequests = 30`, `maxFiles = 200`, and `maxWallClockMs = 30000ms` with `AbortSignal`. Implements early termination: immediately terminates traversal upon detecting more than 200 eligible files (`FILE_COUNT_LIMIT_EXCEEDED`). Detects GitHub rate limits (HTTP 403/429) fail-closed (`GITHUB_RATE_LIMIT_EXCEEDED`). Zero manifests or snapshots are persisted upon limit breach.
 - **Ingestion Job Transitions on Revocation:** In `PgConsentRepository.revokeConsent()` and `cancelJobsForStudentOnRevocation()`, all in-progress jobs (`queued`, `resolving`, `fetching`, `verifying`, `persisted`) are transitioned to `status = 'failed'` with `error = 'CONSENT_REVOKED'` and `completed_at` set. Completed and already-failed jobs are strictly preserved for historical audit trails.
 - **Audit Actor Identity Preservation:** Disambiguated authenticated actor identity (`users.id`) from student owner identity (`students.id`). Augmented `SessionContext` with optional `actorUserId`. Audit events record `actorId = context.actorUserId ?? context.userId` (`users.id`) whether student- or officer-initiated, while snapshots and ingestion records are owned by `students.id`. Preserves all frozen P0-05 resolver invariants without modifying frozen files.
-- **Full Test Suite Success:** 472 tests pass across 29 test files (including 56 P0-04 ingestion integration tests, 28 durable PostgreSQL tests, and 8 CI safety tests), with 0 ESLint errors, 0 TypeScript errors, and successful monorepo production build.
+- **Full Test Suite Success:** 493 tests pass across 29 test files (including 56 P0-04 ingestion integration tests, 49 durable PostgreSQL tests, and 8 CI safety tests), with 0 ESLint errors, 0 TypeScript errors, and successful monorepo production build.
 
 ---
 
@@ -29,10 +29,10 @@ Following the M0 monorepo foundation, M1 multi-tenancy/security hardening, and M
 | :--- | :--- | :--- | :--- |
 | **Pure Unit Tests** | Pure domain logic: state machine, anchor hashing, exact code anchor resolver, student isolation, offline AST parsing, Git object byte/SHA verification, audit hash chaining, eligibility rules, 4/5ths fairness math. | 7 files, 110 tests | `UNIT_TESTED` (Passing in ~3s) |
 | **API, RBAC & Adversarial Tests** | Fastify HTTP endpoints, positive RBAC matrix, anchor resolution API, snapshot registration mutex with leak-free cleanup, conditional audit rollback, registration commit state lifecycle, quarantined fail-closed checks, file manifest provenance, mandatory Git blob SHA, pre-persisted trusted ingestion record separation, prior consent enforcement, audit-failure safety, student ownership/consent gates, email takeover prevention, fail-closed startup, strict claims validation, JWT test utilities, consent adversarial boundaries, audit concurrency & tenant consent, GitHub OAuth PKCE S256, AES-256-GCM token cipher, static repository ingestion engine, bounded traversal, provider revocation, file filtering, limits, and administrative TLS/ledger integrity. | 15 files, 228 tests | `INTEGRATION_TESTED` (Passing in ~40s) |
-| **Live Database Tests** | Real PostgreSQL 17 on Supabase: RLS isolation (46 tables enabled and forced), cross-tenant mutation rejection, triggers, constraints, DCL permissions, physical connection reuse via backend PID, restricted runtime user (`pramaan_app_user`), parent university discovery isolation, migration ledger idempotency, test safety guards, durable PostgreSQL repository adapters (`PgSourceSnapshotStore`, `PgTrustedIngestionStore`, `PgGitHubCredentialRepository`, `PgIngestionJobRepository`, `PgRepositoryRepository`, active consent uniqueness via Migration 013, safe repository reconciliation via Migration 014), and genuine Supabase ES256 JWKS token validation. | 7 files, 134 tests | `SECURITY_VERIFIED` (Passing on live Supabase DB) |
-| **Total Suite** | Full monorepo test pack running under Vitest. | **29 files, 472 tests** | **100% Passing** |
+| **Live Database Tests** | Real PostgreSQL 17 on Supabase: RLS isolation (46 tables enabled and forced), cross-tenant mutation rejection, triggers, constraints, DCL permissions, physical connection reuse via backend PID, restricted runtime user (`pramaan_app_user`), parent university discovery isolation, migration ledger idempotency, test safety guards, durable PostgreSQL repository adapters (`PgSourceSnapshotStore`, `PgTrustedIngestionStore`, `PgGitHubCredentialRepository`, `PgIngestionJobRepository`, `PgRepositoryRepository`, active consent uniqueness via Migration 013, safe repository preflight via Migration 011a, safe repository reconciliation via Migration 014, atomic database consent gates, and job terminal state machines), and genuine Supabase ES256 JWKS token validation. | 7 files, 155 tests | `SECURITY_VERIFIED` (Passing on live Supabase DB) |
+| **Total Suite** | Full monorepo test pack running under Vitest. | **29 files, 493 tests** | **100% Passing** |
 
-### Complete Test Inventory (29 Files, 472 Tests)
+### Complete Test Inventory (29 Files, 493 Tests)
 1. `packages/domain/tests/exact-anchor-resolver.test.ts` (59 tests)
 2. `packages/domain/tests/skill-state-machine.test.ts` (8 tests)
 3. `packages/domain/tests/anchor-resolver.test.ts` (4 tests)
@@ -60,7 +60,7 @@ Following the M0 monorepo foundation, M1 multi-tenancy/security hardening, and M
 25. `db/tests/test-safety-guard.test.ts` (47 tests)
 26. `db/tests/supabase-real-db.test.ts` (20 tests)
 27. `db/tests/migration-runner.test.ts` (4 tests)
-28. `db/tests/p0-04-pg-durable-repositories.test.ts` (28 tests)
+28. `db/tests/p0-04-pg-durable-repositories.test.ts` (49 tests)
 29. `db/tests/workflow-ci-safety.test.ts` (8 tests)
 
 ---

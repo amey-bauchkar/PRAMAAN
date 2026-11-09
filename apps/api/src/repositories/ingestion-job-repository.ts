@@ -33,7 +33,37 @@ export class InMemoryIngestionJobRepository implements IIngestionJobRepository {
     updates?: Partial<IngestionJobProgress>
   ): Promise<void> {
     const existing = this.jobs.get(ingestionId);
-    if (!existing) return;
+    if (!existing) {
+      throw new Error(`JOB_NOT_FOUND: Ingestion job '${ingestionId}' not found.`);
+    }
+
+    if (existing.status === 'failed') {
+      throw new Error(
+        `JOB_ALREADY_FAILED: Cannot transition job '${ingestionId}' to '${status}'. Job has already failed (error: ${existing.error || 'unknown'}).`
+      );
+    }
+    if (existing.status === 'completed') {
+      throw new Error(
+        `JOB_ALREADY_COMPLETED: Cannot transition job '${ingestionId}' to '${status}'. Job has already completed.`
+      );
+    }
+
+    const validTransitions: Record<IngestionJobStatus, IngestionJobStatus[]> = {
+      queued: ['queued', 'resolving', 'failed', 'completed'],
+      resolving: ['resolving', 'fetching', 'failed'],
+      fetching: ['fetching', 'verifying', 'failed'],
+      verifying: ['verifying', 'persisted', 'failed'],
+      persisted: ['persisted', 'completed', 'failed'],
+      completed: [],
+      failed: [],
+    };
+
+    if (!validTransitions[existing.status]?.includes(status)) {
+      throw new Error(
+        `INVALID_JOB_TRANSITION: Cannot transition job '${ingestionId}' from '${existing.status}' to '${status}'.`
+      );
+    }
+
     this.jobs.set(ingestionId, {
       ...existing,
       ...updates,
@@ -145,6 +175,47 @@ export class PgIngestionJobRepository implements IIngestionJobRepository {
     updates?: Partial<IngestionJobProgress>
   ): Promise<void> {
     await withTenantTransaction(context, async (client) => {
+      // 1. Fetch current status with row lock
+      const checkRes = await client.query(
+        `SELECT status, error FROM ingestion_jobs WHERE ingestion_id = $1 AND org_id = $2 FOR UPDATE;`,
+        [ingestionId, context.orgId]
+      );
+      if (checkRes.rows.length === 0) {
+        throw new Error(`JOB_NOT_FOUND: Ingestion job '${ingestionId}' not found.`);
+      }
+
+      const currentStatus: IngestionJobStatus = checkRes.rows[0].status;
+      const currentError: string | null = checkRes.rows[0].error;
+
+      // 2. Terminal state check
+      if (currentStatus === 'failed') {
+        throw new Error(
+          `JOB_ALREADY_FAILED: Cannot transition job '${ingestionId}' to '${status}'. Job has already failed (error: ${currentError || 'unknown'}).`
+        );
+      }
+      if (currentStatus === 'completed') {
+        throw new Error(
+          `JOB_ALREADY_COMPLETED: Cannot transition job '${ingestionId}' to '${status}'. Job has already completed.`
+        );
+      }
+
+      // 3. Valid transition check
+      const validTransitions: Record<IngestionJobStatus, IngestionJobStatus[]> = {
+        queued: ['queued', 'resolving', 'failed', 'completed'],
+        resolving: ['resolving', 'fetching', 'failed'],
+        fetching: ['fetching', 'verifying', 'failed'],
+        verifying: ['verifying', 'persisted', 'failed'],
+        persisted: ['persisted', 'completed', 'failed'],
+        completed: [],
+        failed: [],
+      };
+
+      if (!validTransitions[currentStatus]?.includes(status)) {
+        throw new Error(
+          `INVALID_JOB_TRANSITION: Cannot transition job '${ingestionId}' from '${currentStatus}' to '${status}'.`
+        );
+      }
+
       const isTerminal = status === 'completed' || status === 'failed';
       const completedAt = isTerminal ? updates?.completedAt || new Date().toISOString() : null;
 

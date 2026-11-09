@@ -40,6 +40,27 @@ export class PgSourceSnapshotStore implements ISourceSnapshotStore {
     };
 
     await withTenantTransaction(context, async (client) => {
+      // 0. Atomic Database-Level Consent Gate: check active consent under row lock
+      if (snapshot.registrationState !== 'quarantined') {
+        const consentCheck = await client.query(
+          `
+          SELECT id
+          FROM consent_grants
+          WHERE student_id = $1
+            AND purpose = 'repo_verification'
+            AND revoked_at IS NULL
+          FOR SHARE;
+        `,
+          [studentId]
+        );
+
+        if (consentCheck.rows.length === 0) {
+          throw new Error(
+            `CONSENT_REQUIRED_OR_REVOKED: Active repo_verification consent required to persist source snapshot for student '${studentId}'`
+          );
+        }
+      }
+
       // 1. Check for existing snapshot
       const selectQuery = `
         SELECT snapshot_id, raw_file_hash, registration_state
@@ -355,10 +376,36 @@ export class PgSourceSnapshotStore implements ISourceSnapshotStore {
     };
 
     return withTenantTransaction(context, async (client) => {
+      // If promoting to audit_committed, enforce active consent under row lock
+      if (newState === 'audit_committed') {
+        const consentCheck = await client.query(
+          `
+          SELECT id
+          FROM consent_grants
+          WHERE student_id = $1
+            AND purpose = 'repo_verification'
+            AND revoked_at IS NULL
+          FOR SHARE;
+        `,
+          [studentId]
+        );
+
+        if (consentCheck.rows.length === 0) {
+          return false;
+        }
+      }
+
       const updateQuery = `
         UPDATE source_snapshots
         SET registration_state = $1
-        WHERE org_id = $2 AND student_id = $3 AND repository_id = $4 AND LOWER(commit_sha) = LOWER($5) AND file_path = $6 AND snapshot_id = $7;
+        WHERE org_id = $2
+          AND student_id = $3
+          AND repository_id = $4
+          AND LOWER(commit_sha) = LOWER($5)
+          AND file_path = $6
+          AND snapshot_id = $7
+          AND registration_state != 'quarantined'
+          AND (registration_state = 'pending_audit' OR $1 = 'quarantined');
       `;
       const res = await client.query(updateQuery, [
         newState,

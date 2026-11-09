@@ -42,6 +42,16 @@ try {
   process.loadEnvFile?.();
 } catch {}
 
+function createLatch() {
+  let resolve!: () => void;
+  let reject!: (err: any) => void;
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 const adminUrl = process.env.DATABASE_URL_ADMIN;
 const isOptedIn = process.env.ALLOW_DESTRUCTIVE_DB_TESTS === 'true';
 
@@ -115,10 +125,11 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
     tenantRepo = new PgTenantRepository(pool);
     consentRepo = new PgConsentRepository(pool);
 
-    // Apply migrations 012, 013, 014 if not already present
+    // Apply migrations 011a, 012, 013, 014 if not already present
     const migrationClient = await pool.connect();
     try {
       for (const mig of [
+        '011a_safe_repository_preflight.sql',
         '012_canonical_repository_unique_constraint.sql',
         '013_active_consent_uniqueness.sql',
         '014_safe_repository_reconciliation.sql',
@@ -1221,6 +1232,14 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
     };
 
     it('8.1. cancelJobsForStudentOnRevocation() transitions all in-progress jobs to failed with CONSENT_REVOKED and preserves completed/failed jobs', async () => {
+      // Clean up previous test jobs for STUDENT_A to ensure exact isolated count
+      const cleanClient = await pool.connect();
+      try {
+        await cleanClient.query(`DELETE FROM ingestion_jobs WHERE student_id = $1;`, [STUDENT_A]);
+      } finally {
+        cleanClient.release();
+      }
+
       const inProgressStates = ['queued', 'resolving', 'fetching', 'verifying', 'persisted'] as const;
       const createdJobIds: string[] = [];
 
@@ -1322,6 +1341,870 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
       // Verify STUDENT_B's job was NOT affected
       const bJob = await jobRepo.getJob(ctxB, studentBJobId);
       expect(bJob?.status).toBe('fetching');
+    });
+
+    it('8.2. In-flight request cannot transition a revoked/failed job back to persisted or completed', async () => {
+      const jId = randomUUID();
+      await jobRepo.createJob({
+        ingestionId: jId,
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: REPO_A,
+        owner: 'test-owner',
+        repo: 'test-repo-term',
+        ref: 'main',
+        status: 'fetching',
+        fileCount: 0,
+        retainedBytes: 0,
+        registeredSnapshotsCount: 0,
+        createdAt: new Date().toISOString(),
+      });
+
+      // Revocation cancels in-progress job
+      await jobRepo.cancelJobsForStudentOnRevocation(ctxA, STUDENT_A);
+
+      const jobAfterCancel = await jobRepo.getJob(ctxA, jId);
+      expect(jobAfterCancel?.status).toBe('failed');
+      expect(jobAfterCancel?.error).toBe('CONSENT_REVOKED');
+
+      // Attempt in-flight transition to persisted
+      await expect(
+        jobRepo.updateJob(ctxA, jId, 'persisted', { fileCount: 1 })
+      ).rejects.toThrow(/JOB_ALREADY_FAILED/);
+
+      // Attempt in-flight transition to completed
+      await expect(
+        jobRepo.updateJob(ctxA, jId, 'completed', { completedAt: new Date().toISOString() })
+      ).rejects.toThrow(/JOB_ALREADY_FAILED/);
+
+      // Confirm job status was not overwritten
+      const finalJob = await jobRepo.getJob(ctxA, jId);
+      expect(finalJob?.status).toBe('failed');
+      expect(finalJob?.error).toBe('CONSENT_REVOKED');
+    });
+
+    it('8.3. Failed jobs are terminal and cannot be reopened', async () => {
+      const jId = randomUUID();
+      await jobRepo.createJob({
+        ingestionId: jId,
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: REPO_A,
+        owner: 'test-owner',
+        repo: 'test-repo-failed',
+        ref: 'main',
+        status: 'queued',
+        fileCount: 0,
+        retainedBytes: 0,
+        registeredSnapshotsCount: 0,
+        createdAt: new Date().toISOString(),
+      });
+
+      await jobRepo.updateJob(ctxA, jId, 'failed', { error: 'NETWORK_TIMEOUT' });
+
+      // Attempt to reopen to queued or resolving
+      await expect(jobRepo.updateJob(ctxA, jId, 'resolving')).rejects.toThrow(/JOB_ALREADY_FAILED/);
+      await expect(jobRepo.updateJob(ctxA, jId, 'queued')).rejects.toThrow(/JOB_ALREADY_FAILED/);
+    });
+
+    it('8.4. Completed jobs are terminal and cannot be transitioned to anything else', async () => {
+      const jId = randomUUID();
+      await jobRepo.createJob({
+        ingestionId: jId,
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: REPO_A,
+        owner: 'test-owner',
+        repo: 'test-repo-comp',
+        ref: 'main',
+        status: 'queued',
+        fileCount: 0,
+        retainedBytes: 0,
+        registeredSnapshotsCount: 0,
+        createdAt: new Date().toISOString(),
+      });
+
+      await jobRepo.updateJob(ctxA, jId, 'completed');
+
+      await expect(jobRepo.updateJob(ctxA, jId, 'resolving')).rejects.toThrow(/JOB_ALREADY_COMPLETED/);
+      await expect(jobRepo.updateJob(ctxA, jId, 'failed')).rejects.toThrow(/JOB_ALREADY_COMPLETED/);
+    });
+
+    it('8.5. Invalid state transitions (e.g. resolving directly to persisted) are rejected', async () => {
+      const jId = randomUUID();
+      await jobRepo.createJob({
+        ingestionId: jId,
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: REPO_A,
+        owner: 'test-owner',
+        repo: 'test-repo-invalid',
+        ref: 'main',
+        status: 'resolving',
+        fileCount: 0,
+        retainedBytes: 0,
+        registeredSnapshotsCount: 0,
+        createdAt: new Date().toISOString(),
+      });
+
+      // Cannot skip fetching and jump to persisted
+      await expect(jobRepo.updateJob(ctxA, jId, 'persisted')).rejects.toThrow(/INVALID_JOB_TRANSITION/);
+    });
+
+    it('8.6. Retrying as a new ingestion attempt with a new ingestion ID succeeds', async () => {
+      const originalId = randomUUID();
+      await jobRepo.createJob({
+        ingestionId: originalId,
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: REPO_A,
+        owner: 'test-owner',
+        repo: 'test-repo-retry',
+        ref: 'main',
+        status: 'resolving',
+        fileCount: 0,
+        retainedBytes: 0,
+        registeredSnapshotsCount: 0,
+        createdAt: new Date().toISOString(),
+      });
+
+      // Mark original failed
+      await jobRepo.updateJob(ctxA, originalId, 'failed', { error: 'GITHUB_RATE_LIMIT_EXCEEDED' });
+
+      // Retry with new ingestionId
+      const retryId = randomUUID();
+      await jobRepo.createJob({
+        ingestionId: retryId,
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: REPO_A,
+        owner: 'test-owner',
+        repo: 'test-repo-retry',
+        ref: 'main',
+        status: 'queued',
+        fileCount: 0,
+        retainedBytes: 0,
+        registeredSnapshotsCount: 0,
+        createdAt: new Date().toISOString(),
+      });
+
+      await jobRepo.updateJob(ctxA, retryId, 'resolving');
+      await jobRepo.updateJob(ctxA, retryId, 'fetching');
+      await jobRepo.updateJob(ctxA, retryId, 'verifying');
+      await jobRepo.updateJob(ctxA, retryId, 'persisted');
+      await jobRepo.updateJob(ctxA, retryId, 'completed');
+
+      const retryJob = await jobRepo.getJob(ctxA, retryId);
+      expect(retryJob?.status).toBe('completed');
+    });
+  });
+
+  // =========================================================================
+  // 9. Atomic Database-Level Consent Gate & Concurrency Race Verification
+  // =========================================================================
+
+  describe('9. Atomic Database-Level Consent Gate & Concurrency Race Verification', () => {
+    const ctxA: SessionContext = {
+      orgId: COLLEGE_A,
+      userId: USER_A,
+      role: 'student',
+    };
+    const ctxB: SessionContext = {
+      orgId: COLLEGE_B,
+      userId: USER_B,
+      role: 'student',
+    };
+
+    it('9.1. Ordering A: Ingestion obtains consent lock first -> Snapshot registration occurs -> Revocation commits -> Final snapshot state is quarantined', async () => {
+      // 1. Ensure student A has an active consent grant
+      let activeGrant = await consentRepo.getActiveGrant(ctxA, STUDENT_A, 'repo_verification');
+      if (!activeGrant) {
+        activeGrant = await consentRepo.grantConsent(ctxA, STUDENT_A, 'repo_verification', 1);
+      }
+      expect(activeGrant).toBeDefined();
+
+      const latchIngestionLocked = createLatch();
+
+      const commitSha = 'aa11000000000000000000000000000000000001';
+      const snapId = randomUUID();
+      const rawBytes = Buffer.from('console.log("ordering A")', 'utf8');
+      const rawFileHash = computeRawFileHash(rawBytes);
+      const blobSha = computeGitBlobSha(rawBytes);
+
+      // Ingestion worker transaction
+      const ingestionPromise = (async () => {
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN;');
+          await client.query('SET LOCAL ROLE app_api;');
+          await client.query(`SELECT set_config('app.current_org_id', '${COLLEGE_A}', true);`);
+          await client.query(`SELECT set_config('app.current_user_id', '${STUDENT_A}', true);`);
+          await client.query(`SELECT set_config('app.current_user_role', 'student', true);`);
+
+          // Acquire FOR SHARE on consent grant
+          const lockRes = await client.query(`
+            SELECT id FROM consent_grants
+            WHERE student_id = $1 AND purpose = 'repo_verification' AND revoked_at IS NULL
+            FOR SHARE;
+          `, [STUDENT_A]);
+          expect(lockRes.rows.length).toBe(1);
+
+          // Signal that ingestion holds the consent lock
+          latchIngestionLocked.resolve();
+
+          // Brief pause to allow revocation to issue its query and block on FOR UPDATE
+          await new Promise((r) => setTimeout(r, 100));
+
+          // Insert source snapshot
+          await client.query(`
+            INSERT INTO source_snapshots (
+              snapshot_id, org_id, student_id, repository_id, commit_sha, file_path,
+              raw_bytes, raw_file_hash, blob_sha, captured_at, provenance, ingestion_id, registration_state
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP, 'trusted_ingestion_pipeline', $10, 'pending_audit');
+          `, [snapId, COLLEGE_A, STUDENT_A, REPO_A, commitSha, 'src/ordering-a.ts', rawBytes, rawFileHash, blobSha, randomUUID()]);
+
+          await client.query('COMMIT;');
+        } catch (err) {
+          await client.query('ROLLBACK;').catch(() => {});
+          throw err;
+        } finally {
+          client.release();
+        }
+      })();
+
+      // Revocation worker transaction
+      const revocationPromise = (async () => {
+        // Wait until ingestion holds the lock
+        await latchIngestionLocked.promise;
+
+        // Perform revocation through consentRepo.revokeConsent
+        const revResult = await consentRepo.revokeConsent(ctxA, activeGrant!.id);
+        expect(revResult.success).toBe(true);
+      })();
+
+      await Promise.all([ingestionPromise, revocationPromise]);
+
+      // Verify that after both complete, final snapshot state is quarantined
+      const client = await pool.connect();
+      try {
+        const snapRes = await client.query(`
+          SELECT registration_state FROM source_snapshots WHERE snapshot_id = $1;
+        `, [snapId]);
+        expect(snapRes.rows.length).toBe(1);
+        expect(snapRes.rows[0].registration_state).toBe('quarantined');
+
+        // Verify active consent is revoked
+        const activePost = await consentRepo.getActiveGrant(ctxA, STUDENT_A, 'repo_verification');
+        expect(activePost).toBeNull();
+      } finally {
+        client.release();
+      }
+    });
+
+    it('9.2. Ordering B: Revocation commits first -> In-flight ingestion attempts persistence -> Rejected fail-closed with CONSENT_REQUIRED_OR_REVOKED', async () => {
+      // Re-grant consent for STUDENT_A first
+      const newGrant = await consentRepo.grantConsent(ctxA, STUDENT_A, 'repo_verification', 1);
+
+      // Revoke consent first
+      await consentRepo.revokeConsent(ctxA, newGrant.id);
+
+      // Attempt to save snapshot
+      const rawBytes = Buffer.from('console.log("ordering B")', 'utf8');
+      const snap: SourceSnapshot = {
+        snapshotId: randomUUID(),
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: REPO_A,
+        commitSha: 'bb22000000000000000000000000000000000002',
+        filePath: 'src/ordering-b.ts',
+        rawBytes,
+        rawFileHash: computeRawFileHash(rawBytes),
+        blobSha: computeGitBlobSha(rawBytes),
+        capturedAt: new Date().toISOString(),
+        provenance: 'trusted_ingestion_pipeline',
+        ingestionId: randomUUID(),
+        registrationState: 'pending_audit',
+      };
+
+      await expect(snapshotStore.saveSnapshot(snap)).rejects.toThrow(/CONSENT_REQUIRED_OR_REVOKED/);
+
+      // Attempt to save trusted ingestion record
+      const tir: TrustedIngestionRecord = {
+        ingestionId: randomUUID(),
+        orgId: COLLEGE_A,
+        repositoryId: REPO_A,
+        commitSha: 'bb22000000000000000000000000000000000002',
+        treeSha: 'cc33000000000000000000000000000000000003',
+        studentId: STUDENT_A,
+        verifiedAt: new Date().toISOString(),
+        provenance: 'trusted_ingestion_pipeline',
+        manifest: [
+          {
+            filePath: 'src/ordering-b.ts',
+            blobSha: snap.blobSha!,
+            rawFileHash: snap.rawFileHash,
+            byteSize: rawBytes.length,
+          },
+        ],
+      };
+
+      await expect(trustedIngestionStore.saveRecord(tir)).rejects.toThrow(/CONSENT_REQUIRED_OR_REVOKED/);
+
+      // Verify zero snapshots or records were persisted
+      const client = await pool.connect();
+      try {
+        const snapCount = await client.query(`
+          SELECT count(*) FROM source_snapshots WHERE commit_sha = $1;
+        `, ['bb22000000000000000000000000000000000002']);
+        expect(Number(snapCount.rows[0].count)).toBe(0);
+
+        const tirCount = await client.query(`
+          SELECT count(*) FROM trusted_ingestion_records WHERE commit_sha = $1;
+        `, ['bb22000000000000000000000000000000000002']);
+        expect(Number(tirCount.rows[0].count)).toBe(0);
+      } finally {
+        client.release();
+      }
+    });
+
+    it('9.3. Audit promotion racing with revocation: quarantined snapshot cannot be promoted back to audit_committed', async () => {
+      // Re-grant consent
+      const grant = await consentRepo.grantConsent(ctxA, STUDENT_A, 'repo_verification', 1);
+
+      const commitSha = 'cc44000000000000000000000000000000000004';
+      const snapId = randomUUID();
+      const rawBytes = Buffer.from('console.log("audit promotion race")', 'utf8');
+      const snap: SourceSnapshot = {
+        snapshotId: snapId,
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: REPO_A,
+        commitSha,
+        filePath: 'src/race.ts',
+        rawBytes,
+        rawFileHash: computeRawFileHash(rawBytes),
+        blobSha: computeGitBlobSha(rawBytes),
+        capturedAt: new Date().toISOString(),
+        provenance: 'trusted_ingestion_pipeline',
+        ingestionId: randomUUID(),
+        registrationState: 'pending_audit',
+      };
+
+      // 1. Save in pending_audit state
+      await snapshotStore.saveSnapshot(snap);
+
+      // 2. Revocation runs and quarantines all snapshots
+      await consentRepo.revokeConsent(ctxA, grant.id);
+
+      // Verify snapshot is now quarantined
+      const client = await pool.connect();
+      try {
+        const qRes = await client.query(`SELECT registration_state FROM source_snapshots WHERE snapshot_id = $1;`, [snapId]);
+        expect(qRes.rows[0].registration_state).toBe('quarantined');
+      } finally {
+        client.release();
+      }
+
+      // 3. Stale in-flight worker attempts to promote to audit_committed
+      const promoted = await snapshotStore.updateRegistrationState(
+        REPO_A,
+        commitSha,
+        'src/race.ts',
+        COLLEGE_A,
+        STUDENT_A,
+        snapId,
+        'audit_committed'
+      );
+
+      // Promotion must be rejected
+      expect(promoted).toBe(false);
+
+      // Verify snapshot REMAINS quarantined and was NOT resurrected
+      const client2 = await pool.connect();
+      try {
+        const checkRes = await client2.query(`SELECT registration_state FROM source_snapshots WHERE snapshot_id = $1;`, [snapId]);
+        expect(checkRes.rows[0].registration_state).toBe('quarantined');
+      } finally {
+        client2.release();
+      }
+    });
+
+    it("9.4. Job cancellation racing with updateJob('completed'): cancelled job fails closed and cannot be completed", async () => {
+      const jId = randomUUID();
+      await jobRepo.createJob({
+        ingestionId: jId,
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: REPO_A,
+        owner: 'test-owner',
+        repo: 'test-race-job',
+        ref: 'main',
+        status: 'persisted',
+        fileCount: 3,
+        retainedBytes: 500,
+        registeredSnapshotsCount: 3,
+        createdAt: new Date().toISOString(),
+      });
+
+      // Cancellation occurs
+      await jobRepo.cancelJobsForStudentOnRevocation(ctxA, STUDENT_A);
+
+      // Concurrent attempt to complete fails
+      await expect(
+        jobRepo.updateJob(ctxA, jId, 'completed', { completedAt: new Date().toISOString() })
+      ).rejects.toThrow(/JOB_ALREADY_FAILED/);
+
+      const job = await jobRepo.getJob(ctxA, jId);
+      expect(job?.status).toBe('failed');
+      expect(job?.error).toBe('CONSENT_REVOKED');
+    });
+
+    it('9.5. All behavior works under restricted app_api transactions and tenant RLS', async () => {
+      const jId = randomUUID();
+      await jobRepo.createJob({
+        ingestionId: jId,
+        orgId: COLLEGE_A,
+        studentId: STUDENT_A,
+        repositoryId: REPO_A,
+        owner: 'test-owner',
+        repo: 'test-rls-job',
+        ref: 'main',
+        status: 'queued',
+        fileCount: 0,
+        retainedBytes: 0,
+        registeredSnapshotsCount: 0,
+        createdAt: new Date().toISOString(),
+      });
+
+      // COLLEGE_B cannot see or update COLLEGE_A's job
+      const foreignJob = await jobRepo.getJob(ctxB, jId);
+      expect(foreignJob).toBeNull();
+
+      await expect(
+        jobRepo.updateJob(ctxB, jId, 'resolving')
+      ).rejects.toThrow(/JOB_NOT_FOUND/);
+    });
+  });
+
+  // =========================================================================
+  // 10. Migration Sequence Safety & Adversarial Conflict Verification (11 Fixtures)
+  // =========================================================================
+
+  describe('10. Migration Sequence Safety & Adversarial Conflict Verification (11 Fixtures)', () => {
+    const migration011aPath = path.resolve(process.cwd(), 'db/migrations/011a_safe_repository_preflight.sql');
+    const migration011aSql = fs.readFileSync(migration011aPath, 'utf8');
+
+    it('10.1. Duplicate repositories without child records: safely reconciled to canonical repository', async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN;');
+        await client.query('ALTER TABLE repositories DROP CONSTRAINT IF EXISTS uq_repositories_student_provider_repo;');
+
+        const repo1 = randomUUID();
+        const repo2 = randomUUID();
+        const providerRepoId = 'mig_dup_test_1';
+
+        await client.query(`
+          INSERT INTO repositories (id, student_id, provider, provider_repo_id, url, default_branch, consent_grant_id, imported_at) VALUES
+            ('${repo1}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo1', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP - INTERVAL '10 seconds'),
+            ('${repo2}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo2', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP);
+        `);
+
+        await client.query(migration011aSql);
+
+        const res = await client.query(`
+          SELECT id FROM repositories WHERE student_id = $1 AND provider_repo_id = $2;
+        `, [STUDENT_A, providerRepoId]);
+        expect(res.rows.length).toBe(1);
+        expect(res.rows[0].id).toBe(repo1);
+
+        await client.query('ROLLBACK;');
+      } catch (err) {
+        await client.query('ROLLBACK;').catch(() => {});
+        throw err;
+      } finally {
+        await client.query('ROLLBACK;').catch(() => {});
+        client.release();
+      }
+    });
+
+    it('10.2. Duplicate repositories with non-colliding snapshots and evidence: safely re-parented to canonical repository', async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN;');
+        await client.query('ALTER TABLE repositories DROP CONSTRAINT IF EXISTS uq_repositories_student_provider_repo;');
+
+        const repo1 = randomUUID();
+        const repo2 = randomUUID();
+        const providerRepoId = 'mig_dup_test_2';
+
+        await client.query(`
+          INSERT INTO repositories (id, student_id, provider, provider_repo_id, url, default_branch, consent_grant_id, imported_at) VALUES
+            ('${repo1}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo1', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP - INTERVAL '10 seconds'),
+            ('${repo2}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo2', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP);
+        `);
+
+        const snap1 = randomUUID();
+        const snap2 = randomUUID();
+        await client.query(`
+          INSERT INTO repo_snapshots (id, repository_id, commit_sha, parser_version, tree_summary, imported_at) VALUES
+            ('${snap1}', '${repo1}', '1111111111111111111111111111111111111111', 1, '{"files":1}'::jsonb, CURRENT_TIMESTAMP),
+            ('${snap2}', '${repo2}', '2222222222222222222222222222222222222222', 1, '{"files":2}'::jsonb, CURRENT_TIMESTAMP);
+        `);
+
+        const evId = randomUUID();
+        await client.query(`
+          INSERT INTO evidence_items (id, student_id, repo_snapshot_id, kind, content_hash, status) VALUES
+            ('${evId}', '${STUDENT_A}', '${snap2}', 'code_span', 'hash123', 'accepted');
+        `);
+
+        await client.query(migration011aSql);
+
+        const repoRes = await client.query(`SELECT id FROM repositories WHERE id = $1;`, [repo2]);
+        expect(repoRes.rows.length).toBe(0);
+
+        const snapRes = await client.query(`SELECT repository_id FROM repo_snapshots WHERE id = $1;`, [snap2]);
+        expect(snapRes.rows.length).toBe(1);
+        expect(snapRes.rows[0].repository_id).toBe(repo1);
+
+        const evRes = await client.query(`SELECT repo_snapshot_id FROM evidence_items WHERE id = $1;`, [evId]);
+        expect(evRes.rows.length).toBe(1);
+        expect(evRes.rows[0].repo_snapshot_id).toBe(snap2);
+
+        await client.query('ROLLBACK;');
+      } catch (err) {
+        await client.query('ROLLBACK;').catch(() => {});
+        throw err;
+      } finally {
+        await client.query('ROLLBACK;').catch(() => {});
+        client.release();
+      }
+    });
+
+    it('10.3. Duplicate repository snapshots with matching commit but divergent tree summaries: aborts with exception and preserves data', async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN;');
+        await client.query('ALTER TABLE repositories DROP CONSTRAINT IF EXISTS uq_repositories_student_provider_repo;');
+
+        const repo1 = randomUUID();
+        const repo2 = randomUUID();
+        const providerRepoId = 'mig_dup_test_3';
+        const commitSha = '3333333333333333333333333333333333333333';
+
+        await client.query(`
+          INSERT INTO repositories (id, student_id, provider, provider_repo_id, url, default_branch, consent_grant_id, imported_at) VALUES
+            ('${repo1}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo1', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP - INTERVAL '10 seconds'),
+            ('${repo2}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo2', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP);
+        `);
+
+        await client.query(`
+          INSERT INTO repo_snapshots (id, repository_id, commit_sha, parser_version, tree_summary, imported_at) VALUES
+            ('${randomUUID()}', '${repo1}', '${commitSha}', 1, '{"files":1}'::jsonb, CURRENT_TIMESTAMP),
+            ('${randomUUID()}', '${repo2}', '${commitSha}', 1, '{"files":999}'::jsonb, CURRENT_TIMESTAMP);
+        `);
+
+        await expect(client.query(migration011aSql)).rejects.toThrow(/Divergent repo_snapshots detected/);
+
+        await client.query('ROLLBACK;');
+      } catch (err) {
+        await client.query('ROLLBACK;').catch(() => {});
+        throw err;
+      } finally {
+        await client.query('ROLLBACK;').catch(() => {});
+        client.release();
+      }
+    });
+
+    it('10.4. Duplicate source snapshots with identical bytes: safely deduplicated', async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN;');
+        await client.query('ALTER TABLE repositories DROP CONSTRAINT IF EXISTS uq_repositories_student_provider_repo;');
+
+        const repo1 = randomUUID();
+        const repo2 = randomUUID();
+        const providerRepoId = 'mig_dup_test_4';
+        const commitSha = '4444444444444444444444444444444444444444';
+
+        await client.query(`
+          INSERT INTO repositories (id, student_id, provider, provider_repo_id, url, default_branch, consent_grant_id, imported_at) VALUES
+            ('${repo1}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo1', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP - INTERVAL '10 seconds'),
+            ('${repo2}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo2', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP);
+        `);
+
+        const rawBytes = Buffer.from('console.log("identical")', 'utf8');
+        const rawHash = computeRawFileHash(rawBytes);
+        const blobSha = computeGitBlobSha(rawBytes);
+        const snap1 = randomUUID();
+        const snap2 = randomUUID();
+
+        await client.query(`
+          INSERT INTO source_snapshots (id, snapshot_id, org_id, student_id, repository_id, commit_sha, file_path, raw_bytes, raw_file_hash, blob_sha, captured_at, provenance, ingestion_id, registration_state) VALUES
+            ('${randomUUID()}', '${snap1}', '${COLLEGE_A}', '${STUDENT_A}', '${repo1}', '${commitSha}', 'src/same.ts', $1, '${rawHash}', '${blobSha}', CURRENT_TIMESTAMP, 'trusted_ingestion_pipeline', '${randomUUID()}', 'audit_committed'),
+            ('${randomUUID()}', '${snap2}', '${COLLEGE_A}', '${STUDENT_A}', '${repo2}', '${commitSha}', 'src/same.ts', $1, '${rawHash}', '${blobSha}', CURRENT_TIMESTAMP, 'trusted_ingestion_pipeline', '${randomUUID()}', 'audit_committed');
+        `, [rawBytes]);
+
+        await client.query(migration011aSql);
+
+        const res = await client.query(`SELECT snapshot_id, repository_id FROM source_snapshots WHERE commit_sha = $1;`, [commitSha]);
+        expect(res.rows.length).toBe(1);
+        expect(res.rows[0].snapshot_id).toBe(snap1);
+        expect(res.rows[0].repository_id).toBe(repo1);
+
+        await client.query('ROLLBACK;');
+      } catch (err) {
+        await client.query('ROLLBACK;').catch(() => {});
+        throw err;
+      } finally {
+        await client.query('ROLLBACK;').catch(() => {});
+        client.release();
+      }
+    });
+
+    it('10.5. Duplicate source snapshots with divergent raw hashes or bytes: aborts with exception and preserves data', async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN;');
+        await client.query('ALTER TABLE repositories DROP CONSTRAINT IF EXISTS uq_repositories_student_provider_repo;');
+
+        const repo1 = randomUUID();
+        const repo2 = randomUUID();
+        const providerRepoId = 'mig_dup_test_5';
+        const commitSha = '5555555555555555555555555555555555555555';
+
+        await client.query(`
+          INSERT INTO repositories (id, student_id, provider, provider_repo_id, url, default_branch, consent_grant_id, imported_at) VALUES
+            ('${repo1}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo1', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP - INTERVAL '10 seconds'),
+            ('${repo2}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo2', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP);
+        `);
+
+        const bytes1 = Buffer.from('console.log("file A")', 'utf8');
+        const bytes2 = Buffer.from('console.log("file B divergent")', 'utf8');
+
+        await client.query(`
+          INSERT INTO source_snapshots (id, snapshot_id, org_id, student_id, repository_id, commit_sha, file_path, raw_bytes, raw_file_hash, blob_sha, captured_at, provenance, ingestion_id, registration_state) VALUES
+            ('${randomUUID()}', '${randomUUID()}', '${COLLEGE_A}', '${STUDENT_A}', '${repo1}', '${commitSha}', 'src/div.ts', $1, '${computeRawFileHash(bytes1)}', '${computeGitBlobSha(bytes1)}', CURRENT_TIMESTAMP, 'trusted_ingestion_pipeline', '${randomUUID()}', 'audit_committed'),
+            ('${randomUUID()}', '${randomUUID()}', '${COLLEGE_A}', '${STUDENT_A}', '${repo2}', '${commitSha}', 'src/div.ts', $2, '${computeRawFileHash(bytes2)}', '${computeGitBlobSha(bytes2)}', CURRENT_TIMESTAMP, 'trusted_ingestion_pipeline', '${randomUUID()}', 'audit_committed');
+        `, [bytes1, bytes2]);
+
+        await expect(client.query(migration011aSql)).rejects.toThrow(/Divergent source_snapshots detected/);
+
+        await client.query('ROLLBACK;');
+      } catch (err) {
+        await client.query('ROLLBACK;').catch(() => {});
+        throw err;
+      } finally {
+        await client.query('ROLLBACK;').catch(() => {});
+        client.release();
+      }
+    });
+
+    it('10.6. Duplicate trusted ingestion records with identical manifests: safely deduplicated', async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN;');
+        await client.query('ALTER TABLE repositories DROP CONSTRAINT IF EXISTS uq_repositories_student_provider_repo;');
+
+        const repo1 = randomUUID();
+        const repo2 = randomUUID();
+        const providerRepoId = 'mig_dup_test_6';
+        const commitSha = '6666666666666666666666666666666666666666';
+        const treeSha = '7777777777777777777777777777777777777777';
+
+        await client.query(`
+          INSERT INTO repositories (id, student_id, provider, provider_repo_id, url, default_branch, consent_grant_id, imported_at) VALUES
+            ('${repo1}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo1', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP - INTERVAL '10 seconds'),
+            ('${repo2}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo2', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP);
+        `);
+
+        const manifest = JSON.stringify([{ filePath: 'src/main.ts', blobSha: 'abc', rawFileHash: 'def', byteSize: 10 }]);
+        const ing1 = randomUUID();
+        const ing2 = randomUUID();
+
+        await client.query(`
+          INSERT INTO trusted_ingestion_records (id, ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, manifest, provenance, status) VALUES
+            ('${randomUUID()}', '${ing1}', '${COLLEGE_A}', '${STUDENT_A}', '${repo1}', '${commitSha}', '${treeSha}', $1::jsonb, 'trusted_ingestion_pipeline', 'persisted'),
+            ('${randomUUID()}', '${ing2}', '${COLLEGE_A}', '${STUDENT_A}', '${repo2}', '${commitSha}', '${treeSha}', $1::jsonb, 'trusted_ingestion_pipeline', 'persisted');
+        `, [manifest]);
+
+        await client.query(migration011aSql);
+
+        const res = await client.query(`SELECT ingestion_id, repository_id FROM trusted_ingestion_records WHERE commit_sha = $1;`, [commitSha]);
+        expect(res.rows.length).toBe(1);
+        expect(res.rows[0].ingestion_id).toBe(ing1);
+        expect(res.rows[0].repository_id).toBe(repo1);
+
+        await client.query('ROLLBACK;');
+      } catch (err) {
+        await client.query('ROLLBACK;').catch(() => {});
+        throw err;
+      } finally {
+        await client.query('ROLLBACK;').catch(() => {});
+        client.release();
+      }
+    });
+
+    it('10.7. Duplicate trusted ingestion records with divergent manifests: aborts with exception and preserves data', async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN;');
+        await client.query('ALTER TABLE repositories DROP CONSTRAINT IF EXISTS uq_repositories_student_provider_repo;');
+
+        const repo1 = randomUUID();
+        const repo2 = randomUUID();
+        const providerRepoId = 'mig_dup_test_7';
+        const commitSha = '7777777777777777777777777777777777777777';
+
+        await client.query(`
+          INSERT INTO repositories (id, student_id, provider, provider_repo_id, url, default_branch, consent_grant_id, imported_at) VALUES
+            ('${repo1}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo1', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP - INTERVAL '10 seconds'),
+            ('${repo2}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo2', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP);
+        `);
+
+        const manifest1 = JSON.stringify([{ filePath: 'src/file1.ts', blobSha: 'a', rawFileHash: 'b', byteSize: 5 }]);
+        const manifest2 = JSON.stringify([{ filePath: 'src/file2.ts', blobSha: 'c', rawFileHash: 'd', byteSize: 8 }]);
+
+        await client.query(`
+          INSERT INTO trusted_ingestion_records (id, ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, manifest, provenance, status) VALUES
+            ('${randomUUID()}', '${randomUUID()}', '${COLLEGE_A}', '${STUDENT_A}', '${repo1}', '${commitSha}', 'tree1', $1::jsonb, 'trusted_ingestion_pipeline', 'persisted'),
+            ('${randomUUID()}', '${randomUUID()}', '${COLLEGE_A}', '${STUDENT_A}', '${repo2}', '${commitSha}', 'tree1', $2::jsonb, 'trusted_ingestion_pipeline', 'persisted');
+        `, [manifest1, manifest2]);
+
+        await expect(client.query(migration011aSql)).rejects.toThrow(/Divergent trusted_ingestion_records detected/);
+
+        await client.query('ROLLBACK;');
+      } catch (err) {
+        await client.query('ROLLBACK;').catch(() => {});
+        throw err;
+      } finally {
+        await client.query('ROLLBACK;').catch(() => {});
+        client.release();
+      }
+    });
+
+    it('10.8. Correct reconciliation of source snapshot ingestion IDs: surviving canonical ID assigned, zero orphaned IDs', async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN;');
+        await client.query('ALTER TABLE repositories DROP CONSTRAINT IF EXISTS uq_repositories_student_provider_repo;');
+
+        const repo1 = randomUUID();
+        const repo2 = randomUUID();
+        const providerRepoId = 'mig_dup_test_8';
+        const commitSha = '8888888888888888888888888888888888888888';
+        const treeSha = '8888888888888888888888888888888888888888';
+
+        await client.query(`
+          INSERT INTO repositories (id, student_id, provider, provider_repo_id, url, default_branch, consent_grant_id, imported_at) VALUES
+            ('${repo1}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo1', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP - INTERVAL '10 seconds'),
+            ('${repo2}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo2', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP);
+        `);
+
+        const canonIngestionId = randomUUID();
+        const dupIngestionId = randomUUID();
+        const manifest = JSON.stringify([{ filePath: 'src/main.ts', blobSha: 'a', rawFileHash: 'b', byteSize: 5 }]);
+
+        await client.query(`
+          INSERT INTO trusted_ingestion_records (id, ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, manifest, provenance, status) VALUES
+            ('${randomUUID()}', '${canonIngestionId}', '${COLLEGE_A}', '${STUDENT_A}', '${repo1}', '${commitSha}', '${treeSha}', $1::jsonb, 'trusted_ingestion_pipeline', 'persisted'),
+            ('${randomUUID()}', '${dupIngestionId}', '${COLLEGE_A}', '${STUDENT_A}', '${repo2}', '${commitSha}', '${treeSha}', $1::jsonb, 'trusted_ingestion_pipeline', 'persisted');
+        `, [manifest]);
+
+        const snap2 = randomUUID();
+        const rawBytes = Buffer.from('main', 'utf8');
+        await client.query(`
+          INSERT INTO source_snapshots (id, snapshot_id, org_id, student_id, repository_id, commit_sha, file_path, raw_bytes, raw_file_hash, blob_sha, captured_at, provenance, ingestion_id, registration_state) VALUES
+            ('${randomUUID()}', '${snap2}', '${COLLEGE_A}', '${STUDENT_A}', '${repo2}', '${commitSha}', 'src/main.ts', $1, '${computeRawFileHash(rawBytes)}', '${computeGitBlobSha(rawBytes)}', CURRENT_TIMESTAMP, 'trusted_ingestion_pipeline', '${dupIngestionId}', 'audit_committed');
+        `, [rawBytes]);
+
+        await client.query(migration011aSql);
+
+        const snapRes = await client.query(`SELECT ingestion_id, repository_id FROM source_snapshots WHERE snapshot_id = $1;`, [snap2]);
+        expect(snapRes.rows.length).toBe(1);
+        expect(snapRes.rows[0].ingestion_id).toBe(canonIngestionId);
+        expect(snapRes.rows[0].repository_id).toBe(repo1);
+
+        const orphanRes = await client.query(`SELECT count(*) FROM source_snapshots WHERE ingestion_id = $1;`, [dupIngestionId]);
+        expect(Number(orphanRes.rows[0].count)).toBe(0);
+
+        await client.query('ROLLBACK;');
+      } catch (err) {
+        await client.query('ROLLBACK;').catch(() => {});
+        throw err;
+      } finally {
+        await client.query('ROLLBACK;').catch(() => {});
+        client.release();
+      }
+    });
+
+    it('10.9. Full fresh-database migration ordering: 011a sorts strictly between 011 and 012 in lexical sequence', () => {
+      const migrationsDir = path.resolve(process.cwd(), 'db/migrations');
+      const files = fs.readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort((a, b) => a.localeCompare(b));
+
+      const idx011 = files.findIndex((f) => f.startsWith('011_'));
+      const idx011a = files.findIndex((f) => f.startsWith('011a_'));
+      const idx012 = files.findIndex((f) => f.startsWith('012_'));
+      const idx013 = files.findIndex((f) => f.startsWith('013_'));
+      const idx014 = files.findIndex((f) => f.startsWith('014_'));
+
+      expect(idx011).toBeGreaterThanOrEqual(0);
+      expect(idx011a).toBeGreaterThan(idx011);
+      expect(idx012).toBeGreaterThan(idx011a);
+      expect(idx013).toBeGreaterThan(idx012);
+      expect(idx014).toBeGreaterThan(idx013);
+    });
+
+    it('10.10. Upgrade behavior when migration 012 is already recorded: 011a applies idempotently without failure', async () => {
+      const client = await pool.connect();
+      try {
+        await expect(client.query(migration011aSql)).resolves.toBeDefined();
+      } finally {
+        client.release();
+      }
+    });
+
+    it('10.11. Rollback and data preservation when reconciliation detects ambiguity: transaction aborts, data untouched', async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN;');
+        await client.query('ALTER TABLE repositories DROP CONSTRAINT IF EXISTS uq_repositories_student_provider_repo;');
+
+        const repo1 = randomUUID();
+        const repo2 = randomUUID();
+        const providerRepoId = 'mig_dup_test_11';
+        const commitSha = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+
+        await client.query(`
+          INSERT INTO repositories (id, student_id, provider, provider_repo_id, url, default_branch, consent_grant_id, imported_at) VALUES
+            ('${repo1}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo1', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP - INTERVAL '10 seconds'),
+            ('${repo2}', '${STUDENT_A}', 'github', '${providerRepoId}', 'https://github.com/test/repo2', 'main', '${CONSENT_A}', CURRENT_TIMESTAMP);
+        `);
+
+        await client.query('SAVEPOINT sp_ambiguity;');
+        const b1 = Buffer.from('file 1', 'utf8');
+        const b2 = Buffer.from('file 2 divergent', 'utf8');
+        await client.query(`
+          INSERT INTO source_snapshots (id, snapshot_id, org_id, student_id, repository_id, commit_sha, file_path, raw_bytes, raw_file_hash, blob_sha, captured_at, provenance, ingestion_id, registration_state) VALUES
+            ('${randomUUID()}', '${randomUUID()}', '${COLLEGE_A}', '${STUDENT_A}', '${repo1}', '${commitSha}', 'src/ambig.ts', $1, '${computeRawFileHash(b1)}', '${computeGitBlobSha(b1)}', CURRENT_TIMESTAMP, 'trusted_ingestion_pipeline', '${randomUUID()}', 'audit_committed'),
+            ('${randomUUID()}', '${randomUUID()}', '${COLLEGE_A}', '${STUDENT_A}', '${repo2}', '${commitSha}', 'src/ambig.ts', $2, '${computeRawFileHash(b2)}', '${computeGitBlobSha(b2)}', CURRENT_TIMESTAMP, 'trusted_ingestion_pipeline', '${randomUUID()}', 'audit_committed');
+        `, [b1, b2]);
+
+        await expect(client.query(migration011aSql)).rejects.toThrow(/Divergent source_snapshots detected/);
+
+        await client.query('ROLLBACK TO SAVEPOINT sp_ambiguity;');
+
+        const checkRepos = await client.query(`SELECT id FROM repositories WHERE id IN ($1, $2);`, [repo1, repo2]);
+        expect(checkRepos.rows.length).toBe(2);
+
+        await client.query('ROLLBACK;');
+      } catch (err) {
+        await client.query('ROLLBACK;').catch(() => {});
+        throw err;
+      } finally {
+        await client.query('ROLLBACK;').catch(() => {});
+        client.release();
+      }
     });
   });
 });
