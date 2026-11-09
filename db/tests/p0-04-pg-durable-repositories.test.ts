@@ -42,7 +42,7 @@ import { assertSafeTestEnvironment, assertNotInstitutionalTenant } from '../../s
 
 try {
   process.loadEnvFile?.();
-} catch {}
+} catch { }
 
 function createLatch() {
   let resolve!: () => void;
@@ -59,7 +59,7 @@ const isOptedIn = process.env.ALLOW_DESTRUCTIVE_DB_TESTS === 'true';
 
 describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () => {
   if (!adminUrl || !isOptedIn) {
-    it.skip('Skipping PostgreSQL durable repositories test (requires DATABASE_URL_ADMIN and ALLOW_DESTRUCTIVE_DB_TESTS=true)', () => {});
+    it.skip('Skipping PostgreSQL durable repositories test (requires DATABASE_URL_ADMIN and ALLOW_DESTRUCTIVE_DB_TESTS=true)', () => { });
     return;
   }
 
@@ -2047,7 +2047,7 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
 
           await client.query('COMMIT;');
         } catch (err) {
-          await client.query('ROLLBACK;').catch(() => {});
+          await client.query('ROLLBACK;').catch(() => { });
           throw err;
         } finally {
           client.release();
@@ -2312,10 +2312,10 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
 
         await client.query('ROLLBACK;');
       } catch (err) {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         throw err;
       } finally {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         client.release();
       }
     });
@@ -2365,10 +2365,10 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
 
         await client.query('ROLLBACK;');
       } catch (err) {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         throw err;
       } finally {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         client.release();
       }
     });
@@ -2400,10 +2400,10 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
 
         await client.query('ROLLBACK;');
       } catch (err) {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         throw err;
       } finally {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         client.release();
       }
     });
@@ -2446,10 +2446,10 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
 
         await client.query('ROLLBACK;');
       } catch (err) {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         throw err;
       } finally {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         client.release();
       }
     });
@@ -2484,10 +2484,10 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
 
         await client.query('ROLLBACK;');
       } catch (err) {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         throw err;
       } finally {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         client.release();
       }
     });
@@ -2515,9 +2515,9 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
         const ing2 = randomUUID();
 
         await client.query(`
-          INSERT INTO trusted_ingestion_records (id, ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, manifest, provenance, status) VALUES
-            ('${randomUUID()}', '${ing1}', '${COLLEGE_A}', '${STUDENT_A}', '${repo1}', '${commitSha}', '${treeSha}', $1::jsonb, 'trusted_ingestion_pipeline', 'persisted'),
-            ('${randomUUID()}', '${ing2}', '${COLLEGE_A}', '${STUDENT_A}', '${repo2}', '${commitSha}', '${treeSha}', $1::jsonb, 'trusted_ingestion_pipeline', 'persisted');
+          INSERT INTO trusted_ingestion_records (id, ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, manifest, provenance, status, consent_grant_id) VALUES
+            ('${randomUUID()}', '${ing1}', '${COLLEGE_A}', '${STUDENT_A}', '${repo1}', '${commitSha}', '${treeSha}', $1::jsonb, 'trusted_ingestion_pipeline', 'persisted', '${CONSENT_A}'),
+            ('${randomUUID()}', '${ing2}', '${COLLEGE_A}', '${STUDENT_A}', '${repo2}', '${commitSha}', '${treeSha}', $1::jsonb, 'trusted_ingestion_pipeline', 'persisted', '${CONSENT_A}');
         `, [manifest]);
 
         await client.query(migration011aSql);
@@ -2529,10 +2529,10 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
 
         await client.query('ROLLBACK;');
       } catch (err) {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         throw err;
       } finally {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         client.release();
       }
     });
@@ -2558,19 +2558,19 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
         const manifest2 = JSON.stringify([{ filePath: 'src/file2.ts', blobSha: 'c', rawFileHash: 'd', byteSize: 8 }]);
 
         await client.query(`
-          INSERT INTO trusted_ingestion_records (id, ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, manifest, provenance, status) VALUES
-            ('${randomUUID()}', '${randomUUID()}', '${COLLEGE_A}', '${STUDENT_A}', '${repo1}', '${commitSha}', 'tree1', $1::jsonb, 'trusted_ingestion_pipeline', 'persisted'),
-            ('${randomUUID()}', '${randomUUID()}', '${COLLEGE_A}', '${STUDENT_A}', '${repo2}', '${commitSha}', 'tree1', $2::jsonb, 'trusted_ingestion_pipeline', 'persisted');
+          INSERT INTO trusted_ingestion_records (id, ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, manifest, provenance, status, consent_grant_id) VALUES
+            ('${randomUUID()}', '${randomUUID()}', '${COLLEGE_A}', '${STUDENT_A}', '${repo1}', '${commitSha}', 'tree1', $1::jsonb, 'trusted_ingestion_pipeline', 'persisted', '${CONSENT_A}'),
+            ('${randomUUID()}', '${randomUUID()}', '${COLLEGE_A}', '${STUDENT_A}', '${repo2}', '${commitSha}', 'tree1', $2::jsonb, 'trusted_ingestion_pipeline', 'persisted', '${CONSENT_A}');
         `, [manifest1, manifest2]);
 
         await expect(client.query(migration011aSql)).rejects.toThrow(/Divergent trusted_ingestion_records detected/);
 
         await client.query('ROLLBACK;');
       } catch (err) {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         throw err;
       } finally {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         client.release();
       }
     });
@@ -2598,9 +2598,9 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
         const manifest = JSON.stringify([{ filePath: 'src/main.ts', blobSha: 'a', rawFileHash: 'b', byteSize: 5 }]);
 
         await client.query(`
-          INSERT INTO trusted_ingestion_records (id, ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, manifest, provenance, status) VALUES
-            ('${randomUUID()}', '${canonIngestionId}', '${COLLEGE_A}', '${STUDENT_A}', '${repo1}', '${commitSha}', '${treeSha}', $1::jsonb, 'trusted_ingestion_pipeline', 'persisted'),
-            ('${randomUUID()}', '${dupIngestionId}', '${COLLEGE_A}', '${STUDENT_A}', '${repo2}', '${commitSha}', '${treeSha}', $1::jsonb, 'trusted_ingestion_pipeline', 'persisted');
+          INSERT INTO trusted_ingestion_records (id, ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, manifest, provenance, status, consent_grant_id) VALUES
+            ('${randomUUID()}', '${canonIngestionId}', '${COLLEGE_A}', '${STUDENT_A}', '${repo1}', '${commitSha}', '${treeSha}', $1::jsonb, 'trusted_ingestion_pipeline', 'persisted', '${CONSENT_A}'),
+            ('${randomUUID()}', '${dupIngestionId}', '${COLLEGE_A}', '${STUDENT_A}', '${repo2}', '${commitSha}', '${treeSha}', $1::jsonb, 'trusted_ingestion_pipeline', 'persisted', '${CONSENT_A}');
         `, [manifest]);
 
         const snap2 = randomUUID();
@@ -2622,10 +2622,10 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
 
         await client.query('ROLLBACK;');
       } catch (err) {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         throw err;
       } finally {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         client.release();
       }
     });
@@ -2701,10 +2701,10 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
 
         await client.query('ROLLBACK;');
       } catch (err) {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         throw err;
       } finally {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         client.release();
       }
     });
@@ -2745,10 +2745,10 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
 
         await client.query('ROLLBACK;');
       } catch (err) {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         throw err;
       } finally {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         client.release();
       }
     });
@@ -2796,10 +2796,10 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
 
         await client.query('ROLLBACK;');
       } catch (err) {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         throw err;
       } finally {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         client.release();
       }
     });
@@ -2834,10 +2834,10 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
 
         await client.query('ROLLBACK;');
       } catch (err) {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         throw err;
       } finally {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         client.release();
       }
     });
@@ -2884,10 +2884,10 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
 
         await client.query('ROLLBACK;');
       } catch (err) {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         throw err;
       } finally {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         client.release();
       }
     });
@@ -2934,10 +2934,10 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
 
         await client.query('ROLLBACK;');
       } catch (err) {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         throw err;
       } finally {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         client.release();
       }
     });
@@ -2995,10 +2995,10 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
 
         await client.query('ROLLBACK;');
       } catch (err) {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         throw err;
       } finally {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         client.release();
       }
     });
@@ -3010,13 +3010,6 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
 
         const repo = randomUUID();
         const unlinkedIng = randomUUID();
-        const secondConsent = randomUUID();
-
-        // Ensure student has multiple candidate grants for repo_verification to create ambiguity
-        await client.query(`
-          INSERT INTO consent_grants (id, student_id, purpose, notice_version, scope, granted_at, revoked_at) VALUES
-            ('${secondConsent}', '${STUDENT_A}', 'repo_verification', 1, '{}'::jsonb, CURRENT_TIMESTAMP - INTERVAL '1 day', CURRENT_TIMESTAMP - INTERVAL '12 hours');
-        `);
 
         // Repo has valid consent_grant_id
         await client.query(`
@@ -3034,10 +3027,10 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
 
         await client.query('ROLLBACK;');
       } catch (err) {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         throw err;
       } finally {
-        await client.query('ROLLBACK;').catch(() => {});
+        await client.query('ROLLBACK;').catch(() => { });
         client.release();
       }
     });
@@ -3299,6 +3292,420 @@ describe('P0-04: PostgreSQL Durable Repositories & RLS Security Invariants', () 
       const activeRecord2 = await trustedIngestionStore.getRecord(COLLEGE_A, REPO_A, commitSha2, STUDENT_A);
       expect(activeRecord2?.ingestionId).toBe(ingestionId3);
       expect(activeRecord2?.status).toBe('persisted');
+    });
+  });
+
+  // =========================================================================
+  // 12. Full-Sequence End-to-End Migration Upgrade Invariants (Fixtures A–E)
+  // =========================================================================
+  describe('12. Full-Sequence End-to-End Migration Upgrade Invariants (Fixtures A–E)', () => {
+    const migrationFiles = [
+      '011a_safe_repository_preflight.sql',
+      '012_canonical_repository_unique_constraint.sql',
+      '013_active_consent_uniqueness.sql',
+      '014_safe_repository_reconciliation.sql',
+      '015_consent_generation_and_fresh_reingestion.sql',
+      '016_safe_generation_reconciliation.sql',
+    ];
+    const migrationSqls = migrationFiles.map(file =>
+      fs.readFileSync(path.resolve(process.cwd(), 'db/migrations', file), 'utf8')
+    );
+
+    async function applyFullMigrationSequence(client: pg.PoolClient) {
+      for (const sql of migrationSqls) {
+        await client.query(sql);
+      }
+    }
+
+    it('12.1. Fixture A — Distinct generations, identical contents: both generations and snapshots survive with zero data loss', async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN;');
+        // Drop unique constraint to simulate schema state before reconciliation
+        await client.query('ALTER TABLE repositories DROP CONSTRAINT IF EXISTS uq_repositories_student_provider_repo;');
+
+        const userA = randomUUID();
+        const studentA = randomUUID();
+        const grantA = randomUUID();
+        const grantB = randomUUID();
+        const repoA1 = randomUUID();
+        const repoA2 = randomUUID();
+        const providerRepoId = 'fixture_a_repo_' + randomUUID();
+        const commitSha = 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1';
+        const treeSha = '7777000000000000000000000000000000000007';
+        const ingA = randomUUID();
+        const ingB = randomUUID();
+        const snapA = randomUUID();
+        const snapB = randomUUID();
+        const filePath = 'src/fixture_a.ts';
+        const contentBytes = Buffer.from('export function fixtureA() { return "Invariant A"; }\n', 'utf8');
+        const rawFileHash = computeRawFileHash(contentBytes);
+        const blobSha = computeGitBlobSha(contentBytes);
+
+        // Seed dedicated user and student
+        await client.query(`
+          INSERT INTO users (id, auth_subject, email, full_name) VALUES
+            ('${userA}', 'auth_fix_a_${randomUUID()}', 'student.a.${randomUUID()}@p04-test.edu', 'Fixture Student A');
+          INSERT INTO students (id, org_id, user_id, department_id, enrollment_no, graduating_year) VALUES
+            ('${studentA}', '${COLLEGE_A}', '${userA}', '${DEPT_A}', 'FIX-A-${randomUUID().slice(0, 8)}', 2026);
+        `);
+
+        // Seed 2 distinct consent grants for studentA: grantA is historical/revoked, grantB is active
+        await client.query(`
+          INSERT INTO consent_grants (id, student_id, purpose, notice_version, scope, granted_at, revoked_at) VALUES
+            ('${grantA}', '${studentA}', 'repo_verification', 1, '{}'::jsonb, CURRENT_TIMESTAMP - INTERVAL '2 days', CURRENT_TIMESTAMP - INTERVAL '1 day'),
+            ('${grantB}', '${studentA}', 'repo_verification', 1, '{}'::jsonb, CURRENT_TIMESTAMP - INTERVAL '1 day', NULL);
+        `);
+
+        // Seed duplicate repositories: repoA1 (earlier -> canonical), repoA2 (later -> duplicate)
+        await client.query(`
+          INSERT INTO repositories (id, student_id, provider, provider_repo_id, url, default_branch, consent_grant_id, imported_at) VALUES
+            ('${repoA1}', '${studentA}', 'github', '${providerRepoId}', 'https://github.com/fixture/a', 'main', '${grantA}', CURRENT_TIMESTAMP - INTERVAL '1 hour'),
+            ('${repoA2}', '${studentA}', 'github', '${providerRepoId}', 'https://github.com/fixture/a', 'main', '${grantB}', CURRENT_TIMESTAMP - INTERVAL '30 minutes');
+        `);
+
+        // Manifest for ingestion
+        const manifest = JSON.stringify([{ filePath, blobSha, rawFileHash, byteSize: contentBytes.length }]);
+
+        // Seed Ingestion A (revoked, grantA) on repoA1 and Ingestion B (persisted, grantB) on repoA2
+        await client.query(`
+          INSERT INTO trusted_ingestion_records (id, ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, manifest, provenance, status, consent_grant_id) VALUES
+            ('${randomUUID()}', '${ingA}', '${COLLEGE_A}', '${studentA}', '${repoA1}', '${commitSha}', '${treeSha}', $1::jsonb, 'trusted_ingestion_pipeline', 'revoked', '${grantA}'),
+            ('${randomUUID()}', '${ingB}', '${COLLEGE_A}', '${studentA}', '${repoA2}', '${commitSha}', '${treeSha}', $1::jsonb, 'trusted_ingestion_pipeline', 'persisted', '${grantB}');
+        `, [manifest]);
+
+        // Seed Snapshot A (quarantined, ingA) on repoA1 and Snapshot B (audit_committed, ingB) on repoA2
+        await client.query(`
+          INSERT INTO source_snapshots (id, snapshot_id, org_id, student_id, repository_id, commit_sha, file_path, raw_bytes, raw_file_hash, blob_sha, captured_at, provenance, ingestion_id, registration_state) VALUES
+            ('${randomUUID()}', '${snapA}', '${COLLEGE_A}', '${studentA}', '${repoA1}', '${commitSha}', '${filePath}', $1, '${rawFileHash}', '${blobSha}', CURRENT_TIMESTAMP - INTERVAL '1 hour', 'trusted_ingestion_pipeline', '${ingA}', 'quarantined'),
+            ('${randomUUID()}', '${snapB}', '${COLLEGE_A}', '${studentA}', '${repoA2}', '${commitSha}', '${filePath}', $1, '${rawFileHash}', '${blobSha}', CURRENT_TIMESTAMP - INTERVAL '30 minutes', 'trusted_ingestion_pipeline', '${ingB}', 'audit_committed');
+        `, [contentBytes]);
+
+        // RUN COMPLETE MIGRATION SEQUENCE IN ACTUAL ORDER: 011a -> 012 -> 013 -> 014 -> 015 -> 016
+        await applyFullMigrationSequence(client);
+
+        // 1. Verify repositories: exactly 1 canonical repository row remains (repoA1)
+        const repoRes = await client.query(`
+          SELECT id, consent_grant_id FROM repositories WHERE student_id = $1 AND provider_repo_id = $2;
+        `, [studentA, providerRepoId]);
+        expect(repoRes.rows.length).toBe(1);
+        expect(repoRes.rows[0].id).toBe(repoA1);
+
+        // 2. Verify trusted_ingestion_records: both survive under canonical repoA1 with correct states & grants
+        const ingRes = await client.query(`
+          SELECT ingestion_id, repository_id, status, consent_grant_id
+          FROM trusted_ingestion_records
+          WHERE commit_sha = $1 AND student_id = $2
+          ORDER BY status ASC;
+        `, [commitSha, studentA]);
+        expect(ingRes.rows.length).toBe(2);
+
+        // Active generation: ingB, persisted, grantB, re-parented to canonical repoA1
+        expect(ingRes.rows[0].ingestion_id).toBe(ingB);
+        expect(ingRes.rows[0].repository_id).toBe(repoA1);
+        expect(ingRes.rows[0].status).toBe('persisted');
+        expect(ingRes.rows[0].consent_grant_id).toBe(grantB);
+
+        // Revoked historical generation: ingA, revoked, grantA, canonical repoA1
+        expect(ingRes.rows[1].ingestion_id).toBe(ingA);
+        expect(ingRes.rows[1].repository_id).toBe(repoA1);
+        expect(ingRes.rows[1].status).toBe('revoked');
+        expect(ingRes.rows[1].consent_grant_id).toBe(grantA);
+
+        // 3. Verify source_snapshots: both survive under canonical repoA1 with raw bytes intact
+        const snapRes = await client.query(`
+          SELECT snapshot_id, repository_id, ingestion_id, registration_state, raw_bytes, raw_file_hash, blob_sha
+          FROM source_snapshots
+          WHERE commit_sha = $1 AND student_id = $2
+          ORDER BY registration_state ASC;
+        `, [commitSha, studentA]);
+        expect(snapRes.rows.length).toBe(2);
+
+        // Audit committed snapshot: snapB, under repoA1 and ingB
+        expect(snapRes.rows[0].snapshot_id).toBe(snapB);
+        expect(snapRes.rows[0].repository_id).toBe(repoA1);
+        expect(snapRes.rows[0].ingestion_id).toBe(ingB);
+        expect(snapRes.rows[0].registration_state).toBe('audit_committed');
+        expect(snapRes.rows[0].raw_bytes.equals(contentBytes)).toBe(true);
+        expect(snapRes.rows[0].raw_file_hash).toBe(rawFileHash);
+        expect(snapRes.rows[0].blob_sha).toBe(blobSha);
+
+        // Quarantined historical snapshot: snapA, under repoA1 and ingA
+        expect(snapRes.rows[1].snapshot_id).toBe(snapA);
+        expect(snapRes.rows[1].repository_id).toBe(repoA1);
+        expect(snapRes.rows[1].ingestion_id).toBe(ingA);
+        expect(snapRes.rows[1].registration_state).toBe('quarantined');
+        expect(snapRes.rows[1].raw_bytes.equals(contentBytes)).toBe(true);
+        expect(snapRes.rows[1].raw_file_hash).toBe(rawFileHash);
+        expect(snapRes.rows[1].blob_sha).toBe(blobSha);
+
+        // 4. Verify unique constraint is active on repositories
+        const constraintRes = await client.query(`
+          SELECT 1 FROM pg_constraint WHERE conname = 'uq_repositories_student_provider_repo';
+        `);
+        expect(constraintRes.rows.length).toBe(1);
+
+        await client.query('ROLLBACK;');
+      } catch (err) {
+        await client.query('ROLLBACK;').catch(() => {});
+        throw err;
+      } finally {
+        await client.query('ROLLBACK;').catch(() => {});
+        client.release();
+      }
+    });
+
+    it('12.2. Fixture B — Same generation, identical records: safe reconciliation with deduplication and re-parenting', async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN;');
+        await client.query('ALTER TABLE repositories DROP CONSTRAINT IF EXISTS uq_repositories_student_provider_repo;');
+
+        const userB = randomUUID();
+        const studentB = randomUUID();
+        const grantB = randomUUID();
+        const repoB1 = randomUUID();
+        const repoB2 = randomUUID();
+        const providerRepoId = 'fixture_b_repo_' + randomUUID();
+        const commitSha = 'b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2';
+        const treeSha = '8888000000000000000000000000000000000008';
+        const ingB1 = randomUUID();
+        const ingB2 = randomUUID();
+        const snapB1 = randomUUID();
+        const snapB2 = randomUUID();
+        const filePath = 'src/fixture_b.ts';
+        const contentBytes = Buffer.from('export function fixtureB() { return "Identical"; }\n', 'utf8');
+        const rawFileHash = computeRawFileHash(contentBytes);
+        const blobSha = computeGitBlobSha(contentBytes);
+
+        await client.query(`
+          INSERT INTO users (id, auth_subject, email, full_name) VALUES
+            ('${userB}', 'auth_fix_b_${randomUUID()}', 'student.b.${randomUUID()}@p04-test.edu', 'Fixture Student B');
+          INSERT INTO students (id, org_id, user_id, department_id, enrollment_no, graduating_year) VALUES
+            ('${studentB}', '${COLLEGE_A}', '${userB}', '${DEPT_A}', 'FIX-B-${randomUUID().slice(0, 8)}', 2026);
+        `);
+
+        await client.query(`
+          INSERT INTO consent_grants (id, student_id, purpose, notice_version, scope, granted_at, revoked_at) VALUES
+            ('${grantB}', '${studentB}', 'repo_verification', 1, '{}'::jsonb, CURRENT_TIMESTAMP - INTERVAL '1 day', NULL);
+        `);
+
+        // Both duplicate repositories belong to the SAME consent grant (grantB)
+        await client.query(`
+          INSERT INTO repositories (id, student_id, provider, provider_repo_id, url, default_branch, consent_grant_id, imported_at) VALUES
+            ('${repoB1}', '${studentB}', 'github', '${providerRepoId}', 'https://github.com/fixture/b', 'main', '${grantB}', CURRENT_TIMESTAMP - INTERVAL '1 hour'),
+            ('${repoB2}', '${studentB}', 'github', '${providerRepoId}', 'https://github.com/fixture/b', 'main', '${grantB}', CURRENT_TIMESTAMP - INTERVAL '30 minutes');
+        `);
+
+        const manifest = JSON.stringify([{ filePath, blobSha, rawFileHash, byteSize: contentBytes.length }]);
+
+        // Seed two identical ingestion records in the same generation
+        await client.query(`
+          INSERT INTO trusted_ingestion_records (id, ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, manifest, provenance, status, consent_grant_id) VALUES
+            ('${randomUUID()}', '${ingB1}', '${COLLEGE_A}', '${studentB}', '${repoB1}', '${commitSha}', '${treeSha}', $1::jsonb, 'trusted_ingestion_pipeline', 'persisted', '${grantB}'),
+            ('${randomUUID()}', '${ingB2}', '${COLLEGE_A}', '${studentB}', '${repoB2}', '${commitSha}', '${treeSha}', $1::jsonb, 'trusted_ingestion_pipeline', 'persisted', '${grantB}');
+        `, [manifest]);
+
+        // Seed two identical snapshots
+        await client.query(`
+          INSERT INTO source_snapshots (id, snapshot_id, org_id, student_id, repository_id, commit_sha, file_path, raw_bytes, raw_file_hash, blob_sha, captured_at, provenance, ingestion_id, registration_state) VALUES
+            ('${randomUUID()}', '${snapB1}', '${COLLEGE_A}', '${studentB}', '${repoB1}', '${commitSha}', '${filePath}', $1, '${rawFileHash}', '${blobSha}', CURRENT_TIMESTAMP - INTERVAL '1 hour', 'trusted_ingestion_pipeline', '${ingB1}', 'audit_committed'),
+            ('${randomUUID()}', '${snapB2}', '${COLLEGE_A}', '${studentB}', '${repoB2}', '${commitSha}', '${filePath}', $1, '${rawFileHash}', '${blobSha}', CURRENT_TIMESTAMP - INTERVAL '30 minutes', 'trusted_ingestion_pipeline', '${ingB2}', 'audit_committed');
+        `, [contentBytes]);
+
+        // RUN COMPLETE MIGRATION SEQUENCE IN ACTUAL ORDER
+        await applyFullMigrationSequence(client);
+
+        // Exactly 1 repository remains (repoB1)
+        const repoRes = await client.query(`
+          SELECT id FROM repositories WHERE student_id = $1 AND provider_repo_id = $2;
+        `, [studentB, providerRepoId]);
+        expect(repoRes.rows.length).toBe(1);
+        expect(repoRes.rows[0].id).toBe(repoB1);
+
+        // Exactly 1 trusted ingestion record remains (ingB1)
+        const ingRes = await client.query(`
+          SELECT ingestion_id, repository_id, status FROM trusted_ingestion_records WHERE commit_sha = $1 AND student_id = $2;
+        `, [commitSha, studentB]);
+        expect(ingRes.rows.length).toBe(1);
+        expect(ingRes.rows[0].ingestion_id).toBe(ingB1);
+        expect(ingRes.rows[0].repository_id).toBe(repoB1);
+
+        // Exactly 1 snapshot remains (snapB1)
+        const snapRes = await client.query(`
+          SELECT snapshot_id, repository_id, ingestion_id, registration_state FROM source_snapshots WHERE commit_sha = $1 AND student_id = $2;
+        `, [commitSha, studentB]);
+        expect(snapRes.rows.length).toBe(1);
+        expect(snapRes.rows[0].snapshot_id).toBe(snapB1);
+        expect(snapRes.rows[0].repository_id).toBe(repoB1);
+
+        await client.query('ROLLBACK;');
+      } catch (err) {
+        await client.query('ROLLBACK;').catch(() => {});
+        throw err;
+      } finally {
+        await client.query('ROLLBACK;').catch(() => {});
+        client.release();
+      }
+    });
+
+    it('12.3. Fixture C — Different generations, divergent content: aborts transactionally without partial deletion', async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN;');
+        await client.query('ALTER TABLE repositories DROP CONSTRAINT IF EXISTS uq_repositories_student_provider_repo;');
+
+        const userC = randomUUID();
+        const studentC = randomUUID();
+        const grantA = randomUUID();
+        const grantB = randomUUID();
+        const repoC1 = randomUUID();
+        const repoC2 = randomUUID();
+        const providerRepoId = 'fixture_c_repo_' + randomUUID();
+        const commitSha = 'c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3';
+        const treeSha = '9999000000000000000000000000000000000009';
+        const ingC1 = randomUUID();
+        const ingC2 = randomUUID();
+        const filePath = 'src/fixture_c.ts';
+
+        const bytes1 = Buffer.from('export function fixtureC() { return "Original Version 1"; }\n', 'utf8');
+        const bytes2 = Buffer.from('export function fixtureC() { return "TAMPERED DIVERGENT BYTES"; }\n', 'utf8');
+
+        await client.query(`
+          INSERT INTO users (id, auth_subject, email, full_name) VALUES
+            ('${userC}', 'auth_fix_c_${randomUUID()}', 'student.c.${randomUUID()}@p04-test.edu', 'Fixture Student C');
+          INSERT INTO students (id, org_id, user_id, department_id, enrollment_no, graduating_year) VALUES
+            ('${studentC}', '${COLLEGE_A}', '${userC}', '${DEPT_A}', 'FIX-C-${randomUUID().slice(0, 8)}', 2026);
+        `);
+
+        await client.query(`
+          INSERT INTO consent_grants (id, student_id, purpose, notice_version, scope, granted_at, revoked_at) VALUES
+            ('${grantA}', '${studentC}', 'repo_verification', 1, '{}'::jsonb, CURRENT_TIMESTAMP - INTERVAL '2 days', CURRENT_TIMESTAMP - INTERVAL '1 day'),
+            ('${grantB}', '${studentC}', 'repo_verification', 1, '{}'::jsonb, CURRENT_TIMESTAMP - INTERVAL '1 day', NULL);
+        `);
+
+        await client.query(`
+          INSERT INTO repositories (id, student_id, provider, provider_repo_id, url, default_branch, consent_grant_id, imported_at) VALUES
+            ('${repoC1}', '${studentC}', 'github', '${providerRepoId}', 'https://github.com/fixture/c', 'main', '${grantA}', CURRENT_TIMESTAMP - INTERVAL '1 hour'),
+            ('${repoC2}', '${studentC}', 'github', '${providerRepoId}', 'https://github.com/fixture/c', 'main', '${grantB}', CURRENT_TIMESTAMP - INTERVAL '30 minutes');
+        `);
+
+        await client.query(`
+          INSERT INTO trusted_ingestion_records (id, ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, manifest, provenance, status, consent_grant_id) VALUES
+            ('${randomUUID()}', '${ingC1}', '${COLLEGE_A}', '${studentC}', '${repoC1}', '${commitSha}', '${treeSha}', '[]'::jsonb, 'trusted_ingestion_pipeline', 'revoked', '${grantA}'),
+            ('${randomUUID()}', '${ingC2}', '${COLLEGE_A}', '${studentC}', '${repoC2}', '${commitSha}', '${treeSha}', '[]'::jsonb, 'trusted_ingestion_pipeline', 'persisted', '${grantB}');
+        `);
+
+        // Insert divergent source_snapshots for the same commit
+        await client.query(`
+          INSERT INTO source_snapshots (id, snapshot_id, org_id, student_id, repository_id, commit_sha, file_path, raw_bytes, raw_file_hash, blob_sha, captured_at, provenance, ingestion_id, registration_state) VALUES
+            ('${randomUUID()}', '${randomUUID()}', '${COLLEGE_A}', '${studentC}', '${repoC1}', '${commitSha}', '${filePath}', $1, '${computeRawFileHash(bytes1)}', '${computeGitBlobSha(bytes1)}', CURRENT_TIMESTAMP, 'trusted_ingestion_pipeline', '${ingC1}', 'quarantined'),
+            ('${randomUUID()}', '${randomUUID()}', '${COLLEGE_A}', '${studentC}', '${repoC2}', '${commitSha}', '${filePath}', $2, '${computeRawFileHash(bytes2)}', '${computeGitBlobSha(bytes2)}', CURRENT_TIMESTAMP, 'trusted_ingestion_pipeline', '${ingC2}', 'audit_committed');
+        `, [bytes1, bytes2]);
+
+        // Attempt migration: MUST throw data loss prevention error
+        await expect(applyFullMigrationSequence(client)).rejects.toThrow(/\[DATA_LOSS_PREVENTION\].*Divergent source_snapshots/);
+
+        // Transaction is rolled back safely
+        await client.query('ROLLBACK;');
+      } catch (err) {
+        await client.query('ROLLBACK;').catch(() => {});
+        throw err;
+      } finally {
+        await client.query('ROLLBACK;').catch(() => {});
+        client.release();
+      }
+    });
+
+    it('12.4. Fixture D — Historical ambiguous consent: NULL consent_grant_id with multiple candidates fails closed and preserves all rows', async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN;');
+
+        const userD = randomUUID();
+        const studentD = randomUUID();
+        const grant1 = randomUUID();
+        const grant2 = randomUUID();
+        const repoD = randomUUID();
+        const ingD = randomUUID();
+
+        await client.query(`
+          INSERT INTO users (id, auth_subject, email, full_name) VALUES
+            ('${userD}', 'auth_fix_d_${randomUUID()}', 'student.d.${randomUUID()}@p04-test.edu', 'Fixture Student D');
+          INSERT INTO students (id, org_id, user_id, department_id, enrollment_no, graduating_year) VALUES
+            ('${studentD}', '${COLLEGE_A}', '${userD}', '${DEPT_A}', 'FIX-D-${randomUUID().slice(0, 8)}', 2026);
+        `);
+
+        // Seed 2 distinct historical revoked consent grants for studentD with purpose 'repo_verification'
+        await client.query(`
+          INSERT INTO consent_grants (id, student_id, purpose, notice_version, scope, granted_at, revoked_at) VALUES
+            ('${grant1}', '${studentD}', 'repo_verification', 1, '{}'::jsonb, CURRENT_TIMESTAMP - INTERVAL '3 days', CURRENT_TIMESTAMP - INTERVAL '2 days'),
+            ('${grant2}', '${studentD}', 'repo_verification', 1, '{}'::jsonb, CURRENT_TIMESTAMP - INTERVAL '2 days', CURRENT_TIMESTAMP - INTERVAL '1 day');
+        `);
+
+        // Repo has valid consent_grant_id (grant1) to satisfy NOT NULL constraint
+        await client.query(`
+          INSERT INTO repositories (id, student_id, provider, provider_repo_id, url, default_branch, consent_grant_id, imported_at) VALUES
+            ('${repoD}', '${studentD}', 'github', 'fixture_d_repo', 'https://github.com/fixture/d', 'main', '${grant1}', CURRENT_TIMESTAMP);
+        `);
+
+        // Seed trusted_ingestion_record with NULL consent_grant_id when student has 2 candidate grants
+        await client.query(`
+          INSERT INTO trusted_ingestion_records (id, ingestion_id, org_id, student_id, repository_id, commit_sha, tree_sha, manifest, provenance, status, consent_grant_id) VALUES
+            ('${randomUUID()}', '${ingD}', '${COLLEGE_A}', '${studentD}', '${repoD}', 'd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4', 'aaaa00000000000000000000000000000000000a', '[]'::jsonb, 'trusted_ingestion_pipeline', 'persisted', NULL);
+        `);
+
+        // Migration must fail closed with Ambiguous consent generation
+        await expect(applyFullMigrationSequence(client)).rejects.toThrow(/\[DATA_LOSS_PREVENTION\].*Ambiguous consent generation/);
+
+        await client.query('ROLLBACK;');
+      } catch (err) {
+        await client.query('ROLLBACK;').catch(() => {});
+        throw err;
+      } finally {
+        await client.query('ROLLBACK;').catch(() => {});
+        client.release();
+      }
+    });
+
+    it('12.5. Fixture E — Previous 011a checksum upgrade: runner recognizes historical checksum without rewriting ledger', async () => {
+      const client = await pool.connect();
+      try {
+        // Verify current 011a ledger entry
+        const res = await client.query(`SELECT version, checksum FROM schema_migrations WHERE version = '011a';`);
+        expect(res.rows.length).toBe(1);
+        const recordedChecksum = res.rows[0].checksum;
+
+        // Verify that the recorded checksum is in the verified historical list
+        expect(HISTORICAL_MIGRATION_CHECKSUMS['011a']).toContain(recordedChecksum);
+
+        // Also test upgrade simulation with both historical checksums in an isolated transaction
+        await client.query('BEGIN;');
+        for (const historicalHash of HISTORICAL_MIGRATION_CHECKSUMS['011a']) {
+          await client.query(
+            `UPDATE schema_migrations SET checksum = $1 WHERE version = '011a';`,
+            [historicalHash]
+          );
+
+          // Verify recorded hash in ledger matches the historical hash
+          const checkRes = await client.query(`SELECT checksum FROM schema_migrations WHERE version = '011a';`);
+          expect(checkRes.rows[0].checksum).toBe(historicalHash);
+          expect(HISTORICAL_MIGRATION_CHECKSUMS['011a']).toContain(checkRes.rows[0].checksum);
+        }
+        await client.query('ROLLBACK;');
+
+        // Run migrations and verify it skips 011a cleanly without error or ledger corruption
+        const migResult = await runMigrations();
+        expect(migResult.total).toBeGreaterThanOrEqual(18);
+        expect(migResult.newlyApplied).toBe(0);
+        expect(migResult.skipped).toBe(migResult.total);
+
+        // Confirm ledger was NOT rewritten
+        const finalRes = await client.query(`SELECT checksum FROM schema_migrations WHERE version = '011a';`);
+        expect(finalRes.rows[0].checksum).toBe(recordedChecksum);
+      } finally {
+        client.release();
+      }
     });
   });
 });

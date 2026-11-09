@@ -122,7 +122,41 @@ BEGIN
                 SET repository_id = v_canonical_id
                 WHERE repository_id = v_dup_id;
 
-                -- B. Reconcile trusted_ingestion_records & child source_snapshots with full consent-generation awareness
+                -- B. Cross-generation cryptographic equivalence pre-check for the same commit
+                IF EXISTS (
+                    SELECT 1
+                    FROM trusted_ingestion_records dup
+                    JOIN trusted_ingestion_records canon
+                      ON canon.repository_id = v_canonical_id
+                     AND canon.org_id = dup.org_id
+                     AND canon.student_id = dup.student_id
+                     AND LOWER(canon.commit_sha) = LOWER(dup.commit_sha)
+                     AND LOWER(canon.tree_sha) <> LOWER(dup.tree_sha)
+                    WHERE dup.repository_id = v_dup_id
+                ) THEN
+                    RAISE EXCEPTION '[DATA_LOSS_PREVENTION] Divergent trusted_ingestion_records tree_sha detected across generations!';
+                END IF;
+
+                IF EXISTS (
+                    SELECT 1
+                    FROM source_snapshots dup
+                    JOIN source_snapshots canon
+                      ON canon.repository_id = v_canonical_id
+                     AND canon.org_id = dup.org_id
+                     AND canon.student_id = dup.student_id
+                     AND LOWER(canon.commit_sha) = LOWER(dup.commit_sha)
+                     AND canon.file_path = dup.file_path
+                     AND (
+                         LOWER(canon.raw_file_hash) <> LOWER(dup.raw_file_hash) OR
+                         LOWER(COALESCE(canon.blob_sha, '')) <> LOWER(COALESCE(dup.blob_sha, '')) OR
+                         canon.raw_bytes <> dup.raw_bytes
+                     )
+                    WHERE dup.repository_id = v_dup_id
+                ) THEN
+                    RAISE EXCEPTION '[DATA_LOSS_PREVENTION] Divergent source_snapshots detected for commit and file across generations!';
+                END IF;
+
+                -- C. Reconcile trusted_ingestion_records & child source_snapshots with full consent-generation awareness
                 FOR t_dup IN
                     SELECT * FROM trusted_ingestion_records
                     WHERE repository_id = v_dup_id
@@ -229,8 +263,7 @@ BEGIN
                       AND org_id = s_dup.org_id
                       AND student_id = s_dup.student_id
                       AND LOWER(commit_sha) = LOWER(s_dup.commit_sha)
-                      AND file_path = s_dup.file_path
-                      AND (ingestion_id = s_dup.ingestion_id OR (ingestion_id IS NULL AND s_dup.ingestion_id IS NULL));
+                      AND file_path = s_dup.file_path;
 
                     IF s_canon.id IS NOT NULL THEN
                         IF LOWER(s_dup.raw_file_hash) <> LOWER(s_canon.raw_file_hash) OR

@@ -355,6 +355,36 @@
      - Re-ingestion under fresh consent preserves historical quarantined snapshot IDs, registration states, and raw bytes immutably.
 - **Consequences:** Guarantees absolute migration ledger immutability across historical and fresh environments, prevents silent data loss during legacy repository reconciliation, and enforces cryptographic immutability of quarantined source snapshots.
 
+---
+
+## ADR-22: Full Migration Lifecycle Ordering, Safe Preflight Generation Reconciliation & Upgrade Fixtures (Fixtures A–E)
+
+- **Status:** Approved & Verified
+- **Context:** An independent source review of the migration sequence `011 -> 011a -> 012 -> 013 -> 014 -> 015 -> 016` identified that in `db/migrations/011a_safe_repository_preflight.sql`, source snapshots and trusted ingestion records were deduplicated across duplicate repositories based purely on commit SHA and raw byte equivalence without verifying `ingestion_id`, `consent_grant_id`, or status. If a student had duplicate repositories representing distinct consent generations (e.g. Generation A: revoked/quarantined vs Generation B: active/persisted), `011a` deleted the historical generation before Migration 016 could ever execute. Furthermore, `012`'s fallback `DELETE FROM repositories` would cascade-delete child rows if duplicates remained unreconciled.
+- **Decision:**
+  1. **Full Generation Awareness in Migration 011a Preflight:**
+     - Step 0: Ensure `trusted_ingestion_records.consent_grant_id` exists before any reconciliation queries run.
+     - Step 1: Detect and resolve ambiguous historical generation ownership (`NULL` consent grant with multiple candidate grants) fail-closed with `[DATA_LOSS_PREVENTION] Ambiguous consent generation` before any mutations.
+     - Step 2: Establish generation-aware partial unique indexes (`uq_trusted_ingestion_commit_consent`, `uq_trusted_ingestion_active_commit`, `uq_source_snapshots_commit_path_ingestion`, `uq_source_snapshots_active_commit_path`) and drop single-commit rigid constraints inherited from 011.
+     - Step 4.B: Cross-generation cryptographic equivalence pre-checks for same commit SHA (detects divergent `tree_sha` or divergent snapshot hashes/bytes across generations fail-closed with `[DATA_LOSS_PREVENTION] Divergent source_snapshots detected`).
+     - Step 4.C: Reconciles `trusted_ingestion_records` with full consent-generation awareness: if within the same generation, verifies equivalence and deduplicates; if distinct generations, re-parents both records and child snapshots to canonical repository WITHOUT deletion.
+     - Step 4.D: Unlinked source snapshot reconciliation without rigid `ingestion_id` lock.
+     - Step 5: Fail-closed assertion ensuring exactly 0 duplicate repository groups remain so `012` deletes 0 rows.
+  2. **Cross-Generation Cryptographic Equivalence in Migration 016:**
+     - Added cross-generation cryptographic equivalence pre-checks for same commit SHA (divergent `tree_sha` and divergent snapshot hashes/bytes).
+     - Fixed Step D unlinked source snapshot matching to avoid duplicate index collisions.
+  3. **Historical Ledger Checksum Compatibility:**
+     - Preserved both canonical and intermediate commit hashes for `011a` and `016` in `HISTORICAL_MIGRATION_CHECKSUMS` within `scripts/migrate-supabase.mjs`, ensuring zero drift errors and zero ledger rewrites on existing databases.
+  4. **Full-Sequence End-to-End Migration Upgrade Test Suite (Fixtures A–E):**
+     - Section 12 in `db/tests/p0-04-pg-durable-repositories.test.ts` executes comprehensive upgrade assertions:
+       - *Fixture A (12.1):* Distinct generations, identical contents (one revoked/quarantined, one persisted/audit_committed) -> both survive under canonical repo, both snapshot raw bytes intact.
+       - *Fixture B (12.2):* Same generation, identical records -> safe deduplication and canonical re-parenting.
+       - *Fixture C (12.3):* Different generations, divergent file content -> transaction rolls back with `[DATA_LOSS_PREVENTION] Divergent source_snapshots detected`.
+       - *Fixture D (12.4):* Historical ambiguous consent -> transaction rolls back with `[DATA_LOSS_PREVENTION] Ambiguous consent generation`.
+       - *Fixture E (12.5):* Ledger upgrade from historical `011a` checksum -> runner recognizes historical checksum via `HISTORICAL_MIGRATION_CHECKSUMS`, does not rewrite ledger, skips up-to-date migrations cleanly.
+- **Consequences:** Guarantees absolute data preservation of distinct historical consent generations during sequential migration upgrades, prevents silent cascade deletions in Migration 012, verifies cross-generation cryptographic equivalence fail-closed, and maintains 100% ledger checksum immutability.
+
+
 
 
 

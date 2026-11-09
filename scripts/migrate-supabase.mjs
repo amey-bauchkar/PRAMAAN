@@ -20,11 +20,12 @@ const MIGRATION_ADVISORY_LOCK_ID = 8429104820948123n;
 // Recognized historical checksums from transition commits where migrations were recorded in persistent ledgers
 export const HISTORICAL_MIGRATION_CHECKSUMS = {
   '011a': [
-    '4ad9489f74e39f859af6e550baa73981e1f6d056db470a1c14413b70a09611cf', // Canonical c6261af baseline
+    '4ad9489f74e39f859af6e550baa73981e1f6d056db470a1c14413b70a09611cf', // Canonical c6261af and b968745 baseline
     '8cc43e725621b5e8b34c856cd0f91026a242d803ca94455b4d70ba6ab7c849a5', // Intermediate commit 8e5c670
   ],
   '016': [
     '3f8152a9228a1441761bba14077259a3108bc7525f926964000338a28e1160c3', // Intermediate commit during 016 drafting
+    'c77d1ef5a28ef8016409abb0da411d9dde063fafbfd6abd962668dd66c498359', // Commit b968745 016 baseline
   ],
 };
 
