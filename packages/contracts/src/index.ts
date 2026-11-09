@@ -5,4 +5,5 @@ export * from './evidence.js';
 export * from './eligibility.js';
 export * from './audit.js';
 export * from './fairness.js';
+export * from './github.js';
 

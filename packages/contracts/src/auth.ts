@@ -80,6 +80,7 @@ export const SessionContextSchema = z.object({
   orgId: z.string().uuid(),
   role: UserRoleSchema,
   departmentId: z.string().uuid().nullable().optional(),
+  actorUserId: z.string().uuid().optional(),
 });
 export type SessionContext = z.infer<typeof SessionContextSchema>;
 

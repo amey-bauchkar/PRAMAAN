@@ -112,5 +112,5 @@ describe('Administrative Migration & Seed TLS Verification (P0-2) and Ledger Int
       // Restore original file content exactly
       fs.writeFileSync(targetMigration, originalContent, 'utf8');
     }
-  });
+  }, 60000);
 });

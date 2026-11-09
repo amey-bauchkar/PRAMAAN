@@ -194,6 +194,198 @@
   6. **P0-04 Prior Consent Enforcement Boundary:** P0-04 must verify active, tenant-scoped student consent for `repo_verification` before fetching repository content, retaining blobs, generating ingestion records, and registering snapshots.
 - **Consequences:** Eliminates single point of failure in physical rollback. Guarantees that even with 100% compensating rollback failure, unaudited evidence can never be resolved authoritatively. P0-05 is completely hardened and frozen.
 
+---
+
+## ADR-16: Trusted Static GitHub Repository Ingestion Pipeline (P0-04)
+
+- **Status:** Approved
+- **Context:** P0-05 implemented exact code anchor resolution against content-addressed snapshots. However, activating authoritative verification in production required Milestone M2 Ticket P0-04: authenticating students via GitHub OAuth, fetching repository contents without executing code, verifying Git blob integrity against remote Git trees, enforcing DPDP consent prior to network calls, and persisting snapshots and manifests in durable PostgreSQL storage with RLS.
+- **Decision:**
+  1. **OAuth 2.0 with PKCE S256 Challenge:** Students initiate connections with a single-use cryptographic state and S256 code challenge. The state binds tenant (`orgId`), student (`studentId`), and redirect URI with a 10-minute expiry. Replays are strictly rejected.
+  2. **AES-256-GCM Token Encryption at Rest:** GitHub access and refresh tokens are encrypted using authenticated AES-256-GCM (`v1:iv:tag:ciphertext`) with unique 12-byte IVs, 16-byte auth tags, and key versioning under `GITHUB_TOKEN_ENCRYPTION_KEY`. Missing or invalid keys fail closed in production (`503`). Plaintext tokens are NEVER logged, exposed to API responses, or leaked in error messages.
+  3. **Fail-Closed Consent-Before-Fetch Boundary:** The ingestion engine verifies active DPDP `repo_verification` consent in `IConsentRepository` before making ANY GitHub API call. If consent is absent, revoked, or expired, exactly zero GitHub API calls are dispatched (`callCount === 0`). Consent is re-verified immediately prior to database persistence.
+  4. **Static Ingestion & Truncated Tree Recovery:** Code is fetched exclusively via GitHub REST API without `git clone`, `npm install`, or child process execution. If the recursive tree response returns `truncated: true`, the engine falls back to deterministic iterative directory walking.
+  5. **Strict File Filtering & Hard Limits:** Allows only source code files (`.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`). Rejects symlinks (`mode: '120000'`), submodules (`mode: '160000'`), binary files, vendor directories (`node_modules`, `dist`, `.git`), secret files (`.env*`, `*.pem`, `*.key`), and path traversals. Enforces strict limits: $\le 200$ files, $\le 512$ KB per file, and $\le 10$ MB total retained payload.
+  6. **Cryptographic Git Object & Raw Hash Verification:** Raw bytes are formatted as Git objects (`blob ${byteLength}\0${rawBytes}`). The calculated Git blob SHA-1 must strictly match the remote tree entry SHA. Raw SHA-256 (`rawFileHash`) is computed and bound to the file manifest entry.
+  7. **Write-Once Canonical Ingestion Manifests & Snapshots:** Stores immutable `TrustedIngestionRecord` before registering snapshots via `AnchorService.registerTrustedSnapshot()`. Snapshots progress from `pending_audit` to `audit_committed`.
+  8. **Durable PostgreSQL Adapters & Migration 011:** Schema migration `011_trusted_repository_ingestion_and_snapshots.sql` adds `github_oauth_states`, `source_snapshots`, `trusted_ingestion_records`, and `ingestion_jobs` with RLS enabled and forced across all tables. Repositories `PgSourceSnapshotStore`, `PgTrustedIngestionStore`, `PgGitHubCredentialRepository`, and `PgIngestionJobRepository` implement multi-tenant tenant-transaction isolation under `app_api`.
+  9. **Production Application Composition:** In `buildApp()` (`apps/api/src/app.ts`), production mode wires these durable PostgreSQL adapters and fails closed if in-memory adapters are configured.
+- **Consequences:** Establishes complete end-to-end trusted static repository ingestion with zero untrusted code execution, cryptographic Git provenance, and durable PostgreSQL storage. P0-04 is completely verified and operational.
+
+---
+
+## ADR-17: Remediation of GitHub OAuth Scopes, Tenant State Isolation, Ingestion Resource Boundaries, Key Ring Versioning, and Callback Security
+
+- **Status:** Approved
+- **Context:** An independent security review of PR #2 identified gaps in authorization scopes, OAuth state tenant isolation, ingestion resource enforcement, cipher key validation/rotation, callback URI validation, and request lifecycle description.
+- **Decision:**
+  1. **GitHub Authorization Scope Hardening:** Discarded invalid scope token `repo:read`. Defined GitHub Apps with fine-grained read-only permissions (`contents:read`, `metadata:read`) as the primary production standard. Supported legacy OAuth App read-only scopes (`read:user`, `user:email`, `public_repo`), while emitting explicit warnings if monolithic `repo` scope is configured. Callback verifies granted scopes fail-closed with `INSUFFICIENT_GITHUB_PERMISSIONS` (403).
+  2. **Tenant-Safe OAuth State Consumption:** State consumption executes inside `withTenantTransaction(context, ...)` under the restricted `app_api` role. PostgreSQL RLS policies on `github_oauth_states` physically prevent any cross-tenant state visibility. Consumption is atomic (`FOR UPDATE`) with immediate single-use invalidation (`used_at = CURRENT_TIMESTAMP`). Cross-tenant consumption attempts return null.
+  3. **Strict Ingestion Limit Enforcement:** Production defaults are aligned with operational claims: 200 files maximum, 512 KB per file, 10 MB aggregate retained bytes. Entries with declared size > 512 KB in the Git tree are rejected prior to blob download. Undeclared blobs exceeding 512 KB are excluded post-download. Aggregate retained bytes exceeding 10 MB trigger `TOTAL_SIZE_LIMIT_EXCEEDED`. No oversized content is persisted, and all limit failures are durably recorded in `ingestion_jobs`.
+  4. **Versioned AES-256-GCM Key Ring & Zero-Downtime Rotation:** Enhanced `AesGcmTokenCipher` with a versioned key ring (`Record<string, string>`) and active key versioning. Ciphertext format is `version:iv:tag:ciphertext`. Tokens encrypted under prior keys (e.g. `v1`) decrypt seamlessly while new tokens encrypt with `v2`. Unknown key versions fail closed (`UNKNOWN_KEY_VERSION`), and production mode strictly enforces 64-hex key formatting.
+  5. **Fixed OAuth Callback URI & Host Header Protection:** The server enforces a canonical `GITHUB_OAUTH_REDIRECT_URI` and strict allowlist validation. Client-supplied `redirect_uri` outside the allowlist fails with 400 `INVALID_REDIRECT_URI`. Host headers (`req.headers.host`) and client parameters are never trusted. Production startup fails closed if GitHub credentials or redirect URIs are missing or placeholders.
+  6. **Synchronous Request Lifecycle Documentation:** Accurately documented the request lifecycle as synchronous execution within HTTP timeout boundaries with durable relational tracking in `ingestion_jobs`, providing auditability, idempotent status polling via `GET /api/evidence/repositories/ingest/:id`, and the architectural foundation for a future decoupled daemon.
+- **Consequences:** Eliminates OAuth scope confusion, closes cross-tenant OAuth state exposure, prevents DoS/zip-bomb attacks via pre-download tree size filtering, enables zero-downtime token key rotation, and secures OAuth callback redirection against spoofing.
+
+---
+
+## ADR-18: User ID vs Student ID Disambiguation, Browser OAuth Redirect Architecture, Delegated Connection Prohibition, and Canonical Repository Relational Records
+
+- **Status:** Approved
+- **Context:** An independent integration review of PR #2 identified four critical architectural issues and one capability constraint:
+  1. *User ID vs Student ID Disambiguation:* `SessionContext.userId` represents `users.id`. In PostgreSQL schema migrations 003 and 011, foreign keys in `repositories`, `connected_accounts`, `github_oauth_states`, `source_snapshots`, `trusted_ingestion_records`, and `ingestion_jobs` reference `students(id)`. Code using `context.userId` directly as a student ID broke relational foreign key integrity.
+  2. *Browser OAuth Redirect Architecture:* Browsers redirected from GitHub back to the server cannot send custom Authorization Bearer headers. An unauthenticated browser GET to `/api/integrations/github/callback` failed or required unauthenticated token exchange.
+  3. *Prohibition of Delegated GitHub Connections:* Staff members (placement officers, platform admins) attempting to initiate OAuth on behalf of students would erroneously link staff GitHub identities to student records.
+  4. *Canonical Repository Database Records:* The static ingestion engine generated unbacked random repository UUIDs on every ingestion, missing persistent repository records, consent grant linkage, and cross-student ownership verification.
+  5. *Public-Repository-Only Scope (Option B):* Requesting broad `repo` write scopes for public repositories violated least privilege.
+- **Decision:**
+  1. **User ID vs Student ID Disambiguation:**
+     - Extended `ITenantRepository`, `InMemoryTenantRepository`, and `PgTenantRepository` with `getStudentByUserId(context, userId)`.
+     - In `apps/api/src/app.ts`, student endpoints resolve `student = await tenantRepo.getStudentByUserId(context, context.userId)` server-side.
+     - Enforce that client-supplied `studentId` cannot override or substitute verified student identity (`FORBIDDEN_STUDENT_ACCESS`, 403).
+     - Bound all database foreign keys in `repositories`, `connected_accounts`, `github_oauth_states`, `source_snapshots`, `trusted_ingestion_records`, and `ingestion_jobs` strictly to `students.id`.
+     - Adapted `AnchorService.resolveAnchor` and `StaticRepoIngestionService` to respect canonical student profile identity while preserving frozen P0-05 resolver core.
+  2. **Browser OAuth Redirect Architecture:**
+     - Implemented dedicated client component page `apps/web/app/integrations/github/callback/page.tsx` wrapped in React `<Suspense>`.
+     - `GET /api/integrations/github/callback` without Authorization header issues HTTP 302 Found redirect to `/integrations/github/callback?code=...&state=...`.
+     - Frontend extracts code and state and issues authenticated `POST /api/integrations/github/callback` with Bearer JWT, executing PKCE verification, token exchange, credential encryption, and audit logging.
+  3. **Prohibition of Delegated Connection:**
+     - Only students (`context.role === 'student'`) may connect their GitHub account.
+     - Officer and administrator attempts to initiate or complete connection fail closed with 403 `FORBIDDEN_DELEGATED_CONNECTION`.
+  4. **Canonical Repository Relational Records:**
+     - Implemented `IRepositoryRepository`, `InMemoryRepositoryRepository`, and `PgRepositoryRepository` backed by `repositories` table with `getOrCreateRepository`, `getRepositoryById`, and `findRepositoryByProviderId`.
+     - Repository registration links `student_id`, `provider: 'github'`, `provider_repo_id`, `url`, `default_branch`, and verified `consent_grant_id`.
+     - Idempotent re-ingestion returns the existing canonical `repositoryId`.
+     - Cross-student repository ID substitution throws `CROSS_STUDENT_REPOSITORY_FORBIDDEN` (403). Cross-tenant lookup fails closed under PostgreSQL RLS (`REPOSITORY_NOT_FOUND`).
+  5. **Public-Repository-Only Scope (Option B):**
+     - Declared public-repository-only scope: default scopes set to `['read:user', 'public_repo']` space-separated per RFC 6749.
+     - Broad `repo` write scope is excluded.
+     - Ingestion of private repositories is rejected fail-closed with 400 `PRIVATE_REPOSITORY_NOT_SUPPORTED`.
+- **Consequences:** Restores 100% relational foreign-key integrity in PostgreSQL, eliminates browser OAuth token leaks, prevents delegated identity misattribution, establishes canonical repository tracking, and enforces least-privilege OAuth scopes.
+
+---
+
+## 2026-11-09 — P0-04 Final Acceptance Hardening
+
+- **Status:** Approved & Verified
+- **Context:** Following the production integration review, four critical acceptance criteria were addressed before merging P0-04:
+  1. *GitHub Authorization Scope Transparency:* Clarify that GitHub OAuth `public_repo` grants read/write per official specs; PRAMAAN application code strictly operates as read-only. Ensure callback requires both `read:user` and `public_repo` (or GitHub App permissions `contents:read` and `metadata:read`), rather than allowing `read:user` alone to grant repo ingestion.
+  2. *Canonical Repository Concurrency Safety:* Prevent race conditions when simultaneous concurrent ingestion requests attempt to register the same repository. Ensure unique constraint exists on `(student_id, provider, provider_repo_id)` and `getOrCreateRepository` operates atomically via upsert. Re-link active consent grant when changed. Fail closed if repository repository is not configured.
+  3. *Audit Actor Identity Preservation:* Ensure `actor_id` in audit events records authenticated user ID (`users.id`), whether student or officer, while snapshot and record ownership points to `students.id`. Satisfy frozen P0-05 resolver invariants without modifying frozen files.
+  4. *Consent Revocation Retention Policy:* Define and enforce snapshot retention upon `repo_verification` consent revocation. Transition snapshots to `registration_state = 'quarantined'`, making them immediately inaccessible for authoritative resolution. Subsequent re-consent must not resurrect old quarantined snapshots.
+  5. *Browser Callback Deployment Safeguards:* Validate `FRONTEND_URL` in production, guard against React StrictMode duplicate execution via `useRef`, scrub temporary parameters from browser history upon success, and handle GitHub error query parameters gracefully.
+- **Decision:**
+  1. **OAuth Scope Transparency & Verification:** Updated documentation and logs to accurately reflect that OAuth `public_repo` scope includes read and write capabilities on public repos per GitHub OAuth specs; PRAMAAN enforces strictly read-only access (commits, trees, blobs) in application logic. In `GitHubAccountService.handleOAuthCallback()`, enforce that both `read:user` and `public_repo` (or GitHub App permissions `contents:read` and `metadata:read`) must be granted. Under-scoped tokens fail closed with 403 `INSUFFICIENT_GITHUB_PERMISSIONS`. Private repo ingestion remains disabled (`PRIVATE_REPOSITORY_NOT_SUPPORTED`).
+  2. **Schema Migration 012 & Atomic Upsert:** Created `db/migrations/012_canonical_repository_unique_constraint.sql` adding unique constraint `uq_repositories_student_provider_repo` on `(student_id, provider, provider_repo_id)` after deduplicating pre-existing rows. Implemented atomic upsert in `PgRepositoryRepository.getOrCreateRepository()` using `ON CONFLICT (student_id, provider, provider_repo_id) DO UPDATE SET url = EXCLUDED.url, default_branch = EXCLUDED.default_branch, consent_grant_id = EXCLUDED.consent_grant_id RETURNING ...`. Required `repositoryRepo` in `StaticRepoIngestionService`, failing closed with `REPOSITORY_REPOSITORY_REQUIRED`.
+  3. **Preservation of Audit Actor Identity via `actorUserId`:** Added optional `actorUserId` to `SessionContextSchema` (`packages/contracts/src/auth.ts`). Updated `PgAuditRepository.logInTransaction` and `AuditService.log` to record `actorId = context.actorUserId ?? context.userId` (`users.id`). In `StaticRepoIngestionService`, passed `anchorContext = { ...context, userId: context.role === 'student' ? targetStudentId : context.userId, actorUserId: context.userId }`. Guaranteed that audit actor is `users.id` (satisfying audit FK to `users(id)`) and snapshot owner is `students.id`, while satisfying frozen `AnchorService` invariants without modifying frozen files.
+  4. **Consent Revocation Snapshot Quarantine:** In `PgConsentRepository.revokeConsent()`, when `repo_verification` consent is revoked, atomically transitioned all student snapshots in `source_snapshots` to `registration_state = 'quarantined'`, rendering them immediately inaccessible for authoritative anchor resolution (`REGISTRATION_NOT_AUDIT_COMMITTED` / `CONSENT_REQUIRED_OR_REVOKED`). Ingestion jobs are marked failed (`CONSENT_REVOKED`), tokens purged, evidence withdrawn, and skills downgraded. Subsequent re-consent links canonical repositories to the new grant without resurrecting quarantined snapshots.
+  5. **Browser Callback Hardening:** Next.js `/integrations/github/callback` page adds `useRef` guard to eliminate double-invocation under React StrictMode development, scrubs temporary `code` and `state` parameters from browser history upon success via `window.history.replaceState`, and explicitly handles GitHub authorization denial errors (`error=access_denied`). Fastify route validates `FRONTEND_URL` in production mode fail-closed.
+- **Consequences:** Eliminates race conditions in canonical repository registration, preserves true audit actor identity across roles, strictly enforces data retention and quarantine on consent revocation, and ensures transparent, least-privilege GitHub authorization with zero regressions.
+
+---
+
+## ADR-19: Provider Revocation Abstraction, Active Consent Uniqueness (Migration 013), Safe Migration 014 Reconciliation, Bounded Tree Traversal, and Ingestion Job Cancellation
+
+- **Status:** Approved & Verified
+- **Context:** An independent backend reliability and consent lifecycle review identified five areas for remediation:
+  1. *Genuine GitHub OAuth Revocation:* Previously, revocation was logged as `revoked_upstream` merely based on the presence of environment credentials without making an actual upstream HTTP call to GitHub's revocation endpoint.
+  2. *Active Consent Uniqueness:* `consent_grants` previously allowed multiple active grants (`revoked_at IS NULL`) for the same student and purpose. Re-consent did not automatically transition previous grants to revoked history, and concurrent grants could race.
+  3. *Safe Canonical Repository Reconciliation (Migration 014):* Migration 012 applied a unique constraint on `(student_id, provider, provider_repo_id)` by executing `DELETE FROM repositories r1 ... WHERE r1.id > r2.id`. In databases with dependent child records (`repo_snapshots`, `evidence_items`, `source_snapshots`, `trusted_ingestion_records`, `ingestion_jobs`), `ON DELETE CASCADE` would destroy student evidence.
+  4. *Bounded Tree Traversal & Rate-Limit Handling:* Recursive tree fetching could traverse unbounded directory hierarchies or download unbounded files, risking memory exhaustion or infinite rate-limit retries.
+  5. *Ingestion Job Transitions on Revocation:* When consent was revoked, running or queued ingestion jobs were not transitioned, risking post-revocation authoritative snapshot registration.
+- **Decision:**
+  1. **Genuine GitHub OAuth Grant Revocation:**
+     - Added `revokeOAuthGrant(accessToken, signal)` to `IGitHubClient`, `DefaultGitHubClient`, and `MockGitHubClient`.
+     - `DefaultGitHubClient` invokes GitHub's documented `DELETE /applications/{client_id}/grant` authenticating via HTTP Basic Auth (`client_id:client_secret`) with JSON body `{ access_token }`.
+     - In `GitHubAccountService.revokeUpstreamGrantAndUnlink()`, upstream HTTP revocation is performed **strictly outside PostgreSQL transactions holding locks**, eliminating connection pool starvation and long lock holds during network latency.
+     - Distinguishes `confirmed` (HTTP 204), `failed` (e.g. 404/422 or network timeout), and `local_only` (sandbox/missing credentials).
+     - Local stored credentials and encrypted tokens are unconditionally purged fail-closed, even if upstream fails.
+     - Plaintext access tokens are never logged or stored in audit records.
+  2. **Active Consent Uniqueness & Partial Unique Index (Migration 013):**
+     - Created `db/migrations/013_active_consent_uniqueness.sql` which deterministically reconciles pre-existing duplicates (preserving latest, revoking older) and creates partial unique index `uq_consent_grants_active_student_purpose ON consent_grants (student_id, purpose) WHERE revoked_at IS NULL`.
+     - In `PgConsentRepository.grantConsent()`, acquires transaction-level advisory lock `pg_advisory_xact_lock(hashtext(student_id || ':' || purpose))` to serialize concurrent grants, updates existing active grants to `revoked_at = CURRENT_TIMESTAMP`, and inserts the new active grant.
+     - In `PgConsentRepository.revokeConsent()`, transitions all active grants for that student and purpose to `revoked_at = CURRENT_TIMESTAMP`, strictly leaving zero active grants.
+  3. **Safe Canonical Repository Reconciliation (Migration 014):**
+     - Created `db/migrations/014_safe_repository_reconciliation.sql` without modifying Migration 012 checksum.
+     - Preflights duplicate repository groups `(student_id, provider, provider_repo_id)`.
+     - Re-parents all child records (`repo_snapshots`, `evidence_items`, `source_snapshots`, `trusted_ingestion_records`, `ingestion_jobs`) to the canonical repository (`imported_at ASC, id ASC`), temporarily managing trigger `trg_trusted_ingestion_immutable`.
+     - Asserts zero duplicate groups remain, and then deletes redundant repository rows safely without data loss.
+  4. **Bounded GitHub Tree Traversal:**
+     - Configured limits: `maxTreeEntries = 5000`, `maxDirectoryTraversals = 100`, `maxTreeApiRequests = 30`, `maxFiles = 200`, `maxWallClockMs = 30000ms`.
+     - Enforces early termination during traversal: halts immediately with `FILE_COUNT_LIMIT_EXCEEDED` once 201 eligible files are discovered.
+     - Handles HTTP 403/429 rate limit errors fail-closed (`GITHUB_RATE_LIMIT_EXCEEDED`) without retry loops.
+     - On any limit failure, records terminal error in `ingestion_jobs` and persists NO manifests or snapshots.
+  5. **Ingestion Job Status Transitions on Revocation:**
+     - Implemented `cancelJobsForStudentOnRevocation(context, studentId)` across interface, in-memory, and PostgreSQL repository adapters.
+     - Transitions all in-progress jobs (`queued`, `resolving`, `fetching`, `verifying`, `persisted`) to `status = 'failed'` with `error = 'CONSENT_REVOKED'`, `diagnostics.revocation_reason = 'CONSENT_REVOKED'`, and `completed_at = CURRENT_TIMESTAMP`. Completed and already-failed jobs are untouched.
+- **Consequences:** Eliminates external network calls inside database transactions, prevents duplicate active consent grants while preserving audit trail, protects historical student evidence from migration data loss, caps ingestion resource consumption, and guarantees that consent revocation immediately cancels in-flight ingestion jobs.
+
+---
+
+## ADR-20: Atomic Database-Level Consent Gates, Terminal Ingestion State Machines, and Migration 015 Re-Consent Support
+
+- **Status:** Approved & Verified
+- **Context:** An independent review identified risks where in-flight ingestion could persist snapshots after consent revocation had begun, where migration 011a preflight reconciliation needed to handle snapshot registration states, and where re-ingesting the same Git commit under fresh consent collided with unique constraints.
+- **Decision:**
+  1. **Atomic Database-Level Consent Gates:** In `PgSourceSnapshotStore.saveSnapshot()` and `updateRegistrationState()`, and `PgTrustedIngestionStore.saveRecord()`, enforced active consent checks within the same transaction under `FOR SHARE` row locks (`SELECT id FROM consent_grants ... FOR SHARE`). Ingestion operations fail closed immediately with `CONSENT_REQUIRED_OR_REVOKED` if consent was revoked.
+  2. **Strict Ingestion Job State Machine:** Enforced exact lifecycle progression (`queued -> resolving -> fetching -> verifying -> persisted -> completed` or `failed`). Creating jobs in non-queued states throws `INVALID_INITIAL_JOB_STATE`. Skipping lifecycle states throws `INVALID_JOB_TRANSITION`. Terminal states (`completed`, `failed`) cannot be modified or transitioned.
+  3. **Consent Generation & Fresh Re-Ingestion (Migration 015):** Authored forward-only migration `015_consent_generation_and_fresh_reingestion.sql`. Added `consent_grant_id` to `trusted_ingestion_records`. Replaced rigid unique constraints with partial unique indexes (`uq_trusted_ingestion_active_commit WHERE status != 'revoked'` and `uq_source_snapshots_active_commit_path WHERE registration_state != 'quarantined'`). Enables fresh re-ingestion of the same or new commit under fresh consent while preserving historical revoked records.
+  4. **Deterministic Concurrency Tests:** Reworked concurrency tests using PostgreSQL lock detection via `pg_stat_activity` and explicit promise latches, eliminating arbitrary `setTimeout` delays.
+- **Consequences:** Eliminates time-of-check to time-of-use (TOCTOU) races between revocation and persistence, seals the ingestion job lifecycle graph, and allows compliant students to re-ingest code under fresh consent without unique constraint conflicts.
+
+---
+
+## ADR-21: Migration 011a Checksum Immutability, Transition Checksum Support, Migration 016 Safe Generation Reconciliation, and Hardened Snapshot Immutability
+
+- **Status:** Approved & Verified
+- **Context:** A final migration-integrity and acceptance review identified that `011a_safe_repository_preflight.sql` had drifted from its canonical baseline between transition commits, which threatened checksum immutability in persistent migration ledgers. Furthermore, pre-existing duplicate repository rows across distinct consent generations required forward-only reconciliation without data loss, and `PgSourceSnapshotStore.saveSnapshot()` needed strict lifecycle immutability guards.
+- **Decision:**
+  1. **Canonical Migration 011a Restoration & Transition Checksum Support:**
+     - Restored `011a_safe_repository_preflight.sql` byte-for-byte to its canonical `c6261af` baseline (SHA-256: `4ad9489f74e39f859af6e550baa73981e1f6d056db470a1c14413b70a09611cf`).
+     - Enhanced `scripts/migrate-supabase.mjs` with `HISTORICAL_MIGRATION_CHECKSUMS` export to recognize historical checksums recorded in transition ledgers (including intermediate commit `8cc43e72...`) without drift failure or manual ledger rewriting.
+  2. **Migration 016 Safe Generation Reconciliation:**
+     - Authored forward-only migration `016_safe_generation_reconciliation.sql` executed strictly after 015.
+     - Resolves NULL `consent_grant_id` before deduplication decisions; fails closed with `[DATA_LOSS_PREVENTION] Ambiguous consent generation` if a student has multiple candidate grants.
+     - Preserves distinct consent generations and historical revoked records under the canonical repository without deletion.
+     - Deduplicates snapshots and trusted ingestion records only when genuinely equivalent within the same consent generation (`commit_sha` AND `consent_grant_id`).
+     - Handles potential snapshot collisions on `(commit_sha, file_path, ingestion_id)` before re-parenting, strictly preventing unique index violations.
+  3. **Strict Snapshot Lifecycle & Immutability Hardening:**
+     - Direct writes via `PgSourceSnapshotStore.saveSnapshot()` cannot specify `quarantined` or `audit_committed` (`INVALID_REGISTRATION_STATE`), requiring initial persistence as `pending_audit` and transitions via `updateRegistrationState()`.
+     - Attempting to re-save, modify, or un-quarantine an existing quarantined snapshot throws `IMMUTABLE_SNAPSHOT_MUTATION_REJECTED`.
+     - Re-ingestion under fresh consent preserves historical quarantined snapshot IDs, registration states, and raw bytes immutably.
+- **Consequences:** Guarantees absolute migration ledger immutability across historical and fresh environments, prevents silent data loss during legacy repository reconciliation, and enforces cryptographic immutability of quarantined source snapshots.
+
+---
+
+## ADR-22: Full Migration Lifecycle Ordering, Safe Preflight Generation Reconciliation & Upgrade Fixtures (Fixtures A–E)
+
+- **Status:** Approved & Verified
+- **Context:** An independent source review of the migration sequence `011 -> 011a -> 012 -> 013 -> 014 -> 015 -> 016` identified that in `db/migrations/011a_safe_repository_preflight.sql`, source snapshots and trusted ingestion records were deduplicated across duplicate repositories based purely on commit SHA and raw byte equivalence without verifying `ingestion_id`, `consent_grant_id`, or status. If a student had duplicate repositories representing distinct consent generations (e.g. Generation A: revoked/quarantined vs Generation B: active/persisted), `011a` deleted the historical generation before Migration 016 could ever execute. Furthermore, `012`'s fallback `DELETE FROM repositories` would cascade-delete child rows if duplicates remained unreconciled.
+- **Decision:**
+  1. **Full Generation Awareness in Migration 011a Preflight:**
+     - Step 0: Ensure `trusted_ingestion_records.consent_grant_id` exists before any reconciliation queries run.
+     - Step 1: Detect and resolve ambiguous historical generation ownership (`NULL` consent grant with multiple candidate grants) fail-closed with `[DATA_LOSS_PREVENTION] Ambiguous consent generation` before any mutations.
+     - Step 2: Establish generation-aware partial unique indexes (`uq_trusted_ingestion_commit_consent`, `uq_trusted_ingestion_active_commit`, `uq_source_snapshots_commit_path_ingestion`, `uq_source_snapshots_active_commit_path`) and drop single-commit rigid constraints inherited from 011.
+     - Step 4.B: Cross-generation cryptographic equivalence pre-checks for same commit SHA (detects divergent `tree_sha` or divergent snapshot hashes/bytes across generations fail-closed with `[DATA_LOSS_PREVENTION] Divergent source_snapshots detected`).
+     - Step 4.C: Reconciles `trusted_ingestion_records` with full consent-generation awareness: if within the same generation, verifies equivalence and deduplicates; if distinct generations, re-parents both records and child snapshots to canonical repository WITHOUT deletion.
+     - Step 4.D: Unlinked source snapshot reconciliation without rigid `ingestion_id` lock.
+     - Step 5: Fail-closed assertion ensuring exactly 0 duplicate repository groups remain so `012` deletes 0 rows.
+  2. **Cross-Generation Cryptographic Equivalence in Migration 016:**
+     - Added cross-generation cryptographic equivalence pre-checks for same commit SHA (divergent `tree_sha` and divergent snapshot hashes/bytes).
+     - Fixed Step D unlinked source snapshot matching to avoid duplicate index collisions.
+  3. **Historical Ledger Checksum Compatibility:**
+     - Preserved both canonical and intermediate commit hashes for `011a` and `016` in `HISTORICAL_MIGRATION_CHECKSUMS` within `scripts/migrate-supabase.mjs`, ensuring zero drift errors and zero ledger rewrites on existing databases.
+  4. **Full-Sequence End-to-End Migration Upgrade Test Suite (Fixtures A–E):**
+     - Section 12 in `db/tests/p0-04-pg-durable-repositories.test.ts` executes comprehensive upgrade assertions:
+       - *Fixture A (12.1):* Distinct generations, identical contents (one revoked/quarantined, one persisted/audit_committed) -> both survive under canonical repo, both snapshot raw bytes intact.
+       - *Fixture B (12.2):* Same generation, identical records -> safe deduplication and canonical re-parenting.
+       - *Fixture C (12.3):* Different generations, divergent file content -> transaction rolls back with `[DATA_LOSS_PREVENTION] Divergent source_snapshots detected`.
+       - *Fixture D (12.4):* Historical ambiguous consent -> transaction rolls back with `[DATA_LOSS_PREVENTION] Ambiguous consent generation`.
+       - *Fixture E (12.5):* Ledger upgrade from historical `011a` checksum -> runner recognizes historical checksum via `HISTORICAL_MIGRATION_CHECKSUMS`, does not rewrite ledger, skips up-to-date migrations cleanly.
+- **Consequences:** Guarantees absolute data preservation of distinct historical consent generations during sequential migration upgrades, prevents silent cascade deletions in Migration 012, verifies cross-generation cryptographic equivalence fail-closed, and maintains 100% ledger checksum immutability.
+
+
+
 
 
 

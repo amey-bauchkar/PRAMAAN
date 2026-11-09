@@ -102,6 +102,8 @@ export class PgAuditRepository implements IAuditRepository {
       ? 'user' 
       : 'service';
 
+    const actorId = context.actorUserId ?? context.userId;
+
     const eventId = randomUUID();
     const occurredAt = new Date().toISOString();
 
@@ -110,7 +112,7 @@ export class PgAuditRepository implements IAuditRepository {
       seq: nextSeq,
       orgId: context.orgId,
       actorType,
-      actorId: context.userId,
+      actorId,
       action,
       objectType,
       objectId,
@@ -133,7 +135,7 @@ export class PgAuditRepository implements IAuditRepository {
       nextSeq,
       context.orgId,
       actorType,
-      context.userId,
+      actorId,
       action,
       objectType,
       objectId,

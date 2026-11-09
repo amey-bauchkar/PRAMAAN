@@ -199,6 +199,8 @@ export const TrustedIngestionRecordSchema = z.object({
   verifiedAt: z.string().datetime(),
   provenance: z.literal('trusted_ingestion_pipeline').default('trusted_ingestion_pipeline'),
   manifest: z.array(TrustedFileManifestEntrySchema).default([]),
+  consentGrantId: z.string().uuid().optional(),
+  status: z.enum(['persisted', 'revoked']).optional(),
 }).superRefine((record, ctx) => {
   const seenPaths = new Set<string>();
   for (let i = 0; i < record.manifest.length; i++) {

@@ -21,6 +21,8 @@ export class AuditService {
       ? this.events[this.events.length - 1].hash 
       : AuditChain.GENESIS_HASH;
 
+    const actorId = context.actorUserId ?? context.userId;
+
     const rawEvent: Omit<AuditEvent, 'hash'> = {
       id: randomUUID(),
       seq: this.currentSeq,
@@ -28,7 +30,7 @@ export class AuditService {
       actorType: context.role === 'student' || context.role === 'officer' || context.role === 'mentor' 
         ? 'user' 
         : 'service',
-      actorId: context.userId,
+      actorId,
       action,
       objectType,
       objectId,

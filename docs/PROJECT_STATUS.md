@@ -1,7 +1,7 @@
 # PRAMAAN — Project Status
 
-**Last Updated:** 2026-11-07  
-**Stage:** Stage A (Completed) → Milestone M0, M1 & M2 Phase 1 (P0-05 Anchor Resolver) (FINAL SIGN-OFF COMPLETED, HARDENED & CORE FROZEN)  
+**Last Updated:** 2026-11-09  
+**Stage:** Stage A (Completed) → Milestone M0, M1 & M2 Phase 1 (P0-05 Anchor Resolver) & Phase 2 (P0-04 Trusted Static Repository Ingestion) (COMPLETED, SECURITY REMEDIATED, BACKEND HARDENED & VERIFIED)  
 **Lead Engineer:** Solo Developer Partner  
 **Target Event:** QUASAR 5.0 (EdTech Domain)  
 
@@ -12,19 +12,29 @@
 PRAMAAN is an evidence-based placement intelligence platform built for colleges, students, placement officers (TPOs), and recruiters. Its core thesis is:
 $$\text{Evidence} \rightarrow \text{Observed Skill} \rightarrow \text{Verification} \rightarrow \text{Verified Skill} \rightarrow \text{Skill Passport} \rightarrow \text{Eligibility} \rightarrow \text{Placement Decision}$$
 
-Following the M0 monorepo foundation and M1 multi-tenancy/security hardening, **Milestone M2 Phase 1: Exact Code Anchor Resolver (P0-05)** has been implemented, hardened against adversarial attacks, corrective-patched, and formally signed off with complete closure of all independent source review findings:
-- **Exact Code Anchor Contract:** Standardized `ExactCodeAnchor`, `SourceSnapshot`, `CodeSymbolLocation`, `ResolutionResult`, `AnchorResolutionStatus`, and `TrustedIngestionRecord` contracts in `@pramaan/contracts` with strict SHA-256 hash validation, UTF-8 byte offsets, blob identity, authoritative provenance flags, and snapshot metadata.
-- **Deterministic Offline Anchor Resolver:** Built `AnchorResolver` in `@pramaan/domain` enforcing authoritative raw-byte integrity (`hashRawBytes`), content-addressed snapshot matching, commit SHA verification, canonical file path verification, and line/byte-boundary span hashing. Validates UTF-8 character boundaries (rejecting offsets splitting multi-byte runes), enforces line/byte metadata consistency, detects line-ending drift (`\r\n` vs `\n`) separately from whitespace alterations, and verifies Git `blobSha` when present. Normalized hashing is computed purely as a diagnostic indicator and never overrides raw integrity failure.
-- **Student-Level Snapshot Partitioning & Cross-Student Isolation:** Extended snapshot lookup keys in `ISourceSnapshotStore` and `InMemorySourceSnapshotStore` to include `studentId`: `${orgId}:${studentId}:${repositoryId}:${commitSha}:${canonicalPath}` and content-hash keys to `${orgId}:${studentId}:${hash}`. `AnchorResolver.resolve()` verifies that student anchors require a matching `snapshot.studentId` (`STUDENT_OWNERSHIP_REQUIRED`), and cross-student mismatches fail closed with `STUDENT_OWNERSHIP_MISMATCH`. Cross-tenant mismatches fail closed with `CROSS_TENANT_ACCESS_REJECTED`. Intra-tenant student evidence substitution is physically impossible.
-- **Mutex-Serialized Registrations & Leak-Free Cleanup:** `AnchorService` serializes concurrent registration attempts for identical snapshot keys using an in-memory promise-queue mutex (`runWithLock`). Stores the exact queued promise so that map cleanup safely removes the entry when all waiters in the queue have completed, eliminating memory leaks and draining the queue map to zero. `deleteSnapshot` accepts `expectedSnapshotId` and executes conditional rollback: it only purges the stored snapshot if its stored ID matches the failed request's ID. Pre-existing snapshots (`wasAlreadyPresent === true`) are never rolled back. Rollback failures surface with cause preserved (`SNAPSHOT_REGISTRATION_FAILED_WITH_ROLLBACK_ERROR`).
-- **File-Level Trusted Ingestion Manifest Binding & Mandatory Git Blob SHA:** Extended `TrustedIngestionRecord` to include `treeSha: string` (40-char Git tree SHA) and `manifest: TrustedFileManifestEntry[]` (`filePath`, `blobSha`, `rawFileHash`, `byteSize`). Client registrations are permanently marked `provenance: 'unverified_client_input'` and `ingestionId: undefined`. Snapshots marked `trusted_ingestion_pipeline` strictly require a valid 40-character Git `blobSha` matching the manifest entry. Authoritative resolution fails closed if blobSha is missing or divergent.
-- **Write-Once Immutability for Trusted Ingestion Records:** `InMemoryTrustedIngestionStore.saveRecord` validates records with `TrustedIngestionRecordSchema`, canonicalizes manifest paths, rejects duplicate canonical paths (`DUPLICATE_MANIFEST_PATH`), accepts exact duplicates idempotently, and rejects replacement of existing records with different tree SHA, ingestion ID, owner, or manifest (`IMMUTABLE_INGESTION_RECORD_MUTATION_REJECTED`). `registerTrustedSnapshot` verifies snapshot agreement on `orgId`, `studentId`, `repositoryId`, `commitSha`, `filePath`, `blobSha`, and `rawFileHash`.
-- **Offline AST Symbol Parsing:** Implemented `TypeScriptAstParser` using the pinned `typescript` compiler API (`ts.createSourceFile`). Handles syntax errors gracefully, validates UTF-8 decoding strictly, extracts functions, methods, classes, and interfaces with exact UTF-8 byte ranges (converting from UTF-16 character indices), with zero untrusted code execution. Extensible via singleton `ParserRegistry` keyed on `(parserName, language, parserVersion)` to prevent historical parser replacement.
-- **Universal Student Ownership & DPDP Consent Enforcement:** Universal enforcement of trusted student ownership and active DPDP `repo_verification` consent across ALL caller roles (student, placement officer, system administrator) before storing snapshots or executing AST parsing. Parse endpoint `/api/evidence/parse` is strictly diagnostic (`diagnosticOnly: true, authoritative: false, provenance: 'diagnostic_parser'`).
-- **Separation of Trusted Ingestion Record Creation from Snapshot Registration:** `registerTrustedSnapshot` strictly requires an already-persisted `TrustedIngestionRecord` in `ITrustedIngestionStore` and never creates or mutates records from method arguments. It performs exhaustive field-by-field verification comparing the supplied record against the stored record (`ingestionId`, `orgId`, `repositoryId`, `commitSha`, `treeSha`, `studentId`, `verifiedAt`, `provenance`, and complete manifest array with each entry's `filePath`, `blobSha`, `rawFileHash`, `byteSize`). Client routes have zero capability to create or mutate trusted ingestion records.
-- **Enforced Consent Prior to Ingestion & Persistence:** Before ingesting or persisting student repository data, `registerTrustedSnapshot` verifies active, tenant-scoped student consent for `repo_verification` against an available `IConsentRepository`. Missing, revoked, or failing consent infrastructure strictly fails closed, preventing snapshot or ingestion persistence.
-- **Audit-Failure-Safe Trusted Snapshot Registration & Explicit Registration Commit State:** Registration is wrapped in the per-identity `runWithLock` mutex. Snapshots progress through an explicit lifecycle (`pending_audit` -> `audit_committed` / `quarantined`). In the event of audit logging failure, newly stored snapshots are quarantined immediately, followed by conditional rollback via `deleteSnapshot` (using exact `snapshot.snapshotId`). Even if storage deletion fails or throws, the quarantined state ensures unaudited snapshots can never resolve as authoritative (`REGISTRATION_NOT_AUDIT_COMMITTED`), while pre-existing audit-committed snapshots are preserved intact on duplicate attempts. Interrupted registrations can be retried and safely promoted to `audit_committed` upon verified audit persistence.
-- **100% Test Success Across Full Suite:** All 370 tests pass across 25 test files (including 59 pure domain anchor resolver tests, 80 anchor service & API tests, 112 general API/RBAC tests, and 78 live Supabase PostgreSQL 17 security tests).
+Following the M0 monorepo foundation, M1 multi-tenancy/security hardening, and M2 Phase 1 (P0-05 Exact Anchor Resolver), **Milestone M2 Phase 2: Trusted Static GitHub Repository Ingestion Pipeline (P0-04)** has been implemented end-to-end, subjected to independent security review and backend reliability/consent review, fully remediated, integrated with authoritative P0-05 resolution, and verified across all quality gates:
+- **Genuine GitHub OAuth Grant Revocation (Non-Blocking Outside DB Locks):** Implemented `revokeOAuthGrant(accessToken, signal)` on `IGitHubClient`, `DefaultGitHubClient`, and `MockGitHubClient`, issuing HTTP Basic-authenticated `DELETE /applications/{client_id}/grant` requests to the GitHub REST API. Provider-side revocation runs **strictly outside PostgreSQL transactions and row locks**, preventing connection pool exhaustion and database latency degradation. Local credentials, session tokens, and cached accounts are purged fail-closed with zero token leakage regardless of upstream HTTP network status.
+- **Active Consent Uniqueness & Partial Unique Index Invariants (Migration 013):** Migration `013_active_consent_uniqueness.sql` reconciles legacy active duplicate grants and establishes the partial unique index `uq_consent_grants_active_student_purpose ON consent_grants (student_id, purpose) WHERE revoked_at IS NULL`. `PgConsentRepository.grantConsent()` utilizes transaction-level PostgreSQL advisory locks (`pg_advisory_xact_lock(hashtext(student_id || ':' || purpose))`) to serialize concurrent requests, automatically transitioning prior active grants to revoked state before inserting the new active grant. `revokeConsent()` guarantees strictly zero active grants remain.
+- **Safe Canonical Repository Reconciliation & Data Loss Prevention (Migration 014):** Schema migration `014_safe_repository_reconciliation.sql` pre-flights and reconciles duplicate repositories on `(student_id, provider, provider_repo_id)`, safely re-parenting all dependent child records (`repo_snapshots`, `evidence_items`, `source_snapshots`, `trusted_ingestion_records`, `ingestion_jobs`) to the canonical repository (`imported_at ASC, id ASC`) while temporarily managing trigger `trg_trusted_ingestion_immutable`. Verifies zero duplicates remain before deleting redundant repository rows.
+- **Bounded GitHub Tree Traversal & Fail-Closed Rate Limiting:** Enforces strict execution bounds: `maxTreeEntries = 5000`, `maxDirectoryTraversals = 100`, `maxTreeApiRequests = 30`, `maxFiles = 200`, and `maxWallClockMs = 30000ms` with `AbortSignal`. Implements early termination: immediately terminates traversal upon detecting more than 200 eligible files (`FILE_COUNT_LIMIT_EXCEEDED`). Detects GitHub rate limits (HTTP 403/429) fail-closed (`GITHUB_RATE_LIMIT_EXCEEDED`). Zero manifests or snapshots are persisted upon limit breach.
+- **Ingestion Job Transitions on Revocation:** In `PgConsentRepository.revokeConsent()` and `cancelJobsForStudentOnRevocation()`, all in-progress jobs (`queued`, `resolving`, `fetching`, `verifying`, `persisted`) are transitioned to `status = 'failed'` with `error = 'CONSENT_REVOKED'` and `completed_at` set. Completed and already-failed jobs are strictly preserved for historical audit trails.
+- **Audit Actor Identity Preservation:** Disambiguated authenticated actor identity (`users.id`) from student owner identity (`students.id`). Augmented `SessionContext` with optional `actorUserId`. Audit events record `actorId = context.actorUserId ?? context.userId` (`users.id`) whether student- or officer-initiated, while snapshots and ingestion records are owned by `students.id`. Preserves all frozen P0-05 resolver invariants without modifying frozen files.
+- **Full Test Suite Success:** 516 tests pass across 29 test files (including 56 P0-04 ingestion integration tests, 72 durable PostgreSQL tests with all 12 blocks & Fixtures A–E, and 8 CI safety tests), with 0 ESLint errors, 0 TypeScript errors, and successful monorepo production build.
+- **Third Backend Hardening Pass (Revocation-Safe Re-Ingestion & Deterministic Gates):**
+  - *Quarantined Snapshot Write Bypass Eliminated:* `PgSourceSnapshotStore.saveSnapshot()` requires active consent under `FOR SHARE` row lock for all newly written snapshots; quarantined snapshots cannot be newly persisted following consent revocation. Quarantining existing records is restricted to `updateRegistrationState()`, which forbids promoting quarantined snapshots back to `audit_committed`.
+  - *Fresh Ingestion Under Re-Consent (Migration 015):* Implemented schema migration `015_consent_generation_and_fresh_reingestion.sql`, introducing `consent_grant_id` binding on `trusted_ingestion_records` and partial unique indexes `uq_trusted_ingestion_active_commit` (`WHERE status != 'revoked'`) and `uq_source_snapshots_active_commit_path` (`WHERE registration_state != 'quarantined'`). Preserves historical revoked records while allowing full re-ingestion of the same or new Git commit after re-consent.
+  - *Migration 011a Preflight Lifecycle Reconciliation:* Expanded preflight conflict assertions to include provenance equality, conservative quarantine propagation on duplicate snapshots, and fail-closed abortion on conflicting record statuses or consent grants.
+  - *Genuine Deterministic Concurrency Tests:* Zero `setTimeout` race manufacturing; Section 9 utilizes PostgreSQL lock detection via `pg_stat_activity` and explicit promise latches to verify lock contention, fail-closed ordering, audit promotion race, and cancellation races.
+  - *Strict State Machine Graph:* `createJob` rejects initial states other than `queued`. Exact transition graph (`queued -> resolving -> fetching -> verifying -> persisted -> completed`) enforced across both In-Memory and PostgreSQL repositories.
+- **Final Migration Integrity & Acceptance Pass:**
+  - *Migration 011a Checksum Immutability & Transition Checksum Support:* Restored `011a_safe_repository_preflight.sql` to canonical baseline (`4ad9489f...`) and established `HISTORICAL_MIGRATION_CHECKSUMS` in `scripts/migrate-supabase.mjs` to accept both canonical and transition commit hashes (`8cc43e72...`) without drift failure or manual ledger rewriting.
+  - *Migration 016 Safe Generation Reconciliation:* Authored forward-only migration `016_safe_generation_reconciliation.sql` after 015 to reconcile duplicate repositories with full consent-generation awareness, fail closed on ambiguous historical ownership (`NULL` consent grant with multiple candidate grants), preserve distinct generations and revoked history without deletion, and safely re-parent source snapshots.
+  - *Hardened Snapshot Immutability:* `PgSourceSnapshotStore.saveSnapshot()` rejects direct writes as `quarantined` or `audit_committed` (`INVALID_REGISTRATION_STATE`), enforces initial persistence as `pending_audit` with transitions via `updateRegistrationState()`, and strictly rejects re-saving or modifying quarantined snapshots (`IMMUTABLE_SNAPSHOT_MUTATION_REJECTED`).
+  - *Accurate Environment Attribution:* Clearly distinguished isolated PostgreSQL 17 Docker tests (`isolated-postgres-integration`) from remote live Supabase database verification.
+- **Migration Lifecycle Ordering & Historical Data Preservation Pass (Fixtures A–E):**
+  - *011a Preflight Generation-Aware Reconciliation:* Updated `011a_safe_repository_preflight.sql` to include `consent_grant_id` creation (Step 0), ambiguous consent detection fail-closed (Step 1), partial generational unique indexes (Step 2), cross-generation cryptographic equivalence pre-checks for same commit SHA (Step 4.B), non-destructive generation-aware re-parenting (Step 4.C), unlinked snapshot deduplication (Step 4.D), and zero duplicate repository assertions (Step 5).
+  - *Cross-Generation Cryptographic Equivalence:* Updated `016_safe_generation_reconciliation.sql` with cross-generation cryptographic divergence detection and fixed unlinked snapshot deduplication.
+  - *Full-Sequence Upgrade Fixtures (Section 12):* Verified all 5 upgrade fixtures in `db/tests/p0-04-pg-durable-repositories.test.ts` (Fixture A: distinct generations preserved without deletion; Fixture B: safe deduplication; Fixture C: divergent content aborts fail-closed; Fixture D: ambiguous consent aborts fail-closed; Fixture E: historical checksum upgrade succeeds cleanly).
 
 ---
 
@@ -32,37 +42,41 @@ Following the M0 monorepo foundation and M1 multi-tenancy/security hardening, **
 
 | Tier | Description | Files / Tests | Status |
 | :--- | :--- | :--- | :--- |
-| **Pure Unit Tests** | Pure domain logic: state machine, anchor hashing, exact code anchor resolver, student isolation, offline AST parsing, audit hash chaining, eligibility rules, 4/5ths fairness math. | 6 files, 100 tests | `UNIT_TESTED` (Passing in ~3s) |
-| **API, RBAC & Adversarial Tests** | Fastify HTTP endpoints, positive RBAC matrix, anchor resolution API, snapshot registration mutex with leak-free cleanup, conditional audit rollback, registration commit state lifecycle, quarantined fail-closed checks, file manifest provenance, mandatory Git blob SHA, pre-persisted trusted ingestion record separation, prior consent enforcement, audit-failure safety, student ownership/consent gates, email takeover prevention, fail-closed startup, strict claims validation, JWT test utilities, consent adversarial boundaries, audit concurrency & tenant consent, and administrative TLS/ledger integrity. | 14 files, 192 tests | `INTEGRATION_TESTED` (Passing in ~40s) |
-| **Live Database Tests** | Real PostgreSQL 17 on Supabase: RLS isolation, cross-tenant mutation rejection, triggers, constraints, DCL permissions, physical connection reuse via backend PID, restricted runtime user (`pramaan_app_user`), parent university discovery isolation, migration ledger idempotency, test safety guards, and genuine Supabase ES256 JWKS token validation. | 5 files, 78 tests | `SECURITY_VERIFIED` (Passing on live Supabase DB) |
-| **Total Suite** | Full monorepo test pack running under Vitest. | **25 files, 370 tests** | **100% Passing** |
+| **Pure Unit Tests** | Pure domain logic: state machine, anchor hashing, exact code anchor resolver, student isolation, offline AST parsing, Git object byte/SHA verification, audit hash chaining, eligibility rules, 4/5ths fairness math. | 7 files, 110 tests | `UNIT_TESTED` (Passing in ~3s) |
+| **API, RBAC & Adversarial Tests** | Fastify HTTP endpoints, positive RBAC matrix, anchor resolution API, snapshot registration mutex with leak-free cleanup, conditional audit rollback, registration commit state lifecycle, quarantined fail-closed checks, file manifest provenance, mandatory Git blob SHA, pre-persisted trusted ingestion record separation, prior consent enforcement, audit-failure safety, student ownership/consent gates, email takeover prevention, fail-closed startup, strict claims validation, JWT test utilities, consent adversarial boundaries, audit concurrency & tenant consent, GitHub OAuth PKCE S256, AES-256-GCM token cipher, static repository ingestion engine, bounded traversal, provider revocation, file filtering, limits, and administrative TLS/ledger integrity. | 15 files, 228 tests | `INTEGRATION_TESTED` (Passing in ~40s) |
+| **Live Database Tests** | Real PostgreSQL 17 on Supabase: RLS isolation (46 tables enabled and forced), cross-tenant mutation rejection, triggers, constraints, DCL permissions, physical connection reuse via backend PID, restricted runtime user (`pramaan_app_user`), parent university discovery isolation, migration ledger idempotency, test safety guards, durable PostgreSQL repository adapters (`PgSourceSnapshotStore`, `PgTrustedIngestionStore`, `PgGitHubCredentialRepository`, `PgIngestionJobRepository`, `PgRepositoryRepository`, active consent uniqueness via Migration 013, safe repository preflight via Migration 011a, safe repository reconciliation via Migration 014, consent generation and fresh re-ingestion via Migration 015, safe generation reconciliation via Migration 016, atomic database consent gates, hardened snapshot immutability, full migration lifecycle upgrade fixtures A–E, and job terminal state machines), and genuine Supabase ES256 JWKS token validation. | 7 files, 178 tests | `SECURITY_VERIFIED` (Passing on live Supabase DB) |
+| **Total Suite** | Full monorepo test pack running under Vitest. | **29 files, 516 tests** | **100% Passing** |
 
-### Complete Test Inventory (25 Files, 370 Tests)
+### Complete Test Inventory (29 Files, 516 Tests)
 1. `packages/domain/tests/exact-anchor-resolver.test.ts` (59 tests)
 2. `packages/domain/tests/skill-state-machine.test.ts` (8 tests)
 3. `packages/domain/tests/anchor-resolver.test.ts` (4 tests)
 4. `packages/domain/tests/audit-chain.test.ts` (19 tests)
 5. `packages/domain/tests/eligibility-evaluator.test.ts` (5 tests)
 6. `packages/domain/tests/fairness-calculator.test.ts` (5 tests)
-7. `apps/api/tests/anchor-service-and-api.test.ts` (80 tests)
-8. `apps/api/tests/m1-tenancy-rls.test.ts` (5 tests)
-9. `apps/api/tests/m1-audit-chain.test.ts` (3 tests)
-10. `apps/api/tests/m1-consent-ledger.test.ts` (3 tests)
-11. `apps/api/tests/auth-membership-tenant.test.ts` (13 tests)
-12. `apps/api/tests/api-endpoints.test.ts` (7 tests)
-13. `apps/api/tests/api-route-rbac.test.ts` (18 tests)
-14. `apps/api/tests/email-takeover-prevention.test.ts` (4 tests)
-15. `apps/api/tests/prod-fail-closed.test.ts` (15 tests)
-16. `apps/api/tests/consent-adversarial.test.ts` (7 tests)
-17. `apps/api/tests/audit-concurrency-and-consent.test.ts` (5 tests)
-18. `apps/api/tests/pg-auth-integration.test.ts` (2 tests)
-19. `apps/api/tests/real-supabase-jwt.test.ts` (21 tests)
-20. `apps/api/tests/restricted-runtime-user.test.ts` (9 tests)
-21. `db/tests/admin-tls-and-ledger.test.ts` (6 tests)
-22. `db/tests/connection-pool-reuse.test.ts` (1 test)
-23. `db/tests/test-safety-guard.test.ts` (47 tests)
-24. `db/tests/supabase-real-db.test.ts` (20 tests)
-25. `db/tests/migration-runner.test.ts` (4 tests)
+7. `packages/domain/tests/git-object.test.ts` (10 tests)
+8. `apps/api/tests/anchor-service-and-api.test.ts` (80 tests)
+9. `apps/api/tests/p0-04-github-ingestion.test.ts` (56 tests)
+10. `apps/api/tests/m1-tenancy-rls.test.ts` (5 tests)
+11. `apps/api/tests/m1-audit-chain.test.ts` (3 tests)
+12. `apps/api/tests/m1-consent-ledger.test.ts` (3 tests)
+13. `apps/api/tests/auth-membership-tenant.test.ts` (13 tests)
+14. `apps/api/tests/api-endpoints.test.ts` (7 tests)
+15. `apps/api/tests/api-route-rbac.test.ts` (18 tests)
+16. `apps/api/tests/email-takeover-prevention.test.ts` (4 tests)
+17. `apps/api/tests/prod-fail-closed.test.ts` (15 tests)
+18. `apps/api/tests/consent-adversarial.test.ts` (7 tests)
+19. `apps/api/tests/audit-concurrency-and-consent.test.ts` (5 tests)
+20. `apps/api/tests/pg-auth-integration.test.ts` (2 tests)
+21. `apps/api/tests/real-supabase-jwt.test.ts` (21 tests)
+22. `apps/api/tests/restricted-runtime-user.test.ts` (9 tests)
+23. `db/tests/admin-tls-and-ledger.test.ts` (6 tests)
+24. `db/tests/connection-pool-reuse.test.ts` (1 test)
+25. `db/tests/test-safety-guard.test.ts` (47 tests)
+26. `db/tests/supabase-real-db.test.ts` (20 tests)
+27. `db/tests/migration-runner.test.ts` (4 tests)
+28. `db/tests/p0-04-pg-durable-repositories.test.ts` (72 tests)
+29. `db/tests/workflow-ci-safety.test.ts` (8 tests)
 
 ---
 
@@ -72,7 +86,7 @@ Following the M0 monorepo foundation and M1 multi-tenancy/security hardening, **
 | :--- | :--- | :--- | :--- |
 | **M0** | Workspace & Foundation Setup | Monorepo layout, TS configs, linting, test runner, core domain types | `IMPLEMENTED` / `UNIT_TESTED` |
 | **M1** | Tenancy, Auth & Consent Ledger | P0-01, P0-02, P0-03 (RLS, audit chain, purpose consent, real Supabase auth, RBAC) | `IMPLEMENTED` / `SECURITY_VERIFIED` |
-| **M2** | Code Archaeology & Evidence Graph | P0-04, P0-05, P0-06 (P0-05 Anchor resolver completed, hardened & core frozen; P0-04 static ingest and P0-06 lab queue pending) | `IN_PROGRESS` (P0-05 FROZEN) |
+| **M2** | Code Archaeology & Evidence Graph | P0-04, P0-05, P0-06 (P0-04 Static Ingestion & P0-05 Anchor Resolver completed & hardened; P0-06 lab queue next) | `IN_PROGRESS` (P0-04 & P0-05 COMPLETED) |
 | **M3** | Skill Verification Arena & Probe | P0-07, P0-08, P0-09, P0-10 (Skill state machine, grounded viva, runner, rubric) | `NOT_STARTED` |
 | **M4** | Skill Passport & Recruiter Discovery | P0-11, P0-12, P1-10 (Evidence card, passport verifier, role gap matcher) | `NOT_STARTED` |
 | **M5** | Placement Engine & Fairness Simulator | P0-14, P0-15, P1-04, P1-05 (Deterministic eligibility, what-if simulator, drive allocations) | `NOT_STARTED` |
