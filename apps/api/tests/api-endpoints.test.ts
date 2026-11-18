@@ -107,6 +107,18 @@ describe('PRAMAAN Fastify HTTP Endpoints: Authentication & RBAC Authorization', 
     });
   });
 
+  it('0. GET /api/me requires a session and returns the role-based workspace', async () => {
+    const unauth = await app.inject({ method: 'GET', url: '/api/me' });
+    expect(unauth.statusCode).toBe(401);
+
+    const student = await app.inject({ method: 'GET', url: '/api/me', headers: { authorization: `Bearer ${studentToken}` } });
+    expect(student.statusCode).toBe(200);
+    expect(JSON.parse(student.payload)).toEqual({ userId: studentUserId, orgId: apexOrgId, role: 'student', workspace: 'student' });
+
+    const tpo = await app.inject({ method: 'GET', url: '/api/me', headers: { authorization: `Bearer ${tpoToken}` } });
+    expect(JSON.parse(tpo.payload).workspace).toBe('tpo');
+  });
+
   it('1. GET /health is public and returns healthy status without credentials', async () => {
     const res = await app.inject({
       method: 'GET',

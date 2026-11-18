@@ -36,7 +36,7 @@ function GitHubCallbackContent() {
     if (!code || !state) {
       setCallbackState({
         status: 'error',
-        error: 'Missing required OAuth parameters: code and state must be present in the callback URL.',
+        error: 'This link is missing information from GitHub. Please go back and try connecting again.',
       });
       return;
     }
@@ -63,7 +63,7 @@ function GitHubCallbackContent() {
       setCallbackState({
         status: 'error',
         error:
-          'No authenticated session found. Please sign in to PRAMAAN before completing GitHub connection.',
+          'You are not signed in. Please sign in to PRAMAAN and try connecting GitHub again.',
       });
       return;
     }
@@ -109,9 +109,9 @@ function GitHubCallbackContent() {
 
   return (
     <div style={{ maxWidth: '600px', margin: '4rem auto', padding: '2rem', border: '1px solid #e2e8f0', borderRadius: '8px' }}>
-      <h2 style={{ marginBottom: '1rem' }}>GitHub Integration Callback</h2>
+      <h2 style={{ marginBottom: '1rem' }}>Connecting GitHub</h2>
       {callbackState.status === 'processing' && (
-        <p>Verifying GitHub authorization and completing secure connection...</p>
+        <p>Connecting your GitHub account. Please wait.</p>
       )}
       {callbackState.status === 'success' && (
         <div>
@@ -125,7 +125,7 @@ function GitHubCallbackContent() {
       )}
       {callbackState.status === 'error' && (
         <div>
-          <p style={{ color: '#dc2626', fontWeight: 'bold' }}>Connection Failed</p>
+          <p style={{ color: '#dc2626', fontWeight: 'bold' }}>Could not connect GitHub</p>
           <p>{callbackState.error}</p>
         </div>
       )}
@@ -135,7 +135,7 @@ function GitHubCallbackContent() {
 
 export default function GitHubCallbackPage() {
   return (
-    <Suspense fallback={<div style={{ padding: '2rem' }}>Loading callback handler...</div>}>
+    <Suspense fallback={<div style={{ padding: '2rem' }}>Loading...</div>}>
       <GitHubCallbackContent />
     </Suspense>
   );

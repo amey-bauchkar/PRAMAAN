@@ -1,93 +1,201 @@
 import { createHash } from 'crypto';
 import {
   EligibilityRuleVersion,
+  EligibilityRuleSpec,
+  EligibilityRuleSpecSchema,
   StudentAcademicSnapshot,
   EligibilityEvaluationResult,
-  ReasonCode
+  EligibilityCheck,
+  EligibilityStatus,
+  ReasonCode,
+  meetsMinProof,
 } from '@pramaan/contracts';
 
+export interface EvaluationOptions {
+  /** Skills must still be valid on this date. Defaults to `now`. */
+  driveStartsAt?: string;
+  /** Clock override for deterministic results. */
+  now?: string;
+}
+
+/** Deterministic JSON: object keys sorted, so the same input always hashes the same. */
+export function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const obj = value as Record<string, unknown>;
+  return `{${Object.keys(obj).sort().filter(k => obj[k] !== undefined).map(k => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
+}
+
+const fmtInr = (n: number) => `₹${n.toLocaleString('en-IN')}`;
+
 export class EligibilityEvaluator {
-  /**
-   * Generates a deterministic SHA-256 fingerprint of the input snapshot and rule specification.
-   */
-  public static computeInputHash(snapshot: StudentAcademicSnapshot, ruleVersionId: string): string {
-    const payload = JSON.stringify({
-      studentId: snapshot.studentId,
-      cgpa: snapshot.cgpa,
-      activeBacklogs: snapshot.activeBacklogs,
-      branch: snapshot.branch,
-      graduatingYear: snapshot.graduatingYear,
-      verifiedSkills: [...snapshot.verifiedSkillNames].sort(),
-      ruleVersionId
-    });
-    return createHash('sha256').update(payload, 'utf8').digest('hex');
+  /** SHA-256 over the full input snapshot, the rule version id and the rule content. */
+  public static computeInputHash(snapshot: StudentAcademicSnapshot, ruleVersionId: string, rules?: EligibilityRuleSpec): string {
+    const canonical = {
+      ...snapshot,
+      skills: [...(snapshot.skills ?? [])].sort((a, b) => a.skillId.localeCompare(b.skillId)),
+      ruleVersionId,
+      rules: rules ?? null,
+    };
+    return createHash('sha256').update(stableStringify(canonical), 'utf8').digest('hex');
   }
 
   /**
-   * Pure evaluation function computing student eligibility against a versioned rule.
+   * Pure, deterministic evaluation of one student against one immutable rule version.
+   * Result is three-valued: a failed rule → ineligible; otherwise any unknown → needs_review; else eligible.
    */
   public static evaluate(
     snapshot: StudentAcademicSnapshot,
-    ruleVersion: EligibilityRuleVersion
+    ruleVersion: EligibilityRuleVersion,
+    options: EvaluationOptions = {}
   ): EligibilityEvaluationResult {
-    const rules = ruleVersion.rules;
-    const reasonCodes: ReasonCode[] = [];
+    const rules = EligibilityRuleSpecSchema.parse(ruleVersion.rules);
+    const nowIso = options.now ?? new Date().toISOString();
+    const checkDate = Date.parse(options.driveStartsAt ?? nowIso);
+    const checks: EligibilityCheck[] = [];
     const missingSkills: string[] = [];
 
-    // 1. CGPA Check
-    if (snapshot.cgpa < rules.minCgpa) {
-      reasonCodes.push('INSUFFICIENT_CGPA');
-    }
+    type Vars = Record<string, string | number>;
+    const add = (id: string, passed: boolean | null, reasonCode: ReasonCode | null, message: string, actionableByProof = false, key?: string, vars: Vars = {}) =>
+      checks.push({ id, passed, reasonCode: passed === true ? null : reasonCode, message, actionableByProof, ...(key ? { t: { key, vars } } : {}) });
 
-    // 2. Backlogs Check
-    if (snapshot.activeBacklogs > rules.maxBacklogs) {
-      reasonCodes.push('EXCESSIVE_BACKLOGS');
+    // Academics
+    const a = rules.academics;
+    if (a.minCgpa !== undefined) {
+      if (snapshot.cgpa === null) add('academics.minCgpa', null, 'MISSING_DATA', `CGPA is not on record, so an officer must review (required ${a.minCgpa}).`, false, 'cgpa.missing', { req: a.minCgpa });
+      else {
+        const ok = snapshot.cgpa >= a.minCgpa;
+        add('academics.minCgpa', ok, 'INSUFFICIENT_CGPA',
+          ok ? `CGPA ${snapshot.cgpa} meets the minimum ${a.minCgpa}.` : `CGPA ${snapshot.cgpa} is below the minimum ${a.minCgpa}.`, false, ok ? 'cgpa.pass' : 'cgpa.fail', { v: snapshot.cgpa, req: a.minCgpa });
+      }
     }
-
-    // 3. Branch Check (if allowedBranches is non-empty)
-    if (rules.allowedBranches.length > 0) {
-      const branchAllowed = rules.allowedBranches.some(
-        (b: string) => b.trim().toLowerCase() === snapshot.branch.trim().toLowerCase()
-      );
-      if (!branchAllowed) {
-        reasonCodes.push('BRANCH_INELIGIBLE');
+    if (a.minTenthPct !== undefined) {
+      const v = snapshot.tenthPct;
+      if (v === null) add('academics.minTenthPct', null, 'MISSING_DATA', `10th marks are not on record, so an officer must review.`, false, 'tenth.missing');
+      else {
+        const ok = v >= a.minTenthPct;
+        add('academics.minTenthPct', ok, 'INSUFFICIENT_TENTH_PCT',
+          ok ? `10th marks ${v}% meet the minimum ${a.minTenthPct}%.` : `10th marks ${v}% are below the minimum ${a.minTenthPct}%.`, false, ok ? 'tenth.pass' : 'tenth.fail', { v, req: a.minTenthPct });
+      }
+    }
+    if (a.minTwelfthOrDiplomaPct !== undefined) {
+      const options12 = [snapshot.twelfthPct, snapshot.diplomaPct].filter((x): x is number => x !== null);
+      if (options12.length === 0) add('academics.minTwelfthOrDiplomaPct', null, 'MISSING_DATA', `12th / diploma marks are not on record, so an officer must review.`, false, 'twelfth.missing');
+      else {
+        const best = Math.max(...options12);
+        const ok = best >= a.minTwelfthOrDiplomaPct;
+        add('academics.minTwelfthOrDiplomaPct', ok, 'INSUFFICIENT_TWELFTH_OR_DIPLOMA_PCT',
+          ok ? `12th / diploma marks ${best}% meet the minimum ${a.minTwelfthOrDiplomaPct}%.` : `12th / diploma marks ${best}% are below the minimum ${a.minTwelfthOrDiplomaPct}%.`, false, ok ? 'twelfth.pass' : 'twelfth.fail', { v: best, req: a.minTwelfthOrDiplomaPct });
+      }
+    }
+    if (a.maxGapYears !== undefined) {
+      const g = snapshot.gapYears;
+      if (g === null) add('academics.maxGapYears', null, 'MISSING_DATA', `Education gap is not on record, so an officer must review.`, false, 'gap.missing');
+      else {
+        const ok = g <= a.maxGapYears;
+        add('academics.maxGapYears', ok, 'EXCESSIVE_GAP_YEARS',
+          ok ? `Education gap of ${g} year(s) is within the limit of ${a.maxGapYears}.` : `Education gap of ${g} year(s) exceeds the limit of ${a.maxGapYears}.`, false, ok ? 'gap.pass' : 'gap.fail', { v: g, req: a.maxGapYears });
       }
     }
 
-    // 4. Graduating Year Check (if graduatingYears is non-empty)
+    // Backlogs
+    const b = rules.backlogs;
+    if (b.maxActive !== undefined) {
+      const v = snapshot.activeBacklogs;
+      if (v === null) add('backlogs.maxActive', null, 'MISSING_DATA', `Active backlogs are not on record, so an officer must review.`, false, 'active.missing');
+      else {
+        const ok = v <= b.maxActive;
+        add('backlogs.maxActive', ok, 'EXCESSIVE_BACKLOGS',
+          ok ? `${v} active backlog(s), within the limit of ${b.maxActive}.` : `${v} active backlog(s); the limit is ${b.maxActive}.`, false, ok ? 'active.pass' : 'active.fail', { v, req: b.maxActive });
+      }
+    }
+    if (b.maxHistory !== undefined) {
+      const v = snapshot.backlogHistory;
+      if (v === null) add('backlogs.maxHistory', null, 'MISSING_DATA', `Backlog history is not on record, so an officer must review.`, false, 'history.missing');
+      else {
+        const ok = v <= b.maxHistory;
+        add('backlogs.maxHistory', ok, 'EXCESSIVE_BACKLOG_HISTORY',
+          ok ? `${v} past backlog(s), within the limit of ${b.maxHistory}.` : `${v} past backlog(s); the limit is ${b.maxHistory}.`, false, ok ? 'history.pass' : 'history.fail', { v, req: b.maxHistory });
+      }
+    }
+
+    // Branch and year
+    if (rules.branches.length > 0) {
+      const ok = rules.branches.some(x => x.trim().toLowerCase() === snapshot.branch.trim().toLowerCase());
+      add('branch', ok, 'BRANCH_INELIGIBLE', ok ? `Branch ${snapshot.branch} is eligible.` : `Branch ${snapshot.branch} is not in the eligible list (${rules.branches.join(', ')}).`,
+        false, ok ? 'branch.pass' : 'branch.fail', { v: snapshot.branch, list: rules.branches.join(', ') });
+    }
     if (rules.graduatingYears.length > 0) {
-      if (!rules.graduatingYears.includes(snapshot.graduatingYear)) {
-        reasonCodes.push('GRADUATION_YEAR_MISMATCH');
+      const ok = rules.graduatingYears.includes(snapshot.graduatingYear);
+      add('graduatingYear', ok, 'GRADUATION_YEAR_MISMATCH', ok ? `Graduating year ${snapshot.graduatingYear} is eligible.` : `Graduating year ${snapshot.graduatingYear} is not in ${rules.graduatingYears.join(', ')}.`,
+        false, ok ? 'year.pass' : 'year.fail', { v: snapshot.graduatingYear, list: rules.graduatingYears.join(', ') });
+    }
+
+    // Skills: matched by id, with level, proof level and validity at the drive date.
+    for (const req of rules.skills) {
+      const id = `skills.${req.skillId}`;
+      const s = (snapshot.skills ?? []).find(x => x.skillId === req.skillId);
+      const want = `${req.name} (level ${req.minLevel}, proof ≥ ${req.minProof})`;
+      const sv = { skill: req.name, level: req.minLevel, proof: req.minProof };
+      if (!s || s.state !== 'verified') {
+        missingSkills.push(req.name);
+        add(id, false, 'MISSING_REQUIRED_VERIFIED_SKILLS', `${want} is required; it is ${s ? s.state.replace('_', '-') : 'not on your profile'}.`, true, 'skill.missing', { ...sv, state: s ? s.state : 'none' });
+      } else if ((s.level ?? 1) < req.minLevel) {
+        missingSkills.push(req.name);
+        add(id, false, 'SKILL_LEVEL_TOO_LOW', `${req.name} is Verified at level ${s.level ?? 1}; this drive needs level ${req.minLevel}.`, true, 'skill.level', { ...sv, have: s.level ?? 1 });
+      } else if (!meetsMinProof(s.proofLevel, req.minProof)) {
+        missingSkills.push(req.name);
+        add(id, false, 'SKILL_PROOF_LEVEL_TOO_LOW', `${req.name} is Verified at ${s.proofLevel ?? 'an unknown level'}; this drive needs proof ≥ ${req.minProof}.`, true, 'skill.proof', { ...sv, have: s.proofLevel ?? '?' });
+      } else if (s.validUntil && Date.parse(s.validUntil) < checkDate) {
+        missingSkills.push(req.name);
+        add(id, false, 'SKILL_EXPIRES_BEFORE_DRIVE', `${req.name} proof expires on ${s.validUntil.slice(0, 10)}, before the drive. Re-verify to stay eligible.`, true, 'skill.expires', { ...sv, date: s.validUntil.slice(0, 10) });
+      } else {
+        add(id, true, null, `${req.name} is Verified (${s.proofLevel}) and meets the requirement.`, false, 'skill.pass', { ...sv, have: s.proofLevel ?? '' });
       }
     }
 
-    // 5. Required Verified Skills Check
-    if (rules.requiredSkills.length > 0) {
-      const verifiedSet = new Set(snapshot.verifiedSkillNames.map((s: string) => s.trim().toLowerCase()));
-      for (const requiredSkill of rules.requiredSkills) {
-        if (!verifiedSet.has(requiredSkill.trim().toLowerCase())) {
-          missingSkills.push(requiredSkill);
-        }
-      }
-      if (missingSkills.length > 0) {
-        reasonCodes.push('MISSING_REQUIRED_VERIFIED_SKILLS');
-      }
+    // Placement policy limits
+    const p = rules.policy;
+    if (p.maxOffersHeld !== undefined) {
+      const ok = snapshot.offersHeld <= p.maxOffersHeld;
+      add('policy.maxOffersHeld', ok, 'OFFER_LIMIT_REACHED', ok ? `Offer policy allows you to apply.` : `You already hold ${snapshot.offersHeld} offer(s); policy allows ${p.maxOffersHeld}.`,
+        false, ok ? 'offers.pass' : 'offers.fail', { v: snapshot.offersHeld, req: p.maxOffersHeld });
+    }
+    if (p.blockIfPlacedAtOrAboveCtcInr !== undefined && snapshot.highestOfferCtcInr !== null) {
+      const ok = snapshot.highestOfferCtcInr < p.blockIfPlacedAtOrAboveCtcInr;
+      add('policy.placedCtc', ok, 'ALREADY_PLACED_AT_OR_ABOVE_CTC',
+        ok ? `Your current offer is below the ${fmtInr(p.blockIfPlacedAtOrAboveCtcInr)} threshold, so you may apply.` : `You are placed at ${fmtInr(snapshot.highestOfferCtcInr)}; this drive is open only below ${fmtInr(p.blockIfPlacedAtOrAboveCtcInr)}.`,
+        false, ok ? 'ctc.pass' : 'ctc.fail', { v: fmtInr(snapshot.highestOfferCtcInr), req: fmtInr(p.blockIfPlacedAtOrAboveCtcInr) });
     }
 
-    const eligible = reasonCodes.length === 0;
-    if (eligible) {
-      reasonCodes.push('CRITERIA_MET');
+    if (snapshot.disciplinaryHold) {
+      add('hold.disciplinary', null, 'DISCIPLINARY_HOLD', `A hold is on record; an officer must review before you can apply.`, false, 'hold');
     }
+
+    const status: EligibilityStatus = checks.some(c => c.passed === false)
+      ? 'ineligible'
+      : checks.some(c => c.passed === null) ? 'needs_review' : 'eligible';
+
+    const reasonCodes = status === 'eligible'
+      ? (['CRITERIA_MET'] as ReasonCode[])
+      : [...new Set(checks.filter(c => c.passed !== true && c.reasonCode).map(c => c.reasonCode as ReasonCode))];
 
     return {
-      eligible,
-      status: eligible ? 'eligible' : 'ineligible',
+      eligible: status === 'eligible',
+      status,
       reasonCodes,
+      checks,
       missingSkills,
       ruleVersionId: ruleVersion.id,
-      evaluatedAt: new Date().toISOString(),
-      inputHash: this.computeInputHash(snapshot, ruleVersion.id)
+      evaluatedAt: nowIso,
+      inputHash: this.computeInputHash(snapshot, ruleVersion.id, rules),
     };
   }
-}
 
+  /** Plain-language explanation lines, failures first. */
+  public static explain(result: EligibilityEvaluationResult): string[] {
+    const order = (c: EligibilityCheck) => (c.passed === false ? 0 : c.passed === null ? 1 : 2);
+    return [...result.checks].sort((x, y) => order(x) - order(y)).map(c =>
+      `${c.passed === true ? 'Pass' : c.passed === false ? 'Fail' : 'Review'}: ${c.message}`);
+  }
+}

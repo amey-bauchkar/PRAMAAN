@@ -1,0 +1,101 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* PRAMAAN design tokens (RGB triplets so Tailwind can apply opacity). Light, white-first, orange accent. */
+:root {
+  --ink: 10 10 10;
+  --ink-2: 30 30 30;
+  --paper: 255 255 255;
+  --card: 250 249 247;
+  --line: 232 229 224;
+  --muted: 88 88 88;
+  --brand: 254 79 2;       /* #FE4F02 */
+  --accent: 255 178 127;   /* #FFB27F */
+  color-scheme: light;
+}
+
+html, body {
+  background: rgb(var(--paper));
+  color: rgb(var(--ink));
+}
+
+/* Headings: light weight, tight tracking. */
+h1, h2, h3, .font-display {
+  font-weight: 300;
+  letter-spacing: -0.035em;
+  line-height: 1.04;
+}
+h1 { letter-spacing: -0.035em; }
+
+:focus-visible {
+  outline: 2px solid rgb(var(--brand));
+  outline-offset: 2px;
+}
+
+/* Lenis recommended base styles. */
+html.lenis, html.lenis body { height: auto; }
+.lenis.lenis-smooth { scroll-behavior: auto !important; }
+.lenis.lenis-smooth [data-lenis-prevent] { overscroll-behavior: contain; }
+.lenis.lenis-stopped { overflow: hidden; }
+
+@layer components {
+  /* Orange gradient pill used for primary actions. */
+  .btn-brand {
+    background-image: linear-gradient(rgb(255 122 61), rgb(254 79 2));
+    color: #fff;
+    border-radius: 14px;
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.45), inset 0 -2px 0 rgb(0 0 0 / 0.12), 0 6px 16px rgb(254 79 2 / 0.35);
+    transition: transform .2s ease, box-shadow .2s ease;
+  }
+  .btn-brand:hover { transform: translateY(-1px); box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.45), inset 0 -2px 0 rgb(0 0 0 / 0.12), 0 10px 22px rgb(254 79 2 / 0.4); }
+  /* Soft orange hero panel. */
+  .hero-panel {
+    background:
+      radial-gradient(55% 45% at 72% 22%, rgb(255 178 127) 0%, transparent 70%),
+      radial-gradient(60% 50% at 25% 100%, rgb(201 58 0) 0%, transparent 70%),
+      linear-gradient(145deg, rgb(255 178 127), rgb(254 90 14) 50%, rgb(201 58 0));
+  }
+  .pill-nav { background: rgb(0 0 0 / 0.05); border-radius: 9999px; }
+}
+
+/* Landing page motion. */
+.reveal { opacity: 0; transform: translateY(24px); transition: opacity .8s cubic-bezier(.2,.7,.2,1), transform .8s cubic-bezier(.2,.7,.2,1); }
+.reveal-in { opacity: 1; transform: none; }
+@keyframes float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
+@keyframes marquee { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+@keyframes pulse-ring { 0% { box-shadow: 0 0 0 0 rgb(254 79 2 / .45); } 100% { box-shadow: 0 0 0 14px rgb(254 79 2 / 0); } }
+@keyframes grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes spin-rev { to { transform: rotate(-360deg); } }
+@keyframes dot-fill { 0%, 100% { opacity: .25; } 40% { opacity: 1; } }
+.orbit-ring { animation: spin linear infinite; will-change: transform; }
+.orbit-paused .orbit-ring, .orbit-paused .orbit-chip, .orbit-paused .dot-fill { animation-play-state: paused; }
+.orbit-chip { animation: spin-rev linear infinite; }
+.dot-fill { animation: dot-fill 2.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .orbit-ring, .orbit-chip, .dot-fill { animation: none; } }
+.float-a { animation: float 7s ease-in-out infinite; }
+.float-b { animation: float 9s ease-in-out -3s infinite; }
+.marquee-track { animation: marquee 38s linear infinite; width: max-content; }
+.dot-live { animation: pulse-ring 1.8s ease-out infinite; }
+.grow-bar { transform-origin: left; animation: grow 1.4s .3s cubic-bezier(.2,.7,.2,1) both; }
+.grid-fade {
+  background-image: linear-gradient(rgb(0 0 0 / .05) 1px, transparent 1px), linear-gradient(90deg, rgb(0 0 0 / .05) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(70% 60% at 50% 0%, #000 30%, transparent 75%);
+}
+@media (prefers-reduced-motion: reduce) {
+  .reveal { opacity: 1; transform: none; transition: none; }
+  .float-a, .float-b, .marquee-track, .dot-live, .grow-bar { animation: none; }
+}
+
+/* Chart series colours (dataviz reference palette, validated for CVD and contrast). */
+.viz-root, :root { --series-1: #2a78d6; --series-2: #eb6834; }
+
+@media print {
+  .no-print { display: none !important; }
+  html, body { background: #fff !important; color: #000 !important; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .btn-brand { transition: none; }
+}
