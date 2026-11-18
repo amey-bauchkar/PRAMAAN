@@ -4,6 +4,29 @@
 
 ---
 
+## 0. What is real today and what is not (18 Nov 2026)
+
+Checked against the code and the offline tests. Anything not listed as real is not claimed in the product.
+
+| Area | State |
+|---|---|
+| Bulk mail (AD-05) | Real SMTP sending through nodemailer when SMTP_HOST is set, limited to MAIL_RATE_PER_MINUTE per call. A message shows Sent only after the server accepts it. Without SMTP_HOST messages stay in the outbox and the screen says so. Replies are recorded by hand (no inbox reading). |
+| Calendar (BR-09, AD-06) | Rooms, interview panels and students cannot be double-booked: the database refuses overlaps. Drives, companies and interview slots can be created in the product. Company email parsing uses simple rules, not a language model. |
+| Interview scoring (ST-05 round 3) | Keyword rubric by default. With ANTHROPIC_API_KEY set, a model judges which key points an answer covers and the score is the share covered; every result records which scorer ran. Students can ask a person to review, and a person can change the score. |
+| Agents | Rule-based helpers that only create proposals (model version deterministic-rules-v1). There is no language model behind them. |
+| GitHub import (ST-02) | Read-only OAuth, hardened ingestion (tested against a mocked GitHub, not a live one), and imported files become Evidence-linked skills. They do not become Verified without a test, the code check or a mentor. |
+| Code ownership check (BR-15) | Runs on seeded sample code, JavaScript only. It is not generated from a student's own imported repository yet. |
+| Consent withdrawal (BR-13) | Demotes skills, seals snapshots, stops running import jobs and asks GitHub to revoke the grant when GitHub is configured. |
+| Data requests (ST-08) | Officers see a queue. Completing an erasure request removes identity and free text (migration 028). Retention periods are shown but there is no automatic purge job yet. |
+| Audit log (BR-16) | Hash-chained, append-only, and checkable from the Team page. Read-only practice calls (for example running example tests) are not logged. |
+| Exports (AD-11) | A real .xlsx workbook and a CSV. These are not the official NAAC or NIRF templates. |
+| Predictive analytics (AD-03) | A transparent weighted formula with an interval, not a trained model. |
+| Taxonomy (BR-04) | ESCO and O*NET labels are seeded as pending review. |
+| Demo data | Synthetic and labelled. LeetCode and Codeforces checks are simulated in the demo. |
+| Not integrated | DigiLocker, APAAR, NAD, Bhashini and live GitHub were not exercised. |
+
+
+
 ## 1. AI & Verification Boundaries
 
 1. **No AI Authorship / Cheating Detection:** PRAMAAN does not claim to detect whether code was written by AI, Copilot, or another human. Git commit timestamps and authorship history are treated as unverified claims. Verification relies exclusively on the student's ability to defend the code in a grounded viva and pass live functional modification probes.

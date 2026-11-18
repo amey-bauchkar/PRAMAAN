@@ -34,6 +34,7 @@ export class ConsentService {
   private connectedTokens: Map<string, ConnectedToken> = new Map();
   private evidenceItems: Map<string, EvidenceItem> = new Map();
   private studentSkills: Map<string, StudentSkill> = new Map();
+  private skillEvidenceLinks: Map<string, Set<string>> = new Map();
   private providerRevocationHandler?: (studentId: string) => Promise<{
     status: 'confirmed' | 'failed' | 'local_only';
     error?: string;
@@ -56,6 +57,13 @@ export class ConsentService {
 
   public registerStudentSkill(skill: StudentSkill) {
     this.studentSkills.set(skill.id, skill);
+  }
+
+  /** Records which evidence items support a skill, so revocation only demotes skills that relied on them. */
+  public linkSkillEvidence(studentSkillId: string, evidenceId: string) {
+    const set = this.skillEvidenceLinks.get(studentSkillId) ?? new Set<string>();
+    set.add(evidenceId);
+    this.skillEvidenceLinks.set(studentSkillId, set);
   }
 
   public getGrant(grantId: string): ConsentGrant | undefined {
@@ -245,22 +253,43 @@ export class ConsentService {
         }
       }
 
-      // 4. Downgrade Skills relying solely on withdrawn evidence
+      // 4. Downgrade skills that depended on the withdrawn repository evidence.
+      //    A skill with other accepted evidence (certificate, lab, test result) drops to evidence_linked;
+      //    a skill with nothing left drops to claimed. Skills with no registered links are treated as
+      //    repository-derived (fail closed).
       for (const skill of this.studentSkills.values()) {
-        if (skill.studentId === grant.studentId && (skill.state === 'evidence_linked' || skill.state === 'verified')) {
-          const transitionRes = SkillStateMachine.transition({
-            studentSkillId: skill.id,
-            currentState: skill.state,
-            targetState: 'claimed',
-            actorType: 'evaluator_service',
-            reasonCode: 'EVIDENCE_WITHDRAWN_CONSENT_REVOKED',
-            acceptedEvidence: [] // All repo evidence withdrawn
-          });
+        if (skill.studentId !== grant.studentId) continue;
+        if (skill.state !== 'evidence_linked' && skill.state !== 'verified') continue;
 
-          if (transitionRes.success) {
-            skill.state = 'claimed';
-            downgradedSkillsCount += 1;
-          }
+        const linkedIds = this.skillEvidenceLinks.get(skill.id);
+        const remaining = linkedIds
+          ? [...linkedIds]
+              .map(id => this.evidenceItems.get(id))
+              .filter((e): e is EvidenceItem => !!e && e.status === 'accepted')
+          : [];
+        const usedRepoEvidence = !linkedIds || [...linkedIds].some(id => {
+          const e = this.evidenceItems.get(id);
+          return !!e && (e.kind === 'code_span' || e.kind === 'commit');
+        });
+        if (!usedRepoEvidence) continue;
+
+        const targetState = remaining.length > 0 ? 'evidence_linked' : 'claimed';
+        if (skill.state === targetState) continue;
+
+        const transitionRes = SkillStateMachine.transition({
+          studentSkillId: skill.id,
+          studentId: skill.studentId,
+          currentState: skill.state,
+          targetState,
+          actorType: 'evaluator_service',
+          reasonCode: 'EVIDENCE_WITHDRAWN_CONSENT_REVOKED',
+          acceptedEvidence: remaining
+        });
+
+        if (transitionRes.success) {
+          skill.state = targetState;
+          skill.proofLevel = null;
+          downgradedSkillsCount += 1;
         }
       }
 

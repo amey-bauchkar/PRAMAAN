@@ -3,7 +3,15 @@
   "compilerOptions": {
     "composite": false
   },
-  "include": ["packages/**/*", "apps/**/*", "db/**/*"],
-  "exclude": ["node_modules", "dist", ".next"]
+  "include": [
+    "packages/**/*",
+    "apps/**/*",
+    "db/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    ".next",
+    "apps/web"
+  ]
 }
-

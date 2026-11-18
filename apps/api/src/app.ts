@@ -1,5 +1,7 @@
 import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
+import helmet from '@fastify/helmet';
+import { installRateLimit } from './v2/rate-limit.js';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import { TenantStore } from './services/tenant-store.js';
@@ -48,6 +50,7 @@ import { ITokenCipher, AesGcmTokenCipher } from './services/token-cipher.js';
 import { GitHubAccountService } from './services/github-account-service.js';
 import { StaticRepoIngestionService } from './services/static-repo-ingestion-service.js';
 import { getDbPool } from './db/pool.js';
+import { registerV2, V2Deps } from './v2/index.js';
 
 export interface AppOptions {
   persistenceMode?: 'postgres' | 'in-memory';
@@ -68,6 +71,8 @@ export interface AppOptions {
   repositoryRepository?: IRepositoryRepository;
   githubOAuthRedirectUri?: string;
   githubOAuthRedirectAllowlist?: string[];
+  /** v2 product modules (student, placement office, recruiter, university). */
+  v2?: V2Deps;
   // Legacy / convenience options for tests:
   tenantStore?: TenantStore;
   auditService?: AuditService;
@@ -158,7 +163,12 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     activePersistenceMode = 'in-memory';
   }
 
-  const app = Fastify({ logger: false }) as FastifyInstance & { persistenceMode?: 'postgres' | 'in-memory' };
+  // Structured logs in production with credentials redacted; silent in tests.
+  const app = Fastify({
+    logger: isProduction ? { level: process.env.LOG_LEVEL ?? 'info', redact: ['req.headers.authorization', 'req.headers.cookie', 'req.body.code', 'req.body.answer', 'req.body.answers'] } : false,
+    bodyLimit: 1_048_576,
+    trustProxy: process.env.TRUST_PROXY === 'true',
+  }) as FastifyInstance & { persistenceMode?: 'postgres' | 'in-memory' };
   app.persistenceMode = activePersistenceMode;
 
   // Resolve repositories based on active persistence mode
@@ -362,7 +372,23 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     ...configuredAllowlist.map((u) => u.trim()),
   ]);
 
-  app.register(cors, { origin: true });
+  // CORS: in production only the configured web origins may call the API; development reflects the origin.
+  const corsOrigins = (process.env.CORS_ORIGINS ?? '').split(',').map(o => o.trim()).filter(Boolean);
+  if (isProduction && corsOrigins.length === 0) {
+    throw new Error('FATAL: Production mode requires CORS_ORIGINS (comma-separated web origins).');
+  }
+  app.register(cors, { origin: isProduction ? corsOrigins : true });
+  // Security headers. The API serves JSON plus the Swagger UI, so CSP is left to the web app.
+  app.register(helmet, { contentSecurityPolicy: false, crossOriginResourcePolicy: { policy: 'cross-origin' } });
+  // Per-client fixed-window rate limit, added as a synchronous hook so it covers every route. Code
+  // execution and sign-in get a tighter budget. In-memory per instance: put a shared limiter (gateway or
+  // Redis) in front when running several instances.
+  installRateLimit(app, {
+    perMinute: Number(process.env.RATE_LIMIT_PER_MINUTE ?? 600),
+    strictPerMinute: Number(process.env.RATE_LIMIT_STRICT_PER_MINUTE ?? 30),
+    strict: /\/(machine\/(run|submit)|mutate|learning-path\/items\/[^/]+\/submit|demo\/login|public\/credentials)/,
+    disabled: process.env.NODE_ENV === 'test' && !process.env.RATE_LIMIT_PER_MINUTE,
+  });
 
   app.register(swagger, {
     openapi: {
@@ -400,6 +426,26 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     }
     return authRes.context;
   };
+
+  // Current session (Protected): the minimal identity the web client needs to route to a workspace.
+  // Returns only what the verified session already established; no other user data.
+  app.get('/api/me', async (req, reply) => {
+    const context = await resolveSessionContext(req, reply);
+    if (!context) return;
+
+    const workspace =
+      context.role === 'student' ? 'student'
+      : context.role === 'recruiter' ? 'recruiter'
+      : context.role === 'university_admin' ? 'university'
+      : 'tpo';
+
+    return {
+      userId: context.actorUserId ?? context.userId,
+      orgId: context.orgId,
+      role: context.role,
+      workspace,
+    };
+  });
 
   // Organizations / Tenants (Protected: requires valid session, returns discovery DTO only)
   app.get('/api/tenants', async (req, reply) => {
@@ -1165,6 +1211,10 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       return reply.status(500).send({ error: err.message });
     }
   });
+
+  if (opts.v2) {
+    registerV2(app, { ...opts.v2, githubRevoker: (c, id) => githubAccountService.revokeUpstreamGrantAndUnlink(c, id) }, resolveSessionContext);
+  }
 
   return app;
 }

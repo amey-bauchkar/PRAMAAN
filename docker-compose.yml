@@ -1,0 +1,69 @@
+# Self-hosted PRAMAAN for a college or university.
+#   cp .env.example .env   (fill in secrets)
+#   docker compose up -d db && docker compose run --rm migrate && docker compose up -d
+# Optional isolated code judge:  docker compose --profile judge up -d
+services:
+  db:
+    image: postgres:17.6-bookworm
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: pramaan
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U postgres"], interval: 10s, retries: 10 }
+
+  migrate:
+    build: { context: ., target: api }
+    command: ["node", "scripts/migrate-supabase.mjs"]
+    environment:
+      DATABASE_URL_ADMIN: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/pramaan
+    depends_on: { db: { condition: service_healthy } }
+    profiles: [tools]
+
+  api:
+    build: { context: ., target: api }
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://pramaan_app_user:${APP_DB_PASSWORD:?set APP_DB_PASSWORD}@db:5432/pramaan
+      CORS_ORIGINS: ${WEB_ORIGIN:?set WEB_ORIGIN}
+      JUDGE0_URL: ${JUDGE0_URL:-}
+    ports: ["4000:4000"]
+    depends_on: { db: { condition: service_healthy } }
+
+  web:
+    build:
+      context: .
+      target: web
+      args:
+        NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:?set PUBLIC_API_URL}
+        NEXT_PUBLIC_SUPABASE_URL: ${SUPABASE_URL:-}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
+    restart: unless-stopped
+    ports: ["3000:3000"]
+    depends_on: [api]
+
+  # Isolated code execution for the mock machine test, probes and learning tasks (no network for submissions).
+  judge0:
+    image: judge0/judge0:1.13.1
+    profiles: [judge]
+    privileged: true
+    environment: { REDIS_HOST: judge0-redis, POSTGRES_HOST: judge0-db, POSTGRES_PASSWORD: ${JUDGE0_DB_PASSWORD:-judge0}, ENABLE_NETWORK: "false" }
+    depends_on: [judge0-db, judge0-redis]
+  judge0-workers:
+    image: judge0/judge0:1.13.1
+    profiles: [judge]
+    command: ["./scripts/workers"]
+    privileged: true
+    environment: { REDIS_HOST: judge0-redis, POSTGRES_HOST: judge0-db, POSTGRES_PASSWORD: ${JUDGE0_DB_PASSWORD:-judge0}, ENABLE_NETWORK: "false" }
+    depends_on: [judge0-db, judge0-redis]
+  judge0-db:
+    image: postgres:17.6-bookworm
+    profiles: [judge]
+    environment: { POSTGRES_PASSWORD: ${JUDGE0_DB_PASSWORD:-judge0}, POSTGRES_DB: judge0, POSTGRES_USER: judge0 }
+  judge0-redis:
+    image: redis:7.4.1-bookworm
+    profiles: [judge]
+
+volumes:
+  pgdata:

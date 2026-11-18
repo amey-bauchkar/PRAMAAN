@@ -24,3 +24,11 @@ export type {
 export { SnapshotRegistrationStateSchema } from '@pramaan/contracts';
 
 
+export * from './proof-path.js';
+export * from './mock-drive.js';
+export * from './analytics.js';
+export * from './calendar.js';
+export * from './credentials.js';
+export * from './placement-reports.js';
+export * from './sd-jwt.js';
+export * from './rule-repair.js';

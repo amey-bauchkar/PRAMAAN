@@ -4,11 +4,19 @@ export const UserRoleSchema = z.enum([
   'student',
   'mentor',
   'officer',
+  'college_admin',
+  'dept_coordinator',
   'university_admin',
   'recruiter',
   'platform_admin'
 ]);
 export type UserRole = z.infer<typeof UserRoleSchema>;
+
+/**
+ * Roles that act with placement-officer privileges inside one college (PS p3, p6: university, college,
+ * department, officer). Department scoping for dept_coordinator is enforced in the API layer.
+ */
+export const OFFICER_EQUIVALENT_ROLES: readonly UserRole[] = ['officer', 'college_admin', 'dept_coordinator'];
 
 export const OrgKindSchema = z.enum(['university', 'college']);
 export type OrgKind = z.infer<typeof OrgKindSchema>;

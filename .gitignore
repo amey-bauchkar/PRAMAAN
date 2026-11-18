@@ -48,3 +48,10 @@ coverage/
 .cache/
 tmp/
 
+
+# Build metadata and generated files
+*.tsbuildinfo
+next-env.d.ts
+
+# Local tooling
+.claude/
