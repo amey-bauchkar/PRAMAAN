@@ -8,6 +8,7 @@ import { Button, Card, ErrorBox, Loading, Notice, PageHeader, Table, Td } from '
 export function Accreditation() {
   const { data, error, reload } = useApi('/api/v2/tpo/accreditation');
   const act = useAction();
+  const led = useApi('/api/v2/tpo/ledger');
   if (error) return <ErrorBox error={error} />;
   if (!data) return <Loading />;
   const rows = [...data.rows, data.total];
@@ -19,6 +20,9 @@ export function Accreditation() {
         <Button kind="secondary" onClick={() => window.print()}>Print or save as PDF</Button>
       </>}>Placement results for the 2027 batch, in the format used for NAAC (criterion 5.2) and NIRF.</PageHeader>
       <ErrorBox error={act.error} />
+      {led.data && (led.data.verifiedPlacements + led.data.collegeRecordedPlacements > 0) && (
+        <Notice tone="success">Of {led.data.verifiedPlacements + led.data.collegeRecordedPlacements} placements, {led.data.verifiedPlacements} are verified: signed by the recruiter and the student and recorded in the <a className="underline" href={`/ledger/${led.data.orgId}`}>public placement ledger</a>. The other {led.data.collegeRecordedPlacements} are recorded by the college without signatures. Auditors can check the first group themselves.</Notice>
+      )}
       <Card title="Placement and progression by branch">
         <Table head={['Branch', 'Graduating', 'Placed', 'Placed %', 'Higher studies', 'Entrepreneurship', 'Median CTC', 'Highest CTC', 'Average CTC']}>
           {rows.map((r: any) => (

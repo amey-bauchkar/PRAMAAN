@@ -3,6 +3,7 @@
 import React, { useEffect, useState } from 'react';
 import { api, fmtDate, fmtDateTime, lpa, useAction, useApi } from '@/lib/api';
 import { Button, Card, CheckLine, ErrorBox, Field, inputCls, Loading, Notice, PageHeader, ResultBadge } from '../ui';
+import { DecisionTrace } from './DecisionTrace';
 import { Lang, LANGS, loadLang, reasonText, saveLang, timingText, ui } from '@/lib/i18n';
 
 const HORIZON = {
@@ -74,6 +75,7 @@ export function MyDrives() {
                 <ul className="mt-2 divide-y divide-line">
                   {d.decision.checks.map((c: any) => <CheckLine key={c.id} passed={c.passed}><span lang={lang}>{reasonText(c, lang)}</span></CheckLine>)}
                 </ul>
+                <div className="mt-2"><DecisionTrace decisionId={d.decision.id} /></div>
                 <div className="mt-3 flex flex-wrap items-center gap-3">
                   {d.decision.result === 'eligible' && !d.application && (
                     <Button busy={act.busy} onClick={async () => { if (await act.run(() => api(`/api/v2/student/drives/${d.id}/apply`, { method: 'POST' }))) { setMsg(`Applied to ${d.title}.`); reload(); } }}>{ui(lang, 'apply')}</Button>

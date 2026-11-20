@@ -19,6 +19,7 @@ export function DataRequests() {
     <Card title={`Student data requests (${open.length} open)`}>
       {msg && <Notice tone="success">{msg}</Notice>}
       <ErrorBox error={act.error} />
+      <div className="mb-3"><Button kind="secondary" busy={act.busy} onClick={async () => { const r = await act.run(() => api('/api/v2/tpo/retention/run', { method: 'POST' })); if (r) setMsg(r.message); }}>Delete imported code past its retention period</Button></div>
       {data.length === 0 ? <p className="text-sm text-muted">No requests.</p> : (
         <ul className="flex flex-col gap-3">
           {data.map((r: any) => (

@@ -55,3 +55,6 @@ next-env.d.ts
 
 # Local tooling
 .claude/
+
+# State file written by scripts/verify-ledger.mjs (the last log state a verifier saw)
+.pramaan-ledger-state.json

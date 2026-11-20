@@ -32,3 +32,4 @@ export * from './credentials.js';
 export * from './placement-reports.js';
 export * from './sd-jwt.js';
 export * from './rule-repair.js';
+export * from './transparency-log.js';

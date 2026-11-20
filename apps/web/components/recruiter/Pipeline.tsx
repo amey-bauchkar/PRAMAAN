@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { api, useAction, useApi } from '@/lib/api';
+import { IssueOffer } from './IssueOffer';
 import { Button, Card, ErrorBox, Field, inputCls, Loading, Notice, PageHeader, Table, Td } from '../ui';
 
 export function Pipeline() {
@@ -31,6 +32,7 @@ export function Pipeline() {
           </Table>
         </Card>
       )}
+      {driveId && <IssueOffer driveId={driveId} />}
       {fb && (
         <Card title="Feedback">
           <div className="grid gap-3 sm:grid-cols-3">

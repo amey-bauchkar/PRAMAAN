@@ -15,9 +15,11 @@ export default function LoginPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [personas, setPersonas] = useState<Persona[] | null>(null);
+  const [ledgerOrg, setLedgerOrg] = useState<string | null>(null);
 
   useEffect(() => {
     if (DEMO_MODE) {
+      fetch(`${API_URL}/api/demo/ledger`).then(r => r.json()).then(d => setLedgerOrg(d.orgId ?? null)).catch(() => undefined);
       fetch(`${API_URL}/api/demo/personas`).then(r => r.json()).then(d => setPersonas(d.personas))
         .catch(() => setError(`The demo server is not running at ${API_URL}. Start it with: npm run demo`));
     }
@@ -34,12 +36,22 @@ export default function LoginPage() {
     router.replace(`/${me.workspace}`);
   }
 
-  async function asPersona(key: string) {
+  async function asPersona(key: string, dest?: string) {
     setBusy(key); setError(null);
     const me = await demoSignIn(key);
     if (!me) { setError('Demo sign-in failed. Is the demo server running?'); setBusy(null); return; }
-    router.replace(`/${me.workspace}`);
+    router.replace(dest ?? `/${me.workspace}`);
   }
+
+  const has = (key: string) => (personas ?? []).some(p => p.key === key);
+  const candidate = (personas ?? []).find(p => p.key === 'candidate')?.label ?? 'the shortlisted student';
+  const TOUR: { t: string; d: string; persona?: string; dest?: string }[] = [
+    { t: 'See the placement ledger', d: 'A public page, no sign-in. Press the check button and your own browser verifies the log.' },
+    { t: 'As the recruiter, sign an offer', d: `Neha Kapoor signs an offer for ${candidate} with a key that stays in her browser.`, persona: 'recruiter', dest: '/recruiter/pipeline' },
+    { t: 'As the student, accept it', d: `${candidate} signs the acceptance and keeps a receipt that proves the placement.`, persona: 'candidate', dest: '/student/offers' },
+    { t: 'As the officer, try to cheat and get caught', d: 'Change a salary in the database, or rewrite history and sign the log again. Then check the log and see what gives it away.', persona: 'tpo', dest: '/tpo/ledger' },
+    { t: 'As a student, replay a decision', d: 'Re-run a stored eligibility decision on its saved inputs and rules. The result must match.', persona: 'rahul', dest: '/student/drives' },
+  ];
 
   return (
     <main className="mx-auto flex min-h-screen max-w-2xl flex-col justify-center gap-8 px-4 py-16">
@@ -50,6 +62,23 @@ export default function LoginPage() {
       </div>
 
       {error && <p role="alert" className="rounded-lg border border-red-600/40 bg-red-600/10 p-3 text-sm">{error}</p>}
+
+      {DEMO_MODE && (
+        <section className="rounded-2xl border border-line bg-card p-5" aria-label="Guided demo">
+          <h2 className="font-display text-xl">Five-minute tour</h2>
+          <p className="mt-1 text-sm text-muted">Receipts, not claims: follow one placement from offer to receipt, then try to cheat.</p>
+          <ol className="mt-3 flex flex-col gap-3">
+            {TOUR.map((s, i) => (
+              <li key={s.t} className="flex items-start justify-between gap-3">
+                <span className="min-w-0 text-sm"><span className="font-semibold">{i + 1}. {s.t}</span><span className="block text-muted">{s.d}</span></span>
+                {s.persona
+                  ? <button type="button" disabled={!!busy || !has(s.persona)} onClick={() => asPersona(s.persona!, s.dest)} className="shrink-0 rounded-[14px] border border-line bg-white px-4 py-2 text-sm font-medium hover:border-brand disabled:opacity-50">{busy === s.persona ? 'Opening…' : 'Go'}</button>
+                  : ledgerOrg ? <a href={`/ledger/${ledgerOrg}`} className="shrink-0 rounded-[14px] border border-line bg-white px-4 py-2 text-sm font-medium hover:border-brand">Go</a> : null}
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
 
       {DEMO_MODE && (
         <ul className="grid gap-3 sm:grid-cols-2">

@@ -1,5 +1,20 @@
 # Demo walkthrough
 
+## The five-minute tour: receipts, not claims
+
+The login page has a **Five-minute tour** with a Go button for each step.
+
+1. **Public ledger.** Open the placement ledger page (no sign-in) and press **Check this ledger in my browser**. Your browser rebuilds the log from published fingerprints and checks the log operator's signature and the university's witness signature. To check with code that shares nothing with the website, run `npm run verify:ledger -- http://localhost:4000 <college id>` (the college id is in the ledger page address).
+2. **Recruiter signs an offer.** Neha Kapoor, Pipeline, **Signed offers**: find Rahul Bhosale (rows are alphabetical, so scroll to the R's), enter a CTC and press **Sign and send offer**. The key stays in this browser.
+3. **Student accepts.** The shortlisted student, **My Offers**: **Accept and sign**, then **Check this receipt in my browser**.
+4. **University witnesses.** Dr. Sunita Kale, **Ledger Witness**: **Witness newest state**.
+5. **Try to cheat.** Placement officer, **Trust Ledger**: **Change one salary in the database** (caught by the recruiter signature), then **Put it back**, then **Rewrite history and sign it again** (the log's own checks pass, and the university witness catches it), then **Put it back**.
+6. **Replay a decision.** Rahul, **My Drives**: **Show the proof behind this decision**, then **Replay this decision**.
+
+The demo starts with new logs each time it runs, and each run gives its logs their own identity, so a browser that remembers an earlier run starts fresh instead of reporting a rewrite. **Forget what this browser remembers** on the public page clears the remembered state by hand.
+
+## The longer walkthrough
+
 A walkthrough of the offline demo, about six minutes. Start it with `npm run demo` and open http://localhost:3000.
 
 1. **Rahul (student):** home shows "Get SQL to L2 → unlocks 2 more drives". Link LeetCode (`rahul-deshmukh-demo`) to see Observed vs Verified.

@@ -11,6 +11,8 @@ export interface ScoredAnswer { questionId: string; topic: string; score: number
 export interface CoverageJudge {
   name: string;
   coverage(q: QuestionInput, answer: string): Promise<boolean[] | null>;
+  /** Optional: the verdict together with the name of the judge(s) that really answered. */
+  coverageDetailed?(q: QuestionInput, answer: string): Promise<{ covered: boolean[]; scorer: string } | null>;
 }
 
 type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; body: string; signal?: AbortSignal }) => Promise<{ ok: boolean; status: number; json(): Promise<any> }>;
@@ -129,56 +131,28 @@ export class GroqCoverageJudge implements CoverageJudge {
 }
 
 /**
- * Combines multiple CoverageJudge instances in parallel for higher fidelity and consensus,
- * with seamless failover if one or more judges experience errors or timeouts.
- * If all judges fail, returns null so the system falls back to the deterministic keyword rubric.
+ * Runs several judges in parallel. A key point counts only when every judge that answered agrees, because a single
+ * model can be fooled by keyword stuffing (seen in a live test). A judge that fails or times out is skipped; if all
+ * fail the caller falls back to the keyword rubric. The result names exactly the judges that answered.
  */
 export class ResilientEnsembleJudge implements CoverageJudge {
-  private activeScorer: string;
-
+  readonly name: string;
   constructor(private judges: CoverageJudge[]) {
-    this.activeScorer = this.formatName(judges);
+    this.name = judges.length ? `ensemble:${judges.map(j => j.name.replace(/^llm:/, '')).join('+')}` : 'ensemble:none';
   }
 
-  get name(): string {
-    return this.activeScorer;
-  }
-
-  private formatName(activeJudges: CoverageJudge[]): string {
-    if (activeJudges.length === 0) return 'ensemble:none';
-    if (activeJudges.length === 1) return activeJudges[0].name;
-    const names = activeJudges.map(j => j.name.replace(/^llm:/, ''));
-    return `ensemble:${names.join('+')}`;
+  async coverageDetailed(q: QuestionInput, answer: string): Promise<{ covered: boolean[]; scorer: string } | null> {
+    if (!answer.trim()) return { covered: q.keyPoints.map(() => false), scorer: this.name };
+    const outcomes = await Promise.allSettled(this.judges.map(j => j.coverage(q, answer)));
+    const ok: { judge: CoverageJudge; cov: boolean[] }[] = [];
+    outcomes.forEach((o, i) => { if (o.status === 'fulfilled' && o.value) ok.push({ judge: this.judges[i], cov: o.value }); });
+    if (ok.length === 0) return null;
+    const scorer = ok.length === 1 ? ok[0].judge.name : `ensemble:${ok.map(s => s.judge.name.replace(/^llm:/, '')).join('+')}`;
+    return { covered: q.keyPoints.map((_, i) => ok.every(s => s.cov[i])), scorer };
   }
 
   async coverage(q: QuestionInput, answer: string): Promise<boolean[] | null> {
-    if (!answer.trim()) return q.keyPoints.map(() => false);
-    if (this.judges.length === 0) return null;
-
-    const outcomes = await Promise.allSettled(
-      this.judges.map(j => j.coverage(q, answer))
-    );
-
-    const successful: { judge: CoverageJudge; cov: boolean[] }[] = [];
-    outcomes.forEach((result, idx) => {
-      if (result.status === 'fulfilled' && result.value !== null) {
-        successful.push({ judge: this.judges[idx], cov: result.value });
-      }
-    });
-
-    if (successful.length === 0) {
-      this.activeScorer = 'rules';
-      return null;
-    }
-
-    if (successful.length === 1) {
-      this.activeScorer = successful[0].judge.name;
-      return successful[0].cov;
-    }
-
-    // Both/all succeeded: student receives fair credit if any judge identifies the key point (consensus union)
-    this.activeScorer = this.formatName(successful.map(s => s.judge));
-    return q.keyPoints.map((_, i) => successful.some(s => s.cov[i]));
+    return (await this.coverageDetailed(q, answer))?.covered ?? null;
   }
 }
 
@@ -207,12 +181,12 @@ export function createCoverageJudgeFromEnv(env: NodeJS.ProcessEnv = process.env)
 /** Scores one answer. Falls back to the keyword rubric, and says which scorer was used. */
 export async function scoreAnswer(q: QuestionInput, answer: string, judge: CoverageJudge | null): Promise<ScoredAnswer> {
   if (judge) {
-    const cov = await judge.coverage(q, answer);
-    if (cov) {
-      const covered = q.keyPoints.filter((_, i) => cov[i]).map(k => k.point);
-      const missed = q.keyPoints.filter((_, i) => !cov[i]).map(k => k.point);
+    const r = judge.coverageDetailed ? await judge.coverageDetailed(q, answer) : await judge.coverage(q, answer).then(c => (c ? { covered: c, scorer: judge.name } : null));
+    if (r) {
+      const covered = q.keyPoints.filter((_, i) => r.covered[i]).map(k => k.point);
+      const missed = q.keyPoints.filter((_, i) => !r.covered[i]).map(k => k.point);
       const n = q.keyPoints.length || 1;
-      return { questionId: q.id, topic: q.topic, score: Math.round((covered.length / n) * 100) / 10, covered, missed, scorer: judge.name, question: q.question };
+      return { questionId: q.id, topic: q.topic, score: Math.round((covered.length / n) * 100) / 10, covered, missed, scorer: r.scorer, question: q.question };
     }
   }
   const s = scoreInterviewAnswer({ id: q.id, topic: q.topic, keyPoints: q.keyPoints }, answer);

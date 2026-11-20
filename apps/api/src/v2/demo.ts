@@ -11,7 +11,10 @@ import { PgliteDb, createPgliteDatabase } from './db.js';
 import { LocalJudge } from './judge.js';
 import { DemoFixtureProfiles } from './config.js';
 import { evaluateDrive } from './services.js';
+import { seedDemoLedger, seedDemoWitness, demoLedgerOrg, demoTamper, demoRewrite, demoRestore } from './demo-ledger.js';
 import type { Mailer } from './mailer.js';
+import type { FailoverLlm } from './llm.js';
+import type { CoverageJudge } from './interview-judge.js';
 
 /**
  * Offline demo: the full product on an in-process PostgreSQL (PGlite) with every migration and the
@@ -36,6 +39,9 @@ function poolFacade(db: PGlite): pg.Pool {
 }
 
 const DEMO_ISSUER_SEED = '7072616d61616e2d64656d6f2d6973737565722d6b65792d7365656421212121'; // demo-only, public
+// Each run of the demo starts with new logs. Giving them a run-specific identity stops a browser that remembers an earlier
+// run from reporting a rewrite. All apps created in one process share it, so tests are unaffected.
+const DEMO_BOOT_ID = randomBytes(4).toString('hex');
 
 export interface DemoApp {
   app: ReturnType<typeof buildApp>;
@@ -45,7 +51,7 @@ export interface DemoApp {
   tokenForSubject(authSubject: string): Promise<string>;
 }
 
-export async function createDemoApp(options: { verifyBaseUrl?: string; publishDrives?: boolean; mailer?: Mailer } = {}): Promise<DemoApp> {
+export async function createDemoApp(options: { verifyBaseUrl?: string; publishDrives?: boolean; mailer?: Mailer; llm?: FailoverLlm | null; interviewJudge?: CoverageJudge | null } = {}): Promise<DemoApp> {
   if (process.env.NODE_ENV === 'production') throw new Error('The demo app must never run in production.');
   const pglite = await createPgliteDatabase();
   const db = new PgliteDb(pglite);
@@ -57,21 +63,25 @@ export async function createDemoApp(options: { verifyBaseUrl?: string; publishDr
   const app = buildApp({
     persistenceMode: 'in-memory', authService, userRepository,
     v2: { db, judge: new LocalJudge(), profiles: new DemoFixtureProfiles(), mailer: options.mailer,
-      issuer: { privateKey, publicKeyPem, verifyBaseUrl: options.verifyBaseUrl ?? 'http://localhost:3000/verify' } },
+      // Tests never call a real AI provider unless one is passed in. The demo server uses the keys in the environment.
+      llm: options.llm !== undefined ? options.llm : process.env.VITEST ? null : undefined,
+      interviewJudge: options.interviewJudge !== undefined ? options.interviewJudge : process.env.VITEST ? null : undefined,
+      issuer: { privateKey, publicKeyPem, verifyBaseUrl: options.verifyBaseUrl ?? 'http://localhost:3000/verify' }, ledgerOriginSalt: DEMO_BOOT_ID },
   });
 
   const tokenForSubject = (sub: string) =>
     createTestToken({ sub, email: `${sub.replace(/[^a-z0-9]/gi, '.')}@demo.pramaan.invalid` }, { customSecret: secret, issuer: null });
+  const extraPersonas: { key: string; authSubject: string; label: string; role: string; workspace: string }[] = [];
   const tokenFor = async (key: string) => {
-    const p = PERSONAS.find(x => x.key === key);
+    const p = [...PERSONAS, ...extraPersonas].find(x => x.key === key);
     if (!p) throw new Error(`Unknown persona ${key}`);
     return tokenForSubject(p.authSubject);
   };
 
-  app.get('/api/demo/personas', async () => ({ personas: PERSONAS, note: 'Sample data for the demo. Sign-in is simulated and there are no real accounts.' }));
+  app.get('/api/demo/personas', async () => ({ personas: [...PERSONAS, ...extraPersonas], note: 'Sample data for the demo. Sign-in is simulated and there are no real accounts.' }));
   app.post('/api/demo/login', async (req, reply) => {
     const key = (req.body as any)?.persona;
-    if (!PERSONAS.some(p => p.key === key)) return reply.status(400).send({ error: 'Unknown persona.' });
+    if (![...PERSONAS, ...extraPersonas].some(p => p.key === key)) return reply.status(400).send({ error: 'Unknown persona.' });
     return { token: await tokenFor(key) };
   });
 
@@ -86,5 +96,16 @@ export async function createDemoApp(options: { verifyBaseUrl?: string; publishDr
       });
     }
   }
+  // The ledger starts with history, and one candidate is waiting for a live offer so the whole flow can be shown.
+  if (options.publishDrives !== false) {
+    const featured = await seedDemoLedger(db);
+    await seedDemoWitness(db);
+    if (featured) extraPersonas.push({ key: 'candidate', authSubject: featured.authSubject, label: featured.name, role: 'Student · shortlisted, waiting for an offer', workspace: 'student' });
+  }
+  // Demo only: simulate a dishonest insider, then put things back.
+  app.get('/api/demo/ledger', async () => ({ orgId: await demoLedgerOrg(db) }));
+  app.post('/api/demo/ledger/tamper', async () => demoTamper(db));
+  app.post('/api/demo/ledger/rewrite', async () => demoRewrite(db, { privateKey, publicKeyPem, verifyBaseUrl: '' }));
+  app.post('/api/demo/ledger/restore', async () => demoRestore(db));
   return { app, db, tokenFor, tokenForSubject };
 }

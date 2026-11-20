@@ -8,7 +8,10 @@ import { registerStudentRoutes, registerPublicRoutes, StudentDeps } from './rout
 import { registerTpoRoutes } from './routes-tpo.js';
 import { registerRecruiterRoutes } from './routes-recruiter.js';
 import { registerPassRoutes } from './routes-passes.js';
+import { registerLedgerRoutes } from './routes-ledger.js';
+import { configureLedger } from './ledger.js';
 import { Mailer, createMailerFromEnv } from './mailer.js';
+import { FailoverLlm, createLlmFromEnv } from './llm.js';
 import { CoverageJudge, createCoverageJudgeFromEnv } from './interview-judge.js';
 
 export interface V2Deps {
@@ -18,10 +21,14 @@ export interface V2Deps {
   issuer: IssuerConfig | null;
   /** Outgoing mail. Defaults to SMTP from the environment; without SMTP_HOST nothing is sent. */
   mailer?: Mailer;
+  /** Text model used by the interview drafter. Without it the drafter uses fixed templates. */
+  llm?: FailoverLlm | null;
   /** Optional AI judge for interview answers. Without it the keyword rubric is used. */
   interviewJudge?: CoverageJudge | null;
   /** Revokes the GitHub grant at GitHub and purges the stored token (wired by the app). */
   githubRevoker?: StudentDeps['githubRevoker'];
+  /** Gives the placement logs an identity unique to this run. Demo only, because the demo database starts empty on every boot. */
+  ledgerOriginSalt?: string;
 }
 
 /** Registers all v2 product routes (student, placement office, recruiter, university, public). */
@@ -32,10 +39,12 @@ export function registerV2(
 ): void {
   const router = createRouter(app, { db: deps.db, resolveSession });
   registerStudentRoutes(router, { ...deps, interviewJudge: deps.interviewJudge === undefined ? createCoverageJudgeFromEnv() : deps.interviewJudge });
-  registerTpoRoutes(router, { judgeName: deps.judge.name, mailer: deps.mailer ?? createMailerFromEnv() });
+  registerTpoRoutes(router, { judgeName: deps.judge.name, mailer: deps.mailer ?? createMailerFromEnv(), llm: deps.llm === undefined ? createLlmFromEnv() : deps.llm });
   registerRecruiterRoutes(router);
   registerPublicRoutes(app, deps.db);
   registerPassRoutes(router, app, deps.db, deps.issuer);
+  configureLedger(deps.issuer, { originSalt: deps.ledgerOriginSalt });
+  registerLedgerRoutes(router, app, deps.db, deps.issuer);
 
   // Skill catalogue for search boxes (any signed-in role).
   router.get('/api/v2/catalog/skills', ['student', 'mentor', 'officer', 'college_admin', 'dept_coordinator', 'recruiter', 'university_admin', 'platform_admin'],
@@ -52,4 +61,6 @@ export * from './db.js';
 export * from './judge.js';
 export * from './config.js';
 export * from './mailer.js';
+export * from './ledger.js';
+export * from './llm.js';
 export * from './interview-judge.js';

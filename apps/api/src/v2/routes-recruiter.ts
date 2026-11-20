@@ -9,7 +9,7 @@ import { displayName, studentForUser } from './services.js';
 const iso = (v: any) => (v ? new Date(v).toISOString() : null);
 
 /** Drives this recruiter may see: an officer-approved, unexpired access grant is required. */
-async function grantFor(sql: Sql, membership: string, driveId: string) {
+export async function grantFor(sql: Sql, membership: string, driveId: string) {
   const g = (await sql.query<any>(`SELECT g.id, g.expires_at FROM recruiter_access_grants g WHERE g.recruiter_membership_id = $1 AND g.drive_id = $2 AND g.expires_at > now()`, [membership, driveId])).rows[0];
   if (!g) throw new HttpError(403, 'No active access grant for this drive. Ask the placement office.');
   return g;
@@ -155,6 +155,7 @@ export function registerRecruiterRoutes(r: Router) {
     const app = await one<any>(sql, `SELECT a.*, f.id AS offer_id FROM applications a JOIN offers f ON f.application_id = a.id WHERE a.id = $1 AND a.student_id = $2 AND a.stage = 'offered'`,
       [requireUuid(params.applicationId, 'id'), st.id], 'Open offer not found.');
     const accept = body.accept === true;
+    if (accept && (await sql.query(`SELECT 1 FROM offers WHERE id = $1 AND signed`, [app.offer_id])).rows[0]) throw new HttpError(409, 'This offer was signed by the recruiter. Accept it with your own signature in My Offers.');
     await sql.query(`UPDATE offers SET status = $2, responded_at = now() WHERE id = $1`, [app.offer_id, accept ? 'accepted' : 'declined']);
     await sql.query(`UPDATE applications SET stage = $2, updated_at = now() WHERE id = $1`, [app.id, accept ? 'offer_accepted' : 'offer_declined']);
     await sql.query(`INSERT INTO application_events (application_id, from_stage, to_stage, note) VALUES ($1,'offered',$2,'Student response')`, [app.id, accept ? 'offer_accepted' : 'offer_declined']);
