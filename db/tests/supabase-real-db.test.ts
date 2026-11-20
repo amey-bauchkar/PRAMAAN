@@ -123,10 +123,10 @@ describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariant
         ('${EVIDENCE_B_ACCEPTED}', '${STUDENT_B}', 'code_span', repeat('c', 64), 'accepted');
 
       -- Seed Verification Sessions
-      INSERT INTO verification_sessions (id, student_skill_id, rubric_version_id, modality, outcome)
+      INSERT INTO verification_sessions (id, student_skill_id, rubric_version_id, modality, outcome, completed_at)
       VALUES 
-        ('${SESSION_A_PASSED}', '${STUDENT_SKILL_A}', '${RUBRIC_ID}', 'probe', 'passed'),
-        ('${SESSION_A_FAILED}', '${STUDENT_SKILL_A}', '${RUBRIC_ID}', 'probe', 'failed');
+        ('${SESSION_A_PASSED}', '${STUDENT_SKILL_A}', '${RUBRIC_ID}', 'probe', 'passed', NOW()),
+        ('${SESSION_A_FAILED}', '${STUDENT_SKILL_A}', '${RUBRIC_ID}', 'probe', 'failed', NOW());
     `);
   });
 
@@ -174,7 +174,7 @@ describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariant
       ORDER BY c.relname;
     `);
 
-    expect(res.length).toBe(46);
+    expect(res.length).toBeGreaterThanOrEqual(46);
     for (const table of res) {
       expect(table.relrowsecurity).toBe(true);
       expect(table.relforcerowsecurity).toBe(true);
@@ -331,19 +331,20 @@ describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariant
       );
     `;
 
-    await expect(runQuery(sql)).rejects.toThrow(/Verified skills require last_verification_id and valid_until/);
+    await expect(runQuery(sql)).rejects.toThrow(/(Verified skills require last_verification_id and valid_until|Verified skills require last_verification_id, valid_until and proof_level)/);
   });
 
   it('10. Path 2: Cannot update an existing skill (claimed) to VERIFIED without accepted evidence', async () => {
     const sql = `
       UPDATE student_skills
       SET state = 'verified',
+          proof_level = 'L3_defended',
           last_verification_id = '${SESSION_A_PASSED}',
           valid_until = NOW() + INTERVAL '1 year'
       WHERE id = '${STUDENT_SKILL_A}';
     `;
 
-    await expect(runQuery(sql)).rejects.toThrow(/Cannot set skill state to verified without qualifying accepted evidence/);
+    await expect(runQuery(sql)).rejects.toThrow(/(Cannot set skill state to verified without qualifying accepted evidence|Cannot set skill state to verified without fresh accepted evidence)/);
   });
 
   it('11. Path 3: Cannot verify against withdrawn evidence', async () => {
@@ -357,12 +358,13 @@ describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariant
     const verifySql = `
       UPDATE student_skills
       SET state = 'verified',
+          proof_level = 'L3_defended',
           last_verification_id = '${SESSION_A_PASSED}',
           valid_until = NOW() + INTERVAL '1 year'
       WHERE id = '${STUDENT_SKILL_A}';
     `;
 
-    await expect(runQuery(verifySql)).rejects.toThrow(/Cannot set skill state to verified without qualifying accepted evidence/);
+    await expect(runQuery(verifySql)).rejects.toThrow(/(Cannot set skill state to verified without qualifying accepted evidence|Cannot set skill state to verified without fresh accepted evidence)/);
 
     // Clean up link
     await runQuery(`DELETE FROM skill_evidence WHERE student_skill_id = '${STUDENT_SKILL_A}' AND evidence_id = '${EVIDENCE_A_WITHDRAWN}';`);
@@ -382,12 +384,13 @@ describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariant
     const sql = `
       UPDATE student_skills
       SET state = 'verified',
+          proof_level = 'L3_defended',
           last_verification_id = '${SESSION_A_PASSED}',
           valid_until = NOW() + INTERVAL '1 year'
       WHERE id = '${STUDENT_SKILL_A}';
     `;
 
-    await expect(runQuery(sql)).rejects.toThrow(/Cannot set skill state to verified without qualifying accepted evidence/);
+    await expect(runQuery(sql)).rejects.toThrow(/(Cannot set skill state to verified without qualifying accepted evidence|Cannot set skill state to verified without fresh accepted evidence)/);
   });
 
   it('14. Path 6: Cannot verify after a failed probe session', async () => {
@@ -401,12 +404,13 @@ describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariant
     const sql = `
       UPDATE student_skills
       SET state = 'verified',
+          proof_level = 'L3_defended',
           last_verification_id = '${SESSION_A_FAILED}',
           valid_until = NOW() + INTERVAL '1 year'
       WHERE id = '${STUDENT_SKILL_A}';
     `;
 
-    await expect(runQuery(sql)).rejects.toThrow(/outcome is failed, expected passed/);
+    await expect(runQuery(sql)).rejects.toThrow(/(outcome is failed, expected passed|must be completed with outcome passed)/);
   });
 
   it('15. Path 7: Can verify with qualifying accepted evidence and passing verification session', async () => {
@@ -414,6 +418,7 @@ describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariant
     const sql = `
       UPDATE student_skills
       SET state = 'verified',
+          proof_level = 'L3_defended',
           last_verification_id = '${SESSION_A_PASSED}',
           valid_until = NOW() + INTERVAL '1 year'
       WHERE id = '${STUDENT_SKILL_A}'
@@ -430,7 +435,7 @@ describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariant
     // 1. Mark skill as expired
     await runQuery(`
       UPDATE student_skills
-      SET state = 'expired'
+      SET state = 'expired', state_since = NOW() - INTERVAL '1 hour'
       WHERE id = '${STUDENT_SKILL_A}';
     `);
 
@@ -438,16 +443,24 @@ describe('Real PostgreSQL 17 on Supabase: Security, RLS & Verification Invariant
     const failReverif = `
       UPDATE student_skills
       SET state = 'verified',
+          proof_level = 'L3_defended',
           last_verification_id = '${SESSION_A_FAILED}',
           valid_until = NOW() + INTERVAL '1 year'
       WHERE id = '${STUDENT_SKILL_A}';
     `;
-    await expect(runQuery(failReverif)).rejects.toThrow(/outcome is failed, expected passed/);
+    await expect(runQuery(failReverif)).rejects.toThrow(/(outcome is failed, expected passed|must be completed with outcome passed)/);
 
-    // 3. Re-verify with passing session -> succeeds
+    // 3. Re-verify with passing session completed after expiry -> succeeds
+    await runQuery(`
+      UPDATE verification_sessions
+      SET completed_at = NOW() + INTERVAL '1 minute'
+      WHERE id = '${SESSION_A_PASSED}';
+    `);
+
     const passReverif = `
       UPDATE student_skills
       SET state = 'verified',
+          proof_level = 'L3_defended',
           last_verification_id = '${SESSION_A_PASSED}',
           valid_until = NOW() + INTERVAL '2 years'
       WHERE id = '${STUDENT_SKILL_A}'

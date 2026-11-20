@@ -20,6 +20,7 @@ export const WORKSPACES: Record<WorkspaceKey, WorkspaceDef> = {
       { slug: 'mock-drive', title: 'Practice Drive', req: 'ST-05', summary: 'Practise a full campus drive: aptitude (30 questions), coding test (2 problems) and interview. Then see your weak topics.' },
       { slug: 'learning-path', title: 'Learning Plan', req: 'ST-06', summary: 'Tasks picked for your skill gaps and weak topics. Each one you pass adds new proof to your profile.' },
       { slug: 'drives', title: 'My Drives', req: 'ST-07', summary: 'See whether you are eligible for each drive, with a reason for every rule, and the quickest way to qualify for more.' },
+      { slug: 'offers', title: 'My Offers', req: 'New', summary: 'Offers signed by recruiters. Accept by signing, and keep a receipt that proves your placement.' },
       { slug: 'passes', title: 'Eligibility Pass', req: 'New', summary: 'Show a recruiter that you meet a drive’s requirements while sharing only what you choose.' },
       { slug: 'privacy', title: 'Privacy & Consent', req: 'ST-08', summary: 'Choose what you share, take it back at any time, download or delete your data, and see how scores work.' },
     ],
@@ -37,6 +38,7 @@ export const WORKSPACES: Record<WorkspaceKey, WorkspaceDef> = {
       { slug: 'applications', title: 'Shortlists & Offers', req: 'BR-19', summary: 'Move candidates through each stage and send offers. Every change is recorded.', roles: OFFICERS },
       { slug: 'proposals', title: 'AI Proposals', req: 'AD-09', summary: 'Anything the AI drafts waits here until you approve it.', roles: OFFICERS },
       { slug: 'fairness', title: 'Fairness Check', req: 'AD-10', summary: 'Compare selection rates between groups at each stage. Very small groups are hidden to protect privacy.', roles: OFFICERS },
+      { slug: 'ledger', title: 'Trust Ledger', req: 'New', summary: 'Placements signed by recruiters and students in a public log where any later change shows up in the checks an auditor can run.', roles: OFFICERS },
       { slug: 'accreditation', title: 'Accreditation Reports', req: 'AD-11', summary: 'Placement tables for NAAC and NIRF reports in one click.', roles: OFFICERS },
       { slug: 'roles', title: 'Team & Activity Log', req: 'AD-12', summary: 'Who has access to this college’s account, and a record of what each person did that cannot be edited.', roles: OFFICERS },
       { slug: 'reviews', title: 'Evidence Reviews', req: 'ST-02', summary: 'Review students’ lab work, certificates and projects and approve them against a checklist.', roles: [...OFFICERS, 'mentor'] },
@@ -51,7 +53,8 @@ export const WORKSPACES: Record<WorkspaceKey, WorkspaceDef> = {
   },
   university: {
     key: 'university', title: 'University', audience: 'Results across colleges',
-    modules: [{ slug: 'outcomes', title: 'Outcomes Across Colleges', req: 'AD-12', summary: 'Placement results and verified skills for each college. Totals only, no individual students.' }],
+    modules: [{ slug: 'outcomes', title: 'Outcomes Across Colleges', req: 'AD-12', summary: 'Placement results and verified skills for each college. Totals only, no individual students.' },
+      { slug: 'witness', title: 'Ledger Witness', req: 'New', summary: 'Sign each college’s placement log with your own key, so a rewrite of history shows up even if the log is signed again.' }],
   },
 };
 

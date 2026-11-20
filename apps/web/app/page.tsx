@@ -5,8 +5,16 @@ import { DecisionFlow } from '@/components/DecisionFlow';
 import { EvidenceOrbit } from '@/components/EvidenceOrbit';
 import { FeatureCarousel } from '@/components/FeatureCarousel';
 import { HowItWorksSlider } from '@/components/HowItWorksSlider';
+import { LedgerLink } from '@/components/LedgerLink';
 import { Reveal } from '@/components/Reveal';
 import { TileSphere } from '@/components/TileSphere';
+
+const RECEIPTS = [
+  { k: 'A skill', t: 'A certificate', d: 'A skill is Verified only after it is checked. The certificate is signed, and anyone can check that it was not changed.', how: 'Check: open the certificate link.' },
+  { k: 'A decision', t: 'A replay', d: 'Every eligibility decision can be run again on the same saved marks and the same rules. The result must match.', how: 'Check: press Replay this decision.' },
+  { k: 'An offer', t: 'Two signatures', d: 'The recruiter signs the offer. The student signs the acceptance. Change either one later and the signatures stop matching.', how: 'Check: your receipt, in your browser.' },
+  { k: 'A number', t: 'A public ledger', d: 'Every placement is added to a log anyone can recompute. Reports separate placements that were signed from placements that were only recorded.', how: 'Check: the college’s public ledger page.' },
+];
 
 const AUDIENCE = [
   { who: 'Students', line: 'See what you need to do next to qualify for more companies, in English, Hindi or Marathi.' },
@@ -31,7 +39,7 @@ function PassMock() {
     <div className="rounded-3xl bg-white p-6 shadow-[0_30px_80px_-20px_rgb(120,30,0,.45)]">
       <div className="flex items-center gap-3">
         <span className="flex h-10 w-10 items-center justify-center rounded-full bg-ink text-lg text-white" aria-hidden>✓</span>
-        <div><p className="text-sm font-medium">Eligible for Nimbus Analytics</p><p className="text-xs text-muted">Your marks are not shared</p></div>
+        <div><p className="text-sm font-medium">Placement verified</p><p className="text-xs text-muted">Signed by the recruiter and the student · entry 13 of the public log</p></div>
       </div>
     </div>
   );
@@ -60,18 +68,19 @@ export default function HomePage() {
           <div className="relative mx-auto max-w-7xl px-4 pt-16 sm:px-8 sm:pt-24">
                         <Reveal delay={80}>
               <h1 className="mx-auto max-w-5xl text-center text-[2.9rem] leading-[1.02] sm:text-7xl lg:text-[6.5rem]">
-                Skills you can prove.<br /><span className="bg-gradient-to-b from-[#111] to-[#8c8580] bg-clip-text text-transparent">Placements you can explain.</span>
+                Skills you can prove.<br /><span className="bg-gradient-to-b from-[#111] to-[#8c8580] bg-clip-text text-transparent">Placements you can audit.</span>
               </h1>
             </Reveal>
             <Reveal delay={160}>
               <p className="mx-auto mt-8 max-w-2xl text-center text-lg leading-8 text-muted sm:text-xl">
-                Students prove their skills with real work. Colleges apply clear, fair rules for every company visit. Recruiters see checked skills instead of resume claims. Automated helpers can suggest, but people always decide.
+                Students prove their skills with real work. Every eligibility decision can be replayed and explained. Every placement is signed by the recruiter and the student and recorded in a log anyone can check. Receipts, not claims.
               </p>
             </Reveal>
             <Reveal delay={240}>
               <div className="mt-10 flex flex-wrap items-center justify-center gap-3">
                 <Cta href="/login" size="md">Try the live demo →</Cta>
                 <a href="#how" className="rounded-[14px] border border-line bg-white px-7 py-[14px] text-base font-medium leading-none hover:border-brand">See how it works</a>
+                <LedgerLink />
               </div>
               <p className="mt-4 text-center text-xs text-muted">The demo uses sample data. No real students, and no sign-up needed.</p>
             </Reveal>
@@ -97,7 +106,7 @@ export default function HomePage() {
         <section className="mx-auto mt-24 max-w-5xl px-4 sm:mt-32 sm:px-8">
           <Reveal>
             <h2 className="text-4xl leading-[1.08] sm:text-6xl">
-              A resume only shows what students <span className="text-muted/60">say</span>. Recruiters have to guess. Students are turned down without knowing why.
+              A resume only shows what students <span className="text-muted/60">say</span>. Recruiters have to guess. Students are turned down without knowing why. And a college’s placement numbers are usually just its own word.
             </h2>
           </Reveal>
           <Reveal delay={100}>
@@ -105,6 +114,29 @@ export default function HomePage() {
               PRAMAAN replaces the guess with proof anyone can check. Every student who is not selected gets a clear reason and a next step.
             </p>
           </Reveal>
+        </section>
+
+        {/* Receipts */}
+        <section id="receipts" className="mx-auto mt-24 max-w-7xl scroll-mt-20 px-4 sm:mt-32 sm:px-8">
+          <div className="rounded-[2.25rem] bg-ink px-4 py-16 text-white sm:px-10 sm:py-24">
+            <Reveal>
+              <p className="text-center text-sm font-medium text-brand">Receipts, not claims</p>
+              <h2 className="mx-auto mt-3 max-w-3xl text-center text-4xl text-white sm:text-6xl">Every claim comes with a receipt anyone can check.</h2>
+              <p className="mx-auto mt-5 max-w-2xl text-center text-lg text-white/70">Check it yourself, in your browser or with a short script that shares no code with this website.</p>
+            </Reveal>
+            <div className="mx-auto mt-14 grid max-w-6xl gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              {RECEIPTS.map((r, i) => (
+                <Reveal key={r.t} delay={i * 70}>
+                  <div className="flex h-full flex-col rounded-3xl bg-white/[0.06] p-6 ring-1 ring-white/10">
+                    <p className="text-xs uppercase tracking-widest text-white/50">{r.k}</p>
+                    <h3 className="mt-3 text-2xl text-white">{r.t}</h3>
+                    <p className="mt-3 text-sm leading-6 text-white/70">{r.d}</p>
+                    <p className="mt-auto pt-6 text-xs text-white/50">{r.how}</p>
+                  </div>
+                </Reveal>
+              ))}
+            </div>
+          </div>
         </section>
 
         {/* Evidence */}

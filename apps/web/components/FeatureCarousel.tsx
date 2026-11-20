@@ -5,6 +5,7 @@ import { Ctx, rr, siteFont, wrapText } from '@/lib/canvas';
 import { FlexCarousel } from './react-bits';
 
 export const FEATURES = [
+  { t: 'Placements anyone can verify', d: 'A placement counts only when the recruiter and the student both sign it. Every placement goes into a public log that anyone can check, so a change or a removal after the fact shows up in the checks.', e: 'Example: entry 17 holds the offer and both signatures. The student keeps a receipt.' },
   { t: 'Code ownership check', d: 'We change one line of your own code and ask what will happen. Only someone who wrote and understood the code can answer, so copied or AI-written code does not pass.', e: 'Example: "if qty > 0" becomes "if qty >= 0". What happens when qty is 0?' },
   { t: 'Your next step', d: 'For each student, the one skill that opens the most company drives, how many hours it takes, and whether there is time before each deadline.', e: 'Example: Pass the SQL test to apply to 2 more drives. About 4 hours, in time for both.' },
   { t: 'Fairness check and fix', d: 'Before a rule goes live, we check whether it treats groups of students fairly. If it does not, PRAMAAN suggests a fairer rule that still asks for the required skills.', e: 'The placement officer chooses. Nothing changes without a written reason.' },
@@ -15,6 +16,7 @@ export const FEATURES = [
 
 // Card palettes: [from, to, ink, soft ink, panel fill]
 const LOOKS: [string, string, string, string, string][] = [
+  ['#161616', '#5a1f03', '#ffffff', 'rgba(255,255,255,.78)', 'rgba(255,255,255,.10)'],
   ['#ff8a4d', '#d94400', '#ffffff', 'rgba(255,255,255,.88)', 'rgba(255,255,255,.16)'],
   ['#0d0d0d', '#3a1604', '#ffffff', 'rgba(255,255,255,.72)', 'rgba(255,255,255,.09)'],
   ['#fff1e6', '#ffb27f', '#0a0a0a', 'rgba(10,10,10,.72)', 'rgba(255,255,255,.7)'],

@@ -1,9 +1,9 @@
 import { randomUUID } from 'crypto';
 import {
-  sampleAptitudeSet, scoreAptitude, scoreMachineProblem, scoreInterviewAnswer, buildMockReport,
+  sampleAptitudeSet, scoreAptitude, scoreMachineProblem, buildMockReport,
   AptitudeQuestion, ProofPath, recourseTiming, planLearningPath, EligibilityEvaluator, buildOpenBadge, signCredential, verifyCredential,
 } from '@pramaan/domain';
-import { PROOF_LEVEL_RANK } from '@pramaan/contracts';
+import { PROOF_LEVEL_RANK, EligibilityRuleSpecSchema } from '@pramaan/contracts';
 import { Router, HttpError, requireString, requireUuid, one } from './http.js';
 import { Judge } from './judge.js';
 import { audit } from './audit.js';
@@ -449,7 +449,7 @@ export function registerStudentRoutes(r: Router, deps: StudentDeps) {
     const st = await studentForUser(sql, ctx);
     const p = await one<any>(sql, `SELECT * FROM probe_definitions WHERE id = $1 AND student_id = $2`, [requireUuid(params.id, 'id'), st.id], 'Probe not found.');
     const answer = requireString(body.answer, 'answer', 10, 4000);
-    const scored = scoreInterviewAnswer({ id: p.id, topic: 'probe', keyPoints: p.predict_key_points }, answer);
+    const scored = await scoreAnswer({ id: p.id, topic: 'probe', question: p.predict_question, keyPoints: p.predict_key_points }, answer, deps.interviewJudge ?? null);
     const ss = (await sql.query<any>(`SELECT id FROM student_skills WHERE student_id = $1 AND skill_id = $2`, [st.id, p.skill_id])).rows[0];
     if (!ss) throw new HttpError(409, 'Link the repository evidence for this skill first.');
     const rubric = await one<any>(sql, `SELECT id FROM rubric_versions WHERE skill_id = $1 ORDER BY version_no DESC LIMIT 1`, [p.skill_id]);
@@ -458,7 +458,7 @@ export function registerStudentRoutes(r: Router, deps: StudentDeps) {
     const ev = (await sql.query<any>(`SELECT e.id FROM evidence_items e JOIN skill_evidence se ON se.evidence_id = e.id WHERE se.student_skill_id = $1 AND e.kind = 'code_span' ORDER BY e.created_at LIMIT 1`, [ss.id])).rows[0];
     if (!ev) throw new HttpError(409, 'No code evidence is linked to this skill.');
     await sql.query(`INSERT INTO verification_questions (session_id, evidence_id, question_text, expected_criteria, student_response, evaluator_score, rubric_evaluation)
-      VALUES ($1,$2,$3,$4,$5,$6,$7)`, [sid, ev.id, p.predict_question, JSON.stringify(p.predict_key_points.map((k: any) => k.point)), answer, scored.score, JSON.stringify({ covered: scored.covered, missed: scored.missed })]);
+      VALUES ($1,$2,$3,$4,$5,$6,$7)`, [sid, ev.id, p.predict_question, JSON.stringify(p.predict_key_points.map((k: any) => k.point)), answer, scored.score, JSON.stringify({ covered: scored.covered, missed: scored.missed, scorer: scored.scorer })]);
     const passed = scored.score >= 6;
     return { score: scored.score, covered: scored.covered, missed: scored.missed, passed,
       message: passed ? 'Good reasoning. Now make the change in the editor; hidden tests will check it.' : 'Your explanation missed key points. Re-read the code and try again.' };
@@ -550,6 +550,7 @@ export function registerStudentRoutes(r: Router, deps: StudentDeps) {
       LEFT JOIN drives d ON d.role_id = jr.id AND d.status IN ('scheduled', 'draft')
       GROUP BY jr.id, jr.title, c.name, d.id, d.ctc_inr`);
     const drives = await driveContexts(sql);
+    const saved = new Set((await sql.query<any>(`SELECT role_id FROM student_targets WHERE student_id = $1`, [st.id])).rows.map(x => x.role_id));
     return roles.rows.map(r0 => {
       const required = r0.skills.map((s: any) => {
         const mine = snap.skills.find(x => x.skillId === s.skillId);
@@ -557,11 +558,20 @@ export function registerStudentRoutes(r: Router, deps: StudentDeps) {
       });
       const drive = drives.find(d => d.driveId === r0.drive_id);
       const elig = drive ? EligibilityEvaluator.evaluate(snap, drive.ruleVersion, { driveStartsAt: drive.startsAt }) : null;
-      return { roleId: r0.id, title: r0.title, company: r0.company.replace('[SYNTHETIC] ', ''), ctc: r0.ctc_inr ? Number(r0.ctc_inr) : null,
+      return { roleId: r0.id, saved: saved.has(r0.id), title: r0.title, company: r0.company.replace('[SYNTHETIC] ', ''), ctc: r0.ctc_inr ? Number(r0.ctc_inr) : null,
         fitPercent: Math.round((required.filter((x: any) => x.met).length / required.length) * 100), required,
         gaps: required.filter((x: any) => !x.met).map((x: any) => `${x.name}: ${x.state === 'missing' ? 'not on profile' : x.state.replace('_', '-')}`),
         eligibilityPreview: elig ? { status: elig.status, failing: elig.checks.filter(c => c.passed !== true).map(c => c.message) } : null };
-    }).sort((a: any, b: any) => b.fitPercent - a.fitPercent);
+    }).sort((a: any, b: any) => Number(b.saved) - Number(a.saved) || b.fitPercent - a.fitPercent);
+  });
+  /** Saves or removes a role the student is working towards. Saved roles come first and drive the gap list. */
+  r.post('/api/v2/student/targets/:roleId/toggle', S, async ({ ctx, sql, params }) => {
+    const st = await studentForUser(sql, ctx);
+    const role = await one<any>(sql, `SELECT id FROM job_roles WHERE id = $1`, [requireUuid(params.roleId, 'role id')], 'Role not found.');
+    const had = (await sql.query<any>(`DELETE FROM student_targets WHERE student_id = $1 AND role_id = $2 RETURNING 1`, [st.id, role.id])).rows.length > 0;
+    if (!had) await sql.query(`INSERT INTO student_targets (student_id, role_id) VALUES ($1,$2)`, [st.id, role.id]);
+    await audit(sql, ctx, had ? 'TARGET_REMOVED' : 'TARGET_SAVED', 'job_role', role.id, {});
+    return { saved: !had };
   });
 
   // ---------- Privacy & consent (ST-08) ----------
@@ -633,6 +643,54 @@ export function registerStudentRoutes(r: Router, deps: StudentDeps) {
     await audit(sql, ctx, 'CONSENT_REVOKED', 'consent_grant', null, { purpose, skillsDemoted: demoted, githubGrant: upstream });
     return { active: false, skillsDemoted: demoted, githubGrant: upstream,
       message: purpose === 'repo_verification' ? `Repository access withdrawn; code evidence withdrawn; ${demoted} skill(s) updated${upstream === 'confirmed' ? '; GitHub access revoked at GitHub' : upstream === 'failed' ? '; we could not reach GitHub, so please also remove PRAMAAN in your GitHub settings' : ''}.` : 'Consent withdrawn.' };
+  });
+
+  // ---------- Decision to evidence: one chain from a result to the proof behind it (BR-12) ----------
+  r.get('/api/v2/student/decisions/:id/trace', S, async ({ sql, ctx, params }) => {
+    const st = await studentForUser(sql, ctx);
+    const d = await one<any>(sql, `SELECT ed.id, ed.result, ed.reasons, ed.status, ed.created_at, ed.input_hash, ed.input_snapshot, v.version_no, v.rationale, v.published_at, dr.title, c.name AS company
+      FROM eligibility_decisions ed JOIN eligibility_rule_versions v ON v.id = ed.rule_version_id JOIN drives dr ON dr.id = ed.drive_id JOIN companies c ON c.id = dr.company_id
+      WHERE ed.id = $1 AND ed.student_id = $2`, [requireUuid(params.id, 'decision id'), st.id], 'Decision not found.');
+    const checks: any[] = d.reasons?.checks ?? [];
+    const out: any[] = [];
+    for (const c of checks) {
+      const item: any = { id: c.id, passed: c.passed, message: c.message, skill: null };
+      const m = /^skills\.([0-9a-f-]{36})$/.exec(String(c.id));
+      if (m) {
+        const ss = (await sql.query<any>(`SELECT ss.id, ss.state, ss.proof_level, ss.level, ss.valid_until, k.canonical_name FROM student_skills ss JOIN skills k ON k.id = ss.skill_id WHERE ss.student_id = $1 AND ss.skill_id = $2`, [st.id, m[1]])).rows[0];
+        if (ss) {
+          const ev = (await sql.query<any>(`SELECT e.kind, e.description, e.source, e.path, e.content_hash, e.status, e.accepted_at FROM skill_evidence se JOIN evidence_items e ON e.id = se.evidence_id WHERE se.student_skill_id = $1 ORDER BY e.created_at DESC`, [ss.id])).rows;
+          const hist = (await sql.query<any>(`SELECT from_state, to_state, reason_code, proof_level, occurred_at FROM skill_state_events WHERE student_skill_id = $1 ORDER BY occurred_at DESC LIMIT 5`, [ss.id])).rows;
+          item.skill = { id: ss.id, name: ss.canonical_name, state: ss.state, proofLevel: ss.proof_level, level: ss.level, validUntil: iso(ss.valid_until),
+            evidence: ev.map(e => ({ kind: e.kind, description: e.description, source: e.source, path: e.path, hash: String(e.content_hash).slice(0, 12), status: e.status, acceptedAt: iso(e.accepted_at) })),
+            history: hist.map(h => ({ from: h.from_state, to: h.to_state, reason: h.reason_code, proofLevel: h.proof_level, at: iso(h.occurred_at) })) };
+        }
+      }
+      out.push(item);
+    }
+    return { decision: { id: d.id, drive: d.title.replace('[SYNTHETIC] ', ''), company: d.company.replace('[SYNTHETIC] ', ''), result: d.result, status: d.status, decidedAt: iso(d.created_at), inputHash: String(d.input_hash).slice(0, 16) },
+      rules: { version: d.version_no, rationale: d.rationale, publishedAt: iso(d.published_at) }, checks: out,
+      howToReproduce: 'The same marks, skills and rule version always give the same result. The input fingerprint above identifies the exact data that was used.' };
+  });
+
+  /**
+   * Replays a decision: runs the rules again on the saved inputs (not on today's data) and compares the result and the input
+   * fingerprint with what was stored. A match shows the stored decision follows from its saved inputs and rule version.
+   * It does not show the rule itself is fair or the inputs were correct.
+   */
+  r.post('/api/v2/student/decisions/:id/replay', S, async ({ sql, ctx, params }) => {
+    const st = await studentForUser(sql, ctx);
+    const d = await one<any>(sql, `SELECT ed.id, ed.result, ed.input_snapshot, ed.input_hash, ed.reasons, v.id AS rv_id, v.rule_set_id, v.version_no, v.rules, v.rationale, v.published_by, v.published_at, dr.starts_at, ed.status
+      FROM eligibility_decisions ed JOIN eligibility_rule_versions v ON v.id = ed.rule_version_id JOIN drives dr ON dr.id = ed.drive_id WHERE ed.id = $1 AND ed.student_id = $2`, [requireUuid(params.id, 'decision id'), st.id], 'Decision not found.');
+    const version = { id: d.rv_id, ruleSetId: d.rule_set_id, versionNo: d.version_no, rules: EligibilityRuleSpecSchema.parse(d.rules), rationale: d.rationale, publishedBy: d.published_by, publishedAt: new Date(d.published_at).toISOString() } as any;
+    const res = EligibilityEvaluator.evaluate(d.input_snapshot, version, { driveStartsAt: new Date(d.starts_at).toISOString() });
+    const sameResult = res.status === d.result;
+    const sameInputs = res.inputHash === d.input_hash;
+    const sameChecks = JSON.stringify((res.checks ?? []).map((c: any) => [c.id, c.passed])) === JSON.stringify((d.reasons?.checks ?? []).map((c: any) => [c.id, c.passed]));
+    const overridden = d.status === 'overridden';
+    return { reproduced: sameResult && sameInputs && sameChecks, sameResult, sameInputs, sameChecks, storedResult: d.result, replayedResult: res.status, ruleVersion: d.version_no, overridden,
+      message: overridden ? 'This decision was changed by the placement office after an appeal, so the stored result differs from the rules by design.'
+        : sameResult && sameInputs && sameChecks ? 'Same rules and same saved inputs give the same result, check by check.' : 'The replay did not match the stored decision. Ask the placement office to look into it.' };
   });
 
   // ---------- Imported GitHub code becomes evidence (ST-02) ----------

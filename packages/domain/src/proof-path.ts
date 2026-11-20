@@ -195,8 +195,9 @@ export class ProofPath {
       const base = evalAll(snapshot, drives, now);
       const blocked = new Set(base.filter(e => e.result.status !== 'eligible').map(e => e.drive.driveId));
       for (const [skillId, t] of candidateTargets(base)) {
-        const after = evalAll(withSkill(snapshot, skillId, t.name, t.level, t.proof), drives, now);
-        const gained = after.filter(e => blocked.has(e.drive.driveId) && e.result.status === 'eligible').length;
+        // Only a blocked drive that asks for this skill can change, so only those are re-checked.
+        const after = evalAll(withSkill(snapshot, skillId, t.name, t.level, t.proof), drives.filter(d => blocked.has(d.driveId) && d.ruleVersion.rules.skills.some(s => s.skillId === skillId)), now);
+        const gained = after.filter(e => e.result.status === 'eligible').length;
         const cur = bySkill.get(skillId) ?? { skillId, name: t.name, targetLevel: t.level, targetProof: t.proof, studentsAffected: 0, eligibilitiesGained: 0 };
         cur.studentsAffected += 1;
         cur.eligibilitiesGained += gained;

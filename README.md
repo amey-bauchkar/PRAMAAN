@@ -4,12 +4,16 @@
 ![Node](https://img.shields.io/badge/node-%E2%89%A522-339933)
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6)
 
-**Skills you can prove. Placements you can explain.**
+**Skills you can prove. Placements you can audit.**
 
 PRAMAAN is a campus-placement platform for colleges. Student work becomes graded, verifiable proof of skill. Placement officers publish eligibility rules that are versioned, tested for fairness and explained in plain language. Recruiters see evidence instead of claims. It was built for the QUASAR 5.0 EdTech problem statement.
 
 ## What it does
 
+The idea in one line: **receipts, not claims.** A model may propose, but only something that was executed, computed or signed may decide. Three receipts anyone can check: a skill certificate, a replayable eligibility decision, and a placement signed by both the recruiter and the student and recorded in a public log. See [docs/PITCH.md](docs/PITCH.md).
+
+- **Placement ledger.** A placement counts as verified only when the recruiter signs the offer and the student signs the acceptance (keys stay in their browsers). Every accepted offer, published rule version and batch of decisions goes into an append-only Merkle log whose checkpoints are signed by the log operator and can be witnessed by the parent university with its own key. Anyone can rebuild and check the log in their own browser at `/ledger/<college id>`, or with `npm run verify:ledger -- <api address> <college id>`, which shares no code with the website. Reports separate verified placements from placements the college only recorded. What it does not prove, and what is next, is listed in [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md).
+- **Replay this decision.** Re-run a stored eligibility decision on its saved inputs and rule version and compare the result.
 - **Verified skill graph.** Evidence (repositories, machine tests, mock drives, mentor attestations) moves a skill through Claimed, Observed and Verified, with Proof Levels L1 to L3. Code authorship is checked with a Live Mutation Probe: the student changes their own code under hidden tests and predicts its behaviour.
 - **Explainable eligibility.** Rules are written in a small DSL, versioned, and evaluated per student. Every failed check is returned as a reason in English, Hindi or Marathi, with an appeal path.
 - **Fairness checks and repair.** Each rule is tested against the four-fifths benchmark before it is published. When a rule fails, the repair search proposes a small, fairer change that keeps the required skills. Officers decide and a reason is recorded.

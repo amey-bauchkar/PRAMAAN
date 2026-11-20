@@ -90,14 +90,14 @@ describe('Interview scoring: model judge with a rules fallback', () => {
     }
   });
 
-  it('ResilientEnsembleJudge combines coverage when both judges succeed', async () => {
+  it('ResilientEnsembleJudge gives credit only where both judges agree (a union let keyword stuffing through in a live test)', async () => {
     const gemini: CoverageJudge = { name: 'llm:gemini-3.5-flash-lite', coverage: async () => [true, false] };
     const groq: CoverageJudge = { name: 'llm:groq:openai/gpt-oss-120b', coverage: async () => [false, true] };
     const ensemble = new ResilientEnsembleJudge([gemini, groq]);
     const s = await scoreAnswer(q, 'A join combines rows using matching keys', ensemble);
     expect(s.scorer).toBe('ensemble:gemini-3.5-flash-lite+groq:openai/gpt-oss-120b');
-    expect(s.score).toBe(10);
-    expect(s.covered).toEqual(['combines rows from two tables', 'uses a matching column']);
+    expect(s.score).toBe(0);
+    expect(s.covered).toEqual([]);
   });
 
   it('ResilientEnsembleJudge fails over smoothly if one judge fails', async () => {

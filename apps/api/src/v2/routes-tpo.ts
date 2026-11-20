@@ -1,5 +1,9 @@
 import { randomUUID } from 'crypto';
 import { Mailer } from './mailer.js';
+import { appendLedger, ledgerEnabled } from './ledger.js';
+import { canonicalJson, sha256Hex } from '@pramaan/domain';
+import { FailoverLlm } from './llm.js';
+import { draftWithModel } from './interview-drafter.js';
 import ExcelJS from 'exceljs';
 import { AuditChain } from '@pramaan/domain';
 import { buildMockReport } from '@pramaan/domain';
@@ -12,7 +16,7 @@ import { EligibilityRuleSpecSchema, EligibilityRuleSpec, SessionContext, Fairnes
 import { Router, HttpError, OFFICER_ROLES, STAFF_ROLES, requireString, requireUuid, one, membershipId } from './http.js';
 import { Sql } from './db.js';
 import { audit, recordAgentRun } from './audit.js';
-import { awardProof, academicSnapshot, driveContexts, evaluateDrive, displayName, reevaluateStudent } from './services.js';
+import { awardProof, academicSnapshots, driveContexts, evaluateDrive, displayName, reevaluateStudent } from './services.js';
 import { BRANCH_CORE_SKILLS } from './config.js';
 
 const O = OFFICER_ROLES;
@@ -41,7 +45,7 @@ async function cohortFacts(sql: Sql, ctx: SessionContext) {
   return { students, skills, mocks, paths };
 }
 
-export function registerTpoRoutes(r: Router, deps: { judgeName: string; mailer: Mailer }) {
+export function registerTpoRoutes(r: Router, deps: { judgeName: string; mailer: Mailer; llm?: FailoverLlm | null }) {
   // ---------- AD-01 Cohort dashboard & reports ----------
   r.get('/api/v2/tpo/cohort', O, async ({ ctx, sql }) => {
     const { students, skills, mocks } = await cohortFacts(sql, ctx);
@@ -138,8 +142,7 @@ export function registerTpoRoutes(r: Router, deps: { judgeName: string; mailer: 
   r.get('/api/v2/tpo/interventions', O, async ({ sql }) => {
     const drives = await driveContexts(sql);
     const ids = (await sql.query<{ id: string }>(`SELECT id FROM students`)).rows.map(x => x.id);
-    const snaps = [];
-    for (const id of ids) snaps.push(await academicSnapshot(sql, id));
+    const snaps = [...(await academicSnapshots(sql, ids)).values()];
     return { ranking: ProofPath.rankInterventions(snaps, drives).slice(0, 8), drives: drives.length, students: snaps.length,
       method: 'For each skill, we check the published rules again as if every student who is held back by it had reached the required level.' };
   });
@@ -250,7 +253,9 @@ export function registerTpoRoutes(r: Router, deps: { judgeName: string; mailer: 
     const role = requireString(body.role, 'role', 3, 120);
     const topics: string[] = (await sql.query<any>(`SELECT DISTINCT k.slug FROM job_roles jr JOIN job_role_skills jrs ON jrs.role_id = jr.id JOIN skills k ON k.id = jrs.skill_id WHERE jr.title = $1`, [role])).rows.map(x => x.slug);
     const fallback = ['problem-solving', 'communication'];
-    const drafts = (topics.length ? topics : fallback).slice(0, 3).map(t => ({
+    const wanted = (topics.length ? topics : fallback).slice(0, 3);
+    const modelDrafts = deps.llm ? await draftWithModel(deps.llm, role, wanted) : null;
+    const drafts = modelDrafts ?? wanted.map(t => ({
       topic: t, question: `Describe a project where you used ${t.replace(/-/g, ' ')}. What problem did it solve, what trade-off did you make, and how did you check it worked?`,
       keyPoints: [
         { point: 'States the problem and their own role', keywords: ['problem', 'i built', 'i wrote', 'my role', 'i was responsible'] },
@@ -265,7 +270,8 @@ export function registerTpoRoutes(r: Router, deps: { judgeName: string; mailer: 
         [id, ctx.orgId, role, d.topic, d.question, JSON.stringify(d.keyPoints)]);
       ids.push(id);
     }
-    await recordAgentRun(sql, ctx, 'Interview Drafter', [{ tool: 'draft_questions', input: { role, topics }, output: { drafts: ids.length } }],
+    const drafter = modelDrafts && deps.llm ? deps.llm.lastUsed ?? 'llm' : 'deterministic-rules-v1';
+    await recordAgentRun(sql, ctx, 'Interview Drafter', [{ tool: 'draft_questions', input: { role, topics }, output: { drafts: ids.length, drafter } }],
       [{ kind: 'interview_questions', title: `Review ${ids.length} drafted interview questions for ${role}`, rationale: 'Drafted from the skills this role requires. Approve, edit or reject each before students see it.', payload: { questionIds: ids, role } }]);
     return { drafted: ids.length };
   });
@@ -539,8 +545,7 @@ export function registerTpoRoutes(r: Router, deps: { judgeName: string; mailer: 
     const rows = (await sql.query<{ id: string; code: string }>(`SELECT s.id, d.code FROM students s JOIN departments d ON d.id = s.department_id`)).rows;
     const allowed = rules.branches.map(b => b.toLowerCase());
     const pop = allowed.length ? rows.filter(r0 => allowed.includes(r0.code.toLowerCase())) : rows;
-    const snaps = new Map<string, any>();
-    for (const r0 of pop) snaps.set(r0.id, await academicSnapshot(sql, r0.id));
+    const snaps = await academicSnapshots(sql, pop.map(r0 => r0.id));
     const dims: FairnessDimension[] = allowed.length ? ['gender', 'category', 'college_tier'] : DIMENSIONS;
     return { ids: pop.map(r0 => r0.id), snaps, dims };
   };
@@ -558,8 +563,8 @@ export function registerTpoRoutes(r: Router, deps: { judgeName: string; mailer: 
     const now: string[] = [], before: string[] = [];
     let gained = 0, lost = 0;
     for (const id of ids) {
-      const a = EligibilityEvaluator.evaluate(snaps.get(id), draft, opts).status === 'eligible';
-      const b = cur ? EligibilityEvaluator.evaluate(snaps.get(id), cur, opts).status === 'eligible' : false;
+      const a = EligibilityEvaluator.evaluate(snaps.get(id)!, draft, opts).status === 'eligible';
+      const b = cur ? EligibilityEvaluator.evaluate(snaps.get(id)!, cur, opts).status === 'eligible' : false;
       if (a) now.push(id);
       if (b) before.push(id);
       if (a && !b) gained++;
@@ -590,7 +595,7 @@ export function registerTpoRoutes(r: Router, deps: { judgeName: string; mailer: 
     const evaluated: RepairEvaluation[] = [];
     for (const c of candidateRepairs(base.rules)) {
       const v = asVersion(c.rules);
-      const sel = ids.filter(id => EligibilityEvaluator.evaluate(snaps.get(id), v, opts).status === 'eligible');
+      const sel = ids.filter(id => EligibilityEvaluator.evaluate(snaps.get(id)!, v, opts).status === 'eligible');
       const f = await fairnessFor(sql, ids, sel, dims);
       evaluated.push({ edits: c.edits, rules: c.rules, eligible: sel.length, minImpactRatio: f.minRatio, adverseDimensions: f.adverse, shortfall: f.shortfall, ratioGap: f.ratioGap });
     }
@@ -614,6 +619,10 @@ export function registerTpoRoutes(r: Router, deps: { judgeName: string; mailer: 
       [vid, d.rule_set_id, next, JSON.stringify(preview.rules), rationale, await membershipId(sql, ctx)]);
     await sql.query(`UPDATE drives SET rule_version_id = $2, decisions_published_at = NULL WHERE id = $1`, [driveId, vid]);
     await audit(sql, ctx, 'RULE_VERSION_PUBLISHED', 'eligibility_rule_version', vid, { driveId, versionNo: next, rationale, eligible: preview.eligible, gained: preview.gained, lost: preview.lost });
+    if (ledgerEnabled()) {
+      const adverse = Object.entries(preview.fairness ?? {}).filter(([, rep]: any) => rep?.adverseImpactDetected).map(([k]) => k);
+      await appendLedger(sql, ctx, { kind: 'rule_published', driveId, versionNo: next, rulesHash: sha256Hex(canonicalJson(preview.rules)), population: preview.population, eligible: preview.eligible, groupsBelowFourFifths: adverse, at: new Date().toISOString() });
+    }
     const counts = await evaluateDrive(sql, ctx, driveId, { publish: false });
     return { versionId: vid, versionNo: next, ...counts, note: 'These results are not final until you publish them to students.' };
   });
@@ -825,6 +834,20 @@ export function registerTpoRoutes(r: Router, deps: { judgeName: string; mailer: 
       [id, st.id, body.outcomeType, typeof body.organization === 'string' ? body.organization.slice(0, 255) : null, ctc, typeof body.evidenceRef === 'string' ? body.evidenceRef.slice(0, 255) : null]);
     await audit(sql, ctx, 'OUTCOME_RECORDED', 'student_outcome', id, { outcomeType: body.outcomeType });
     return { id, message: 'Outcome recorded. It appears in the accreditation tables.' };
+  });
+
+  // ---------- Retention (DPDP): code kept only for the retention period after consent was withdrawn ----------
+  /** Deletes imported code (raw file bytes) of students whose repository consent was withdrawn longer ago than the purpose's retention period. */
+  r.post('/api/v2/tpo/retention/run', O, async ({ ctx, sql }) => {
+    const days = Number((await sql.query<any>(`SELECT retention_days FROM consent_purposes WHERE code = 'repo_verification'`)).rows[0]?.retention_days ?? 365);
+    const stale = (await sql.query<any>(`SELECT s.student_id FROM source_snapshots s
+        WHERE NOT EXISTS (SELECT 1 FROM consent_grants g WHERE g.student_id = s.student_id AND g.purpose = 'repo_verification' AND g.revoked_at IS NULL)
+        GROUP BY s.student_id
+        HAVING coalesce((SELECT max(g.revoked_at) FROM consent_grants g WHERE g.student_id = s.student_id AND g.purpose = 'repo_verification'), '-infinity') < now() - ($1 || ' days')::interval`, [String(days)])).rows.map(x => x.student_id);
+    let deleted = 0;
+    if (stale.length) deleted = (await sql.query<any>(`DELETE FROM source_snapshots WHERE student_id = ANY($1::uuid[]) RETURNING 1`, [stale])).rows.length;
+    await audit(sql, ctx, 'RETENTION_PURGE_RUN', 'organization', ctx.orgId, { retentionDays: days, students: stale.length, snapshotsDeleted: deleted });
+    return { retentionDays: days, students: stale.length, snapshotsDeleted: deleted, message: deleted ? `Deleted ${deleted} stored file(s) for ${stale.length} student(s) whose consent ended more than ${days} days ago.` : `Nothing is past its ${days}-day retention period.` };
   });
 
   // ---------- Data requests from students (DPDP rights) ----------

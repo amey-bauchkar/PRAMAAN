@@ -11,6 +11,8 @@ import { LearningPath } from './student/LearningPath';
 import { MyDrives } from './student/MyDrives';
 import { Privacy } from './student/Privacy';
 import { Passes } from './student/Passes';
+import { MyOffers } from './student/MyOffers';
+import { TrustLedger } from './tpo/TrustLedger';
 import { Cohort } from './tpo/Cohort';
 import { Demand } from './tpo/Demand';
 import { Readiness } from './tpo/Readiness';
@@ -27,12 +29,13 @@ import { Reviews } from './tpo/Reviews';
 import { Search } from './recruiter/Search';
 import { Pipeline } from './recruiter/Pipeline';
 import { Outcomes } from './university/Outcomes';
+import { Witness } from './university/Witness';
 
 const VIEWS: Record<string, Record<string, React.ComponentType>> = {
-  student: { profile: Profile, import: Import, proofs: Proofs, targets: Targets, 'mock-drive': MockDrive, 'learning-path': LearningPath, drives: MyDrives, passes: Passes, privacy: Privacy },
-  tpo: { cohort: Cohort, demand: Demand, readiness: Readiness, 'mock-setup': MockSetup, outreach: Outreach, drives: Drives, rules: Rules, applications: Applications, proposals: Proposals, fairness: Fairness, accreditation: Accreditation, roles: Roles, reviews: Reviews },
+  student: { profile: Profile, import: Import, proofs: Proofs, targets: Targets, 'mock-drive': MockDrive, 'learning-path': LearningPath, drives: MyDrives, passes: Passes, offers: MyOffers, privacy: Privacy },
+  tpo: { ledger: TrustLedger, cohort: Cohort, demand: Demand, readiness: Readiness, 'mock-setup': MockSetup, outreach: Outreach, drives: Drives, rules: Rules, applications: Applications, proposals: Proposals, fairness: Fairness, accreditation: Accreditation, roles: Roles, reviews: Reviews },
   recruiter: { search: Search, pipeline: Pipeline },
-  university: { outcomes: Outcomes },
+  university: { outcomes: Outcomes, witness: Witness },
 };
 
 export function ModuleView({ workspace, module }: { workspace: WorkspaceKey; module: string }) {

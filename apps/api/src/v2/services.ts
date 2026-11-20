@@ -7,6 +7,8 @@ import { SkillStateMachine, VerificationResultInput, EligibilityEvaluator, Drive
 import { Sql } from './db.js';
 import { HttpError } from './http.js';
 import { audit } from './audit.js';
+import { appendLedger, ledgerEnabled, studentRef } from './ledger.js';
+import { merkleRoot, leafHash } from '@pramaan/domain';
 
 export const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 
@@ -148,6 +150,16 @@ export async function awardProof(sql: Sql, ctx: SessionContext, input: AwardInpu
 
 /** Frozen input for eligibility evaluation; stored with each decision for reproducibility. */
 export async function academicSnapshot(sql: Sql, studentId: string): Promise<StudentAcademicSnapshot> {
+  const m = await academicSnapshots(sql, [studentId]);
+  const s = m.get(studentId);
+  if (!s) throw new HttpError(404, 'Student not found.');
+  return s;
+}
+
+/** Loads snapshots for many students with two queries in total (instead of two per student). */
+export async function academicSnapshots(sql: Sql, studentIds: string[]): Promise<Map<string, StudentAcademicSnapshot>> {
+  const out = new Map<string, StudentAcademicSnapshot>();
+  if (studentIds.length === 0) return out;
   const r = await sql.query<any>(`
     SELECT s.id, s.graduating_year, s.disciplinary_hold, d.code AS branch,
            a.cgpa, a.tenth_pct, a.twelfth_pct, a.diploma_pct, a.gap_years, a.active_backlogs, a.backlog_history,
@@ -157,19 +169,20 @@ export async function academicSnapshot(sql: Sql, studentId: string): Promise<Stu
                     (SELECT max(f.ctc_inr) FROM offers f JOIN applications ap ON ap.id = f.application_id WHERE ap.student_id = s.id AND f.status = 'accepted')) AS top_ctc
       FROM students s JOIN departments d ON d.id = s.department_id
       LEFT JOIN LATERAL (SELECT * FROM academic_records x WHERE x.student_id = s.id ORDER BY x.as_of DESC LIMIT 1) a ON TRUE
-     WHERE s.id = $1`, [studentId]);
-  const x = r.rows[0];
-  if (!x) throw new HttpError(404, 'Student not found.');
-  const skills = await sql.query<any>(`SELECT ss.skill_id, k.canonical_name, ss.state, ss.level, ss.proof_level, ss.valid_until
-    FROM student_skills ss JOIN skills k ON k.id = ss.skill_id WHERE ss.student_id = $1`, [studentId]);
+     WHERE s.id = ANY($1::uuid[])`, [studentIds]);
+  const skills = await sql.query<any>(`SELECT ss.student_id, ss.skill_id, k.canonical_name, ss.state, ss.level, ss.proof_level, ss.valid_until
+    FROM student_skills ss JOIN skills k ON k.id = ss.skill_id WHERE ss.student_id = ANY($1::uuid[])`, [studentIds]);
   const n = (v: any) => (v === null || v === undefined ? null : Number(v));
-  return {
-    studentId, cgpa: n(x.cgpa), tenthPct: n(x.tenth_pct), twelfthPct: n(x.twelfth_pct), diplomaPct: n(x.diploma_pct),
+  const skillsBy = new Map<string, any[]>();
+  for (const s of skills.rows) (skillsBy.get(s.student_id) ?? skillsBy.set(s.student_id, []).get(s.student_id)!).push(s);
+  for (const x of r.rows) out.set(x.id, {
+    studentId: x.id, cgpa: n(x.cgpa), tenthPct: n(x.tenth_pct), twelfthPct: n(x.twelfth_pct), diplomaPct: n(x.diploma_pct),
     gapYears: n(x.gap_years), activeBacklogs: n(x.active_backlogs), backlogHistory: n(x.backlog_history),
     branch: x.branch, graduatingYear: x.graduating_year,
-    skills: skills.rows.map(s => ({ skillId: s.skill_id, name: s.canonical_name, state: s.state, level: s.level ?? 1, proofLevel: s.proof_level, validUntil: s.valid_until ? new Date(s.valid_until).toISOString() : null })),
+    skills: (skillsBy.get(x.id) ?? []).map(s => ({ skillId: s.skill_id, name: s.canonical_name, state: s.state, level: s.level ?? 1, proofLevel: s.proof_level, validUntil: s.valid_until ? new Date(s.valid_until).toISOString() : null })),
     offersHeld: x.offers ?? 0, highestOfferCtcInr: n(x.top_ctc), disciplinaryHold: !!x.disciplinary_hold,
-  };
+  });
+  return out;
 }
 
 export async function driveContexts(sql: Sql, where = `d.status IN ('scheduled', 'draft')`, params: unknown[] = []): Promise<(DriveRuleContext & { status: string; company: string; ctc: number | null; publishedAt: string | null })[]> {
@@ -201,8 +214,10 @@ export async function evaluateDrive(sql: Sql, ctx: SessionContext, driveId: stri
     ? opts.studentIds
     : (await sql.query<{ id: string }>(`SELECT id FROM students WHERE org_id = $1`, [ctx.orgId])).rows.map(r => r.id);
   const counts = { eligible: 0, ineligible: 0, needsReview: 0 };
+  const snaps = await academicSnapshots(sql, students);
   for (const sid of students) {
-    const snap = await academicSnapshot(sql, sid);
+    const snap = snaps.get(sid);
+    if (!snap) continue;
     const res = EligibilityEvaluator.evaluate(snap, drive.ruleVersion, { driveStartsAt: drive.startsAt });
     if (res.status === 'eligible') counts.eligible++; else if (res.status === 'ineligible') counts.ineligible++; else counts.needsReview++;
     await sql.query(`
@@ -218,6 +233,12 @@ export async function evaluateDrive(sql: Sql, ctx: SessionContext, driveId: stri
   if (opts.publish && !opts.studentIds) {
     await sql.query(`UPDATE eligibility_decisions SET status = 'published' WHERE drive_id = $1 AND rule_version_id = $2 AND status = 'provisional'`, [driveId, drive.ruleVersion.id]);
     await sql.query(`UPDATE drives SET decisions_published_at = now() WHERE id = $1`, [driveId]);
+    if (ledgerEnabled()) {
+      // Commit the whole batch to the ledger: one leaf per decision, then the root of those leaves. A student can later check theirs is in it.
+      const rows = (await sql.query<any>(`SELECT student_id, result, input_hash FROM eligibility_decisions WHERE drive_id = $1 AND rule_version_id = $2 ORDER BY student_id`, [driveId, drive.ruleVersion.id])).rows;
+      const decisionsRoot = merkleRoot(rows.map(x => leafHash({ studentRef: studentRef(ctx.orgId, x.student_id), result: x.result, inputHash: x.input_hash })));
+      await appendLedger(sql, ctx, { kind: 'decisions_published', driveId, ruleVersionId: drive.ruleVersion.id, count: rows.length, decisionsRoot, at: new Date().toISOString() });
+    }
   }
   await audit(sql, ctx, opts.studentIds ? 'ELIGIBILITY_REEVALUATED' : opts.publish ? 'ELIGIBILITY_PUBLISHED' : 'ELIGIBILITY_EVALUATED', 'drive', driveId,
     { ruleVersionId: drive.ruleVersion.id, students: students.length, ...counts });

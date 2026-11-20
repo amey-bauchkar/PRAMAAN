@@ -1,11 +1,12 @@
 'use client';
 
 import React from 'react';
-import { lpa, useApi } from '@/lib/api';
-import { Card, ErrorBox, Loading, PageHeader, ProofBadge, ResultBadge, StateBadge } from '../ui';
+import { api, lpa, useAction, useApi } from '@/lib/api';
+import { Button, Card, ErrorBox, Loading, PageHeader, ProofBadge, ResultBadge, StateBadge } from '../ui';
 
 export function Targets() {
-  const { data, error } = useApi('/api/v2/student/targets');
+  const { data, error, reload } = useApi('/api/v2/student/targets');
+  const act = useAction();
   if (error) return <ErrorBox error={error} />;
   if (!data) return <Loading />;
   return (
@@ -16,6 +17,7 @@ export function Targets() {
           <Card key={r.roleId} title={<span>{r.title} <span className="font-normal text-muted">· {r.company}</span></span>}
             actions={<span className="font-display text-2xl font-semibold tabular-nums">{r.fitPercent}%<span className="ml-1 text-xs font-normal text-muted">match</span></span>}>
             <p className="text-sm text-muted">{lpa(r.ctc)}</p>
+            <div className="mt-1"><Button kind={r.saved ? 'secondary' : 'ghost'} busy={act.busy} onClick={async () => { if (await act.run(() => api(`/api/v2/student/targets/${r.roleId}/toggle`, { method: 'POST' }))) reload(); }}>{r.saved ? 'Saved: working towards this' : 'Save as a target'}</Button></div>
             <ul className="mt-2 flex flex-col gap-1.5 text-sm">
               {r.required.map((s: any) => (
                 <li key={s.name} className="flex flex-wrap items-center justify-between gap-2">
