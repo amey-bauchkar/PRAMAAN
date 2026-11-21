@@ -64,7 +64,6 @@ export default function HomePage() {
       <main>
         {/* Hero */}
         <section className="relative">
-          <div className="grid-fade pointer-events-none absolute inset-x-0 top-0 h-[620px]" aria-hidden />
           <div className="relative mx-auto max-w-7xl px-4 pt-16 sm:px-8 sm:pt-24">
                         <Reveal delay={80}>
               <h1 className="mx-auto max-w-5xl text-center text-[2.9rem] leading-[1.02] sm:text-7xl lg:text-[6.5rem]">

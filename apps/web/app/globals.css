@@ -79,11 +79,6 @@ html.lenis, html.lenis body { height: auto; }
 .marquee-track { animation: marquee 38s linear infinite; width: max-content; }
 .dot-live { animation: pulse-ring 1.8s ease-out infinite; }
 .grow-bar { transform-origin: left; animation: grow 1.4s .3s cubic-bezier(.2,.7,.2,1) both; }
-.grid-fade {
-  background-image: linear-gradient(rgb(0 0 0 / .05) 1px, transparent 1px), linear-gradient(90deg, rgb(0 0 0 / .05) 1px, transparent 1px);
-  background-size: 44px 44px;
-  mask-image: radial-gradient(70% 60% at 50% 0%, #000 30%, transparent 75%);
-}
 @media (prefers-reduced-motion: reduce) {
   .reveal { opacity: 1; transform: none; transition: none; }
   .float-a, .float-b, .marquee-track, .dot-live, .grow-bar { animation: none; }

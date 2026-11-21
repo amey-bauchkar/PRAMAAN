@@ -90,25 +90,25 @@ Each slide has one headline. Keep it on the slide, move the detail to speaker no
 9. **What is real, and what is not.** Prior art in one line ("IPRS does this on paper; we make it checkable"), the limits table from `docs/KNOWN_LIMITATIONS.md`, and the three weakest points with their fixes. Judges trust a team that lists its limits.
 10. **Pilot and ask.** One college, one recruiter, one auditor, one university witness. Metrics: share of placements verified, time to answer a student's "why", appeals decided in 3 days.
 
-Tag every number on slides as **measured** (from the prototype), **simulated**, **cited** (with link) or **projected**. Never put an unlabelled number on a slide. Measured today: the offline test suite (`npm run test:offline`) passed with 51 test files and 572 tests on 19 Nov 2026.
+Tag every number on slides as **measured** (from the prototype), **simulated**, **cited** (with link) or **projected**. Never put an unlabelled number on a slide. Measured today: the offline test suite (`npm run test:offline`) passed with 52 test files and 575 tests on 20 Nov 2026 (three timing-sensitive files fail only when the machine is heavily loaded, and pass on a rerun).
 
 ## What the log protects against, and what it does not
 
 | Attack | What happens |
 |---|---|
 | Someone adds a placement with no recruiter | It is not a verified placement. It counts only in "recorded by the college only", and reports label it that way. |
-| Someone adds a fake recruiter and a fake student | It passes the signature checks. **This is the weakest point.** An auditor catches it by drawing a sample with a seed the auditor picks (so the college does not choose it) and calling the company on contact details the college did not supply. The next step is to tie each recruiter key to a company domain and registration number. |
+| Someone adds a fake recruiter and a fake student | It passes the signature checks. **This is the weakest point.** An auditor catches it by drawing a sample with a seed the auditor picks (so the college does not choose it) and calling the company on contact details the college did not supply. A recruiter can now prove that the key holder controls a company domain (a line published on the company website), and audit tables show that domain or "not proved". An agency or a college can still own a domain, so the auditor still calls the company. Next: registration numbers and a recruiter-key log across colleges. |
 | Someone changes a salary | The recruiter's signature no longer matches. Even if the entry's fingerprint is recomputed, the log no longer matches the state the operator signed (shown live). |
 | Someone deletes a placement | The student or recruiter still holds a signed receipt, and an earlier signed state no longer extends to the current one (the public page checks this). |
 | The operator rewrites the log and signs it again | The operator's own checks pass. The university witness signed an earlier state with its own key and the rewrite no longer matches it (shown live). Entries added after the last witnessing are protected only by the operator's signature and the receipts until the university witnesses again. One witness can also fail by colluding or by not looking. |
 | A recruiter signs an offer they never meant | The signature is theirs. It proves they signed, not that they were honest. |
-| An agency issues offers in a company's name | Same as a fake recruiter: valid signatures, caught only by the company call-back. |
+| An agency issues offers in a company's name | Same as a fake recruiter: valid signatures, the domain shows who controls the key, which exposes an agency domain but not an authorised agent. The company call-back is still what settles it. |
 | A student accepts and never joins | The log shows an accepted offer, not a joining. Signed joined and resigned events are the next step. |
 
 ## Questions a judge will ask
 
 - **"Isn't this just IPRS on paper?"** IPRS already accepts signed forms and an external audit, and we say so. The difference is that anyone can recheck the signatures at any time, the sample is reproducible from a seed the auditor picks, the log shows if history changed, and one source can feed NIRF, NAAC and NBA tables.
-- **"Who stops a fake recruiter?"** Today, the audit sample and a call to the company. That is the weakest point and we say so. The next step is binding each recruiter key to a company domain and registration number, and logging recruiter keys across colleges.
+- **"Who stops a fake recruiter?"** Three layers, none complete. A recruiter key can be tied to a company domain by publishing one proof line on that website, and audits show the domain. An auditor draws a sample with their own seed and calls the company on contact details the college did not supply. Domain control is not company authorisation, so that call stays. Next: registration numbers (CIN or GSTIN) and a recruiter-key log across colleges.
 - **"Who holds the signing key?"** The log operator holds one signing key. In this prototype one key serves every college, and the demo key is a public constant. The next step is a key per college in a hardware module, plus more witnesses.
 - **"Who is the witness and why trust them?"** The college's parent university signs the log with a key the operator does not hold. It is one witness, so one colluding or careless university defeats it. More witnesses, and a regulator as one of them, are the next step.
 - **"Can't a student use ChatGPT on the code check?"** Yes. No remote check can stop that without surveillance, which we refuse to do. The check is time-boxed, different each time and verified by running code, and recruiters can ask for a live re-check. We label what it proves.
@@ -125,7 +125,7 @@ Tag every number on slides as **measured** (from the prototype), **simulated**, 
 
 ## What to build next, in order
 
-1. Bind each recruiter key to a company domain and registration number, and log recruiter keys across colleges.
+1. Tie recruiter keys to company registration numbers (CIN or GSTIN), and log recruiter keys across colleges. Domain proof already exists.
 2. Signed joined, withdrawn and resigned events, and separate counts for offers, joinings and retained.
 3. More witnesses (other universities, a regulator), the C2SP checkpoint format, and each witness fetching and verifying the proof itself.
 4. A signing key per college in a hardware module, with rotation.

@@ -74,11 +74,11 @@ export function TrustLedger() {
         {sample && (
           <div className="mt-3">
             <p className="text-sm text-muted">{sample.sample.length} of {sample.population} placements picked from seed <span className="font-mono">{sample.seed}</span> and the signed root <span className="font-mono">{String(sample.treeRoot).slice(0, 12)}…</span>. Names are never stored. {witnessNote}</p>
-            <Table head={['Entry', 'Company', 'Role', 'CTC', 'Recruiter key', 'Recruiter', 'Student']}>
+            <Table head={['Entry', 'Company', 'Role', 'CTC', 'Recruiter key', 'Domain', 'Recruiter', 'Student']}>
               {sample.sample.map((s: any) => (
                 <tr key={s.seq}>
                   <Td className="tabular-nums">{s.seq}</Td><Td>{s.company}</Td><Td>{s.role}</Td><Td>{lpa(s.ctcInr)}</Td>
-                  <Td><span className="font-mono text-xs">{s.recruiterKeyId}</span></Td>
+                  <Td><span className="font-mono text-xs">{s.recruiterKeyId}</span></Td><Td>{s.recruiterDomain ?? 'not proved'}</Td>
                   <Td className={s.recruiterSignatureValid ? '' : 'font-semibold text-red-700'}>{s.recruiterSignatureValid ? 'Signature valid' : 'Signature does not match'}</Td>
                   <Td className={s.studentSignatureValid ? '' : 'font-semibold text-red-700'}>{s.studentSignatureValid ? 'Signature valid' : 'Signature does not match'}</Td>
                 </tr>

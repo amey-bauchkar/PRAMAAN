@@ -25,5 +25,5 @@ A walkthrough of the offline demo, about six minutes. Start it with `npm run dem
 6. **Eligibility Pass** (once a drive is eligible): the college signs the facts and the student shares "CGPA ≥ 7.5: met" instead of the CGPA. Any recruiter checks it at `/verify-pass` with a one-time request. Replays, other devices and altered passes are rejected.
 7. **Placement officer:** Cohort dashboard (heatmap, 6 KPIs with formulas, SQL workshop 60% → 25%), Demand Scout scan, Readiness Radar, company email → slot proposal → approve, appeals.
 8. **Rules what-if → Find a fairer alternative:** on *Software Engineer Trainee*, set the 10th and 12th minimums to 75 and preview. Gender and category are flagged and 7 students are eligible. The repair search tries 57 small changes, never removing a required skill, and offers "10th 65%, 12th 60%" (24 eligible, total gap below 0.80 cut by more than half). "Use this" loads it with a rationale. The demo data shifts school marks by category on purpose (labelled synthetic).
-9. **Recruiter:** search "SQL ≥ L2", open an Evidence Card, request a shortlist (an officer approves it in AI Proposals).
+9. **Recruiter:** search "SQL ≥ L2", open an Evidence Card, request a shortlist (an officer approves it in Proposals).
 10. **University:** per-college aggregates only.

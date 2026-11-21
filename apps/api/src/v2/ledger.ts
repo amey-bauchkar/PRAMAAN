@@ -118,7 +118,7 @@ export async function verifyLedger(sql: Sql, orgId: string, issuer: IssuerConfig
 
 export interface AuditedOffer {
   seq: number; company: string; role: string; ctcInr: number; issuedAt: string; acceptedAt: string; studentRef: string;
-  recruiterKeyId: string; recruiterKeyRegisteredAt: string | null; recruiterSignatureValid: boolean; studentSignatureValid: boolean; problems: string[];
+  recruiterKeyId: string; recruiterKeyRegisteredAt: string | null; recruiterDomain: string | null; recruiterSignatureValid: boolean; studentSignatureValid: boolean; problems: string[];
 }
 
 export interface AuditResult { population: number; seed: string; treeSize: number; treeRoot: string; sample: AuditedOffer[]; method: string }
@@ -128,14 +128,14 @@ export interface AuditResult { population: number; seed: string; treeSize: numbe
  * The sample is derived from a seed and the signed tree root, so anyone with the seed and the root can pick the same entries.
  * Pass an auditor's own seed to stop the operator steering which entries are checked. Student names are never stored in an entry.
  */
-export function auditFromRows(rows: { seq: number | string; payload: PlacementEntry; registeredAt?: string | null }[], treeSize: number, treeRoot: string, k: number, seed: string): AuditResult {
+export function auditFromRows(rows: { seq: number | string; payload: PlacementEntry; registeredAt?: string | null; domain?: string | null }[], treeSize: number, treeRoot: string, k: number, seed: string): AuditResult {
   const indices = sampleIndices(rows.length, Math.min(25, Math.max(1, k)), seed, treeRoot).sort((a, b) => a - b);
   const sample: AuditedOffer[] = indices.map(i => {
     const e = rows[i], p = e.payload;
     const check = verifyPlacementEntry(p);
     return {
       seq: Number(e.seq), company: p.offer.company, role: p.offer.role, ctcInr: p.offer.ctcInr, issuedAt: p.offer.issuedAt, acceptedAt: p.acceptance.acceptedAt,
-      studentRef: p.offer.studentRef.slice(0, 8), recruiterKeyId: p.offer.recruiterKeyId, recruiterKeyRegisteredAt: e.registeredAt ? new Date(e.registeredAt).toISOString() : null,
+      studentRef: p.offer.studentRef.slice(0, 8), recruiterKeyId: p.offer.recruiterKeyId, recruiterKeyRegisteredAt: e.registeredAt ? new Date(e.registeredAt).toISOString() : null, recruiterDomain: e.domain ?? null,
       recruiterSignatureValid: !check.problems.some(x => /recruiter/i.test(x)), studentSignatureValid: !check.problems.some(x => /student|acceptance/i.test(x)),
       problems: check.problems,
     };
@@ -146,9 +146,10 @@ export function auditFromRows(rows: { seq: number | string; payload: PlacementEn
 /** The college's own audit of its accepted offers. A college auditing itself is weaker than an outside auditor, so the seed is returned and can be replaced. */
 export async function auditSample(sql: Sql, orgId: string, k: number, seed: string = randomBytes(8).toString('hex')): Promise<AuditResult> {
   const rows = (await sql.query<any>(`SELECT e.seq, e.payload,
-      (SELECT min(s.registered_at) FROM signing_keys s WHERE s.owner_kind = 'recruiter' AND s.key_id = e.payload -> 'offer' ->> 'recruiterKeyId') AS registered_at
+      (SELECT min(s.registered_at) FROM signing_keys s WHERE s.owner_kind = 'recruiter' AND s.key_id = e.payload -> 'offer' ->> 'recruiterKeyId') AS registered_at,
+      (SELECT s.domain FROM signing_keys s WHERE s.owner_kind = 'recruiter' AND s.key_id = e.payload -> 'offer' ->> 'recruiterKeyId' AND s.domain_verified_at IS NOT NULL ORDER BY s.registered_at LIMIT 1) AS key_domain
     FROM ledger_entries e WHERE e.org_id = $1 AND e.kind = 'offer_accepted' ORDER BY e.seq`, [orgId])).rows;
   const head = (await sql.query<any>(`SELECT tree_size, root_hash FROM ledger_checkpoints WHERE org_id = $1 ORDER BY tree_size DESC LIMIT 1`, [orgId])).rows[0];
   if (rows.length === 0 || !head) throw new HttpError(409, 'There are no accepted offers in the ledger yet.');
-  return auditFromRows(rows.map(r => ({ seq: r.seq, payload: r.payload, registeredAt: r.registered_at })), Number(head.tree_size), head.root_hash, k, seed);
+  return auditFromRows(rows.map(r => ({ seq: r.seq, payload: r.payload, registeredAt: r.registered_at, domain: r.key_domain })), Number(head.tree_size), head.root_hash, k, seed);
 }

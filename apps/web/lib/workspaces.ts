@@ -36,7 +36,7 @@ export const WORKSPACES: Record<WorkspaceKey, WorkspaceDef> = {
       { slug: 'drives', title: 'Drives & Calendar', req: 'AD-06', summary: 'One calendar for all drives, warnings for clashes, and company emails turned into suggested time slots.', roles: OFFICERS },
       { slug: 'rules', title: 'Eligibility Rules & Appeals', req: 'AD-07', summary: 'Write rules, preview who would qualify and whether it is fair, publish them, and review student appeals.', roles: OFFICERS },
       { slug: 'applications', title: 'Shortlists & Offers', req: 'BR-19', summary: 'Move candidates through each stage and send offers. Every change is recorded.', roles: OFFICERS },
-      { slug: 'proposals', title: 'AI Proposals', req: 'AD-09', summary: 'Anything the AI drafts waits here until you approve it.', roles: OFFICERS },
+      { slug: 'proposals', title: 'Proposals', req: 'AD-09', summary: 'Anything an automated helper (a fixed rule or, where configured, a language model) drafts waits here until you approve it.', roles: OFFICERS },
       { slug: 'fairness', title: 'Fairness Check', req: 'AD-10', summary: 'Compare selection rates between groups at each stage. Very small groups are hidden to protect privacy.', roles: OFFICERS },
       { slug: 'ledger', title: 'Trust Ledger', req: 'New', summary: 'Placements signed by recruiters and students in a public log where any later change shows up in the checks an auditor can run.', roles: OFFICERS },
       { slug: 'accreditation', title: 'Accreditation Reports', req: 'AD-11', summary: 'Placement tables for NAAC and NIRF reports in one click.', roles: OFFICERS },

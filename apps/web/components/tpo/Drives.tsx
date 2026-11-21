@@ -37,7 +37,7 @@ export function Drives() {
         ))}
         {preview && (
           <div className="mt-3">
-            <Notice>Visit date found in the email: {preview.parsed.date ?? 'not found'}. Suggested schedule (waiting for your approval in AI Proposals):</Notice>
+            <Notice>Visit date found in the email: {preview.parsed.date ?? 'not found'}. Suggested schedule (waiting for your approval in Proposals):</Notice>
             <Table head={['Round', 'Time', 'Room']}>{preview.allocations.map((a: any, i: number) => <tr key={i}><Td>{a.label}</Td><Td>{fmtDateTime(a.start)}–{new Date(a.end).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</Td><Td>{a.roomName ?? <span className="text-red-700">{a.note}</span>}</Td></tr>)}</Table>
           </div>
         )}

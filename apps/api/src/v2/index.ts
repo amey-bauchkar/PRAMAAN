@@ -10,6 +10,7 @@ import { registerRecruiterRoutes } from './routes-recruiter.js';
 import { registerPassRoutes } from './routes-passes.js';
 import { registerLedgerRoutes } from './routes-ledger.js';
 import { configureLedger } from './ledger.js';
+import type { DomainFetcher } from './domain-proof.js';
 import { Mailer, createMailerFromEnv } from './mailer.js';
 import { FailoverLlm, createLlmFromEnv } from './llm.js';
 import { CoverageJudge, createCoverageJudgeFromEnv } from './interview-judge.js';
@@ -27,6 +28,8 @@ export interface V2Deps {
   interviewJudge?: CoverageJudge | null;
   /** Revokes the GitHub grant at GitHub and purges the stored token (wired by the app). */
   githubRevoker?: StudentDeps['githubRevoker'];
+  /** Reads a recruiter's domain proof file. Defaults to a real HTTPS fetch; the demo and tests pass a stand-in. */
+  domainFetcher?: DomainFetcher;
   /** Gives the placement logs an identity unique to this run. Demo only, because the demo database starts empty on every boot. */
   ledgerOriginSalt?: string;
 }
@@ -44,7 +47,7 @@ export function registerV2(
   registerPublicRoutes(app, deps.db);
   registerPassRoutes(router, app, deps.db, deps.issuer);
   configureLedger(deps.issuer, { originSalt: deps.ledgerOriginSalt });
-  registerLedgerRoutes(router, app, deps.db, deps.issuer);
+  registerLedgerRoutes(router, app, deps.db, deps.issuer, { domainFetcher: deps.domainFetcher });
 
   // Skill catalogue for search boxes (any signed-in role).
   router.get('/api/v2/catalog/skills', ['student', 'mentor', 'officer', 'college_admin', 'dept_coordinator', 'recruiter', 'university_admin', 'platform_admin'],

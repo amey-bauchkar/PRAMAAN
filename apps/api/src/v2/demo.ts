@@ -66,7 +66,9 @@ export async function createDemoApp(options: { verifyBaseUrl?: string; publishDr
       // Tests never call a real AI provider unless one is passed in. The demo server uses the keys in the environment.
       llm: options.llm !== undefined ? options.llm : process.env.VITEST ? null : undefined,
       interviewJudge: options.interviewJudge !== undefined ? options.interviewJudge : process.env.VITEST ? null : undefined,
-      issuer: { privateKey, publicKeyPem, verifyBaseUrl: options.verifyBaseUrl ?? 'http://localhost:3000/verify' }, ledgerOriginSalt: DEMO_BOOT_ID },
+      issuer: { privateKey, publicKeyPem, verifyBaseUrl: options.verifyBaseUrl ?? 'http://localhost:3000/verify' }, ledgerOriginSalt: DEMO_BOOT_ID,
+      // Offline stand-in for a company's website: any ".example" domain "publishes" the expected proof line. Real domains are not contacted.
+      domainFetcher: async (domain, expected) => { if (domain.endsWith('.example')) return expected; throw new Error('the offline demo only reads ".example" domains'); } },
   });
 
   const tokenForSubject = (sub: string) =>

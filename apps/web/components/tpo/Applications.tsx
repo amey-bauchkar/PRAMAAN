@@ -21,7 +21,7 @@ export function Applications() {
   };
   return (
     <div className="flex flex-col gap-5">
-      <PageHeader eyebrow="BR-19" title="Shortlists & Offers">Every change of stage is recorded and cannot be edited later. When a recruiter asks for a shortlist, it appears in AI Proposals for you to approve.</PageHeader>
+      <PageHeader eyebrow="BR-19" title="Shortlists & Offers">Every change of stage is recorded and cannot be edited later. When a recruiter asks for a shortlist, it appears in Proposals for you to approve.</PageHeader>
       <Field label="Drive">
         <select className={inputCls} value={driveId ?? ''} onChange={e => router.push(`/tpo/applications?drive=${e.target.value}`)}>
           <option value="">Choose a drive</option>{drives.data?.drives.map((d: any) => <option key={d.id} value={d.id}>{d.title} · {d.applications} applications</option>)}

@@ -33,7 +33,8 @@ export async function seedDemoLedger(db: PgliteDb): Promise<FeaturedCandidate | 
   await db.withTenant(ctx, async sql => {
     for (const r of recruiters) {
       const k = recKeys.get(r.id)!;
-      await sql.query(`INSERT INTO signing_keys (org_id, owner_kind, owner_id, key_id, public_jwk) VALUES ($1,'recruiter',$2,$3,$4) ON CONFLICT DO NOTHING`, [ctx.orgId, r.id, k.id, JSON.stringify(k.jwk)]);
+      // The demo company's domain is shown as verified. ".example" is reserved and never resolves: this is a stand-in for a real company site.
+      await sql.query(`INSERT INTO signing_keys (org_id, owner_kind, owner_id, key_id, public_jwk, domain, domain_verified_at) VALUES ($1,'recruiter',$2,$3,$4,'medisys-health.example', now()) ON CONFLICT DO NOTHING`, [ctx.orgId, r.id, k.id, JSON.stringify(k.jwk)]);
     }
     const apps = (await sql.query<any>(`SELECT a.id, a.student_id, a.drive_id, d.title, c.name AS company, d.ctc_inr AS drive_ctc,
         (SELECT max(o.ctc_inr) FROM student_outcomes o WHERE o.student_id = a.student_id AND o.outcome_type = 'placed') AS outcome_ctc

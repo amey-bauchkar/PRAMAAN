@@ -13,7 +13,7 @@ export function Demand() {
   const [jd, setJd] = useState({ title: '', body: '' });
   if (error) return <ErrorBox error={error} />;
   if (!data) return <Loading />;
-  const scan = async () => { const r = await act.run(() => api('/api/v2/tpo/demand/scan', { method: 'POST' })); if (r) { setMsg(`Read ${r.scanned} job descriptions and sent ${r.proposals} alert(s) to your AI Proposals inbox.`); reload(); } };
+  const scan = async () => { const r = await act.run(() => api('/api/v2/tpo/demand/scan', { method: 'POST' })); if (r) { setMsg(`Read ${r.scanned} job descriptions and sent ${r.proposals} alert(s) to your Proposals inbox.`); reload(); } };
   return (
     <div className="flex flex-col gap-5">
       <PageHeader eyebrow="Market demand" title="Industry Skill Gaps" actions={<Button busy={act.busy} onClick={scan}>Scan job descriptions</Button>}>

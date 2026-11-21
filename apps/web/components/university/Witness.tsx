@@ -116,11 +116,11 @@ export function Witness() {
         <Card title={`Audit of ${audit.college}`}>
           <p className="text-sm text-muted">{audit.sample.length} of {audit.population} placements. Seed <span className="font-mono">{audit.seed}</span>, signed root <span className="font-mono">{String(audit.treeRoot).slice(0, 16)}…</span> ({audit.treeSize} entries). {audit.method}</p>
           <p className="mt-1 text-sm">{audit.note}</p>
-          <Table head={['Entry', 'Company', 'Role', 'CTC', 'Recruiter key', 'Key registered', 'Recruiter', 'Student']}>
+          <Table head={['Entry', 'Company', 'Role', 'CTC', 'Recruiter key', 'Domain', 'Key registered', 'Recruiter', 'Student']}>
             {audit.sample.map((s: any) => (
               <tr key={s.seq}>
                 <Td className="tabular-nums">{s.seq}</Td><Td>{s.company}</Td><Td>{s.role}</Td><Td>{lpa(s.ctcInr)}</Td>
-                <Td><span className="font-mono text-xs">{s.recruiterKeyId}</span></Td>
+                <Td><span className="font-mono text-xs">{s.recruiterKeyId}</span></Td><Td>{s.recruiterDomain ?? 'not proved'}</Td>
                 <Td>{s.recruiterKeyRegisteredAt ? fmtDateTime(s.recruiterKeyRegisteredAt) : 'unknown'}</Td>
                 <Td className={s.recruiterSignatureValid ? '' : 'font-semibold text-red-700'}>{s.recruiterSignatureValid ? 'Signature valid' : 'Does not match'}</Td>
                 <Td className={s.studentSignatureValid ? '' : 'font-semibold text-red-700'}>{s.studentSignatureValid ? 'Signature valid' : 'Does not match'}</Td>

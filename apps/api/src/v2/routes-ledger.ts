@@ -11,6 +11,7 @@ import { audit } from './audit.js';
 import { grantFor } from './routes-recruiter.js';
 import { appendLedger, verifyLedger, auditSample, auditFromRows, ledgerOrigin, issuerKeyId, studentRef } from './ledger.js';
 import { randomBytes } from 'crypto';
+import { DOMAIN_PROOF_PATH, DomainFetcher, httpsDomainFetcher, normaliseDomain, proofText } from './domain-proof.js';
 
 const R = ['recruiter'] as const;
 const S = ['student'] as const;
@@ -37,7 +38,8 @@ async function registerKey(sql: any, orgId: string, kind: 'recruiter' | 'student
   await sql.query(`INSERT INTO signing_keys (org_id, owner_kind, owner_id, key_id, public_jwk) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (org_id, owner_kind, owner_id, key_id) DO NOTHING`, [orgId, kind, ownerId, id, JSON.stringify(jwk)]);
   return id;
 }
-export function registerLedgerRoutes(r: Router, app: FastifyInstance, db: Db, issuer: IssuerConfig | null) {
+export function registerLedgerRoutes(r: Router, app: FastifyInstance, db: Db, issuer: IssuerConfig | null, opts: { domainFetcher?: DomainFetcher } = {}) {
+  const domainFetcher = opts.domainFetcher ?? httpsDomainFetcher;
   const needIssuer = () => { if (!issuer) throw new HttpError(501, 'The placement ledger needs a signing key (PRAMAAN_ISSUER_SEED).'); };
   const keyOf = async (sql: any, org: string, kind: 'recruiter' | 'student' | 'witness', owner: string, id: string): Promise<Jwk> => {
     const k = (await sql.query(`SELECT public_jwk FROM signing_keys WHERE org_id = $1 AND owner_kind = $2 AND owner_id = $3 AND key_id = $4 AND status = 'active'`, [org, kind, owner, id])).rows[0];
@@ -50,6 +52,36 @@ export function registerLedgerRoutes(r: Router, app: FastifyInstance, db: Db, is
     const id = await registerKey(sql, ctx.orgId, 'recruiter', await membershipId(sql, ctx), body);
     await audit(sql, ctx, 'SIGNING_KEY_REGISTERED', 'signing_key', null, { owner: 'recruiter', keyId: id });
     return { keyId: id };
+  });
+  // A recruiter can show that the holder of a key controls a company domain. The server reads a file the company publishes.
+  r.get('/api/v2/recruiter/keys', R, async ({ ctx, sql }) => {
+    const rows = (await sql.query<any>(`SELECT key_id, domain, domain_challenge, domain_verified_at, registered_at FROM signing_keys WHERE org_id = $1 AND owner_kind = 'recruiter' AND owner_id = $2 AND status = 'active' ORDER BY registered_at`, [ctx.orgId, await membershipId(sql, ctx)])).rows;
+    return rows.map(k => ({
+      keyId: k.key_id, domain: k.domain, verifiedAt: iso(k.domain_verified_at), registeredAt: iso(k.registered_at),
+      proof: k.domain && !k.domain_verified_at ? { url: `https://${k.domain}${DOMAIN_PROOF_PATH}`, content: proofText(k.key_id, k.domain_challenge) } : null,
+    }));
+  });
+  r.post('/api/v2/recruiter/keys/domain', R, async ({ ctx, sql, body }) => {
+    const domain = normaliseDomain(body.domain);
+    if (!domain) throw new HttpError(400, 'Enter your company’s website name, for example example.com. IP addresses and local names are not accepted.');
+    const keyId = requireString(body.keyId, 'keyId');
+    const challenge = randomBytes(12).toString('hex');
+    const res = await sql.query(`UPDATE signing_keys SET domain = $5, domain_challenge = $6, domain_verified_at = NULL WHERE org_id = $1 AND owner_kind = 'recruiter' AND owner_id = $2 AND key_id = $3 AND status = $4 RETURNING key_id`, [ctx.orgId, await membershipId(sql, ctx), keyId, 'active', domain, challenge]);
+    if (res.rows.length === 0) throw new HttpError(400, 'That signing key is not registered for you. Register it first.');
+    await audit(sql, ctx, 'RECRUITER_DOMAIN_CLAIMED', 'signing_key', null, { keyId, domain });
+    return { domain, url: `https://${domain}${DOMAIN_PROOF_PATH}`, content: proofText(keyId, challenge) };
+  });
+  r.post('/api/v2/recruiter/keys/domain/verify', R, async ({ ctx, sql, body }) => {
+    const keyId = requireString(body.keyId, 'keyId');
+    const k = (await sql.query<any>(`SELECT domain, domain_challenge FROM signing_keys WHERE org_id = $1 AND owner_kind = 'recruiter' AND owner_id = $2 AND key_id = $3 AND status = 'active'`, [ctx.orgId, await membershipId(sql, ctx), keyId])).rows[0];
+    if (!k?.domain || !k.domain_challenge) throw new HttpError(400, 'Choose your company domain for this key first.');
+    const expected = proofText(keyId, k.domain_challenge);
+    let text: string;
+    try { text = await domainFetcher(k.domain, expected); } catch (e: any) { throw new HttpError(422, `Could not read the file on ${k.domain}: ${e?.message ?? 'unreachable'}`); }
+    if (!text.includes(expected)) throw new HttpError(422, `The file on ${k.domain} does not contain the expected line.`);
+    await sql.query(`UPDATE signing_keys SET domain_verified_at = now() WHERE org_id = $1 AND owner_kind = 'recruiter' AND owner_id = $2 AND key_id = $3`, [ctx.orgId, await membershipId(sql, ctx), keyId]);
+    await audit(sql, ctx, 'RECRUITER_DOMAIN_VERIFIED', 'signing_key', null, { keyId, domain: k.domain });
+    return { domain: k.domain, message: `${k.domain} is verified for this key. It shows control of the domain, not that the company authorised you.` };
   });
   r.post('/api/v2/student/keys', S, async ({ ctx, sql, body }) => {
     const st = await studentForUser(sql, ctx);
@@ -243,7 +275,7 @@ export function registerLedgerRoutes(r: Router, app: FastifyInstance, db: Db, is
     const rows = (await sql.query<any>(`SELECT * FROM witness_college_offers($1)`, [collegeId])).rows;
     if (rows.length === 0) throw new HttpError(409, 'This college has no accepted offers in its ledger yet.');
     const seed = typeof body.seed === 'string' && body.seed.trim() ? body.seed.trim().slice(0, 100) : randomBytes(8).toString('hex');
-    const res = auditFromRows(rows.map(x => ({ seq: x.seq, payload: x.payload, registeredAt: x.key_registered_at })), Number(row.tree_size), row.root_hash, Math.min(25, Math.max(1, Number(body.k) || 5)), seed);
+    const res = auditFromRows(rows.map(x => ({ seq: x.seq, payload: x.payload, registeredAt: x.key_registered_at, domain: x.key_domain })), Number(row.tree_size), row.root_hash, Math.min(25, Math.max(1, Number(body.k) || 5)), seed);
     await audit(sql, ctx, 'LEDGER_SAMPLE_AUDITED_BY_UNIVERSITY', 'organization', collegeId, { population: res.population, sampled: res.sample.length, failed: res.sample.filter(s => s.problems.length).length, seed });
     return { ...res, college: String(row.college_name).replace('[SYNTHETIC] ', ''), note: 'Pick the seed yourself after the college has published its signed state. To confirm an offer, contact the company on contact details you got yourself and ask them to check the recruiter key fingerprint shown here.' };
   });
