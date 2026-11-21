@@ -33,3 +33,6 @@ export * from './placement-reports.js';
 export * from './sd-jwt.js';
 export * from './rule-repair.js';
 export * from './transparency-log.js';
+export * from './proctoring.js';
+export * from './code-checks.js';
+export * from './project-kit.js';

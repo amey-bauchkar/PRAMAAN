@@ -94,3 +94,6 @@ html.lenis, html.lenis body { height: auto; }
 @media (prefers-reduced-motion: reduce) {
   .btn-brand { transition: none; }
 }
+
+/* Proctored test window: question text cannot be selected, but the answer boxes stay usable. */
+html.proctor-active .proctored textarea, html.proctor-active .proctored input, html.proctor-active .proctored select { user-select: text; -webkit-user-select: text; }

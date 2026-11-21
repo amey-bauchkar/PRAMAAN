@@ -1213,7 +1213,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
   });
 
   if (opts.v2) {
-    registerV2(app, { ...opts.v2, githubRevoker: (c, id) => githubAccountService.revokeUpstreamGrantAndUnlink(c, id) }, resolveSessionContext);
+    registerV2(app, { ...opts.v2, githubRevoker: (c, id) => githubAccountService.revokeUpstreamGrantAndUnlink(c, id) }, resolveSessionContext, h => authService.resolveIdentity(h));
   }
 
   return app;

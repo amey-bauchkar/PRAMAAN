@@ -143,6 +143,7 @@ describe('Human review of an interview score', () => {
   it('a student asks, an officer changes the score with a reply, and the student sees it', async () => {
     const start = await call('rahul', 'POST', '/api/v2/student/mock/attempts', { role: 'Backend Developer' });
     const id = start.body.id;
+    await call('rahul', 'POST', `/api/v2/student/mock/attempts/${id}/proctor`, { events: [{ kind: 'session_started', detail: { camera: true } }] });
     const attempt = (await call('rahul', 'GET', `/api/v2/student/mock/attempts/${id}`)).body;
     const answers = Object.fromEntries(attempt.interview.map((x: any) => [x.id, 'I am not sure.']));
     expect((await call('rahul', 'POST', `/api/v2/student/mock/attempts/${id}/review`, { reason: 'Too early to ask' })).status).toBe(409);

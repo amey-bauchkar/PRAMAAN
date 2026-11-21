@@ -15,6 +15,7 @@ import { seedDemoLedger, seedDemoWitness, demoLedgerOrg, demoTamper, demoRewrite
 import type { Mailer } from './mailer.js';
 import type { FailoverLlm } from './llm.js';
 import type { CoverageJudge } from './interview-judge.js';
+import type { V2Deps } from './index.js';
 
 /**
  * Offline demo: the full product on an in-process PostgreSQL (PGlite) with every migration and the
@@ -49,9 +50,11 @@ export interface DemoApp {
   tokenFor(personaKey: string): Promise<string>;
   /** Test helper: token for any seeded account by its auth subject. */
   tokenForSubject(authSubject: string): Promise<string>;
+  /** Test helper: a signed token with any claims (for example a new login with no record yet, with a chosen provider). */
+  tokenWithClaims(claims: { sub: string; email?: string; [k: string]: unknown }): Promise<string>;
 }
 
-export async function createDemoApp(options: { verifyBaseUrl?: string; publishDrives?: boolean; mailer?: Mailer; llm?: FailoverLlm | null; interviewJudge?: CoverageJudge | null } = {}): Promise<DemoApp> {
+export async function createDemoApp(options: { verifyBaseUrl?: string; publishDrives?: boolean; mailer?: Mailer; llm?: FailoverLlm | null; interviewJudge?: CoverageJudge | null; kit?: V2Deps['kit'] } = {}): Promise<DemoApp> {
   if (process.env.NODE_ENV === 'production') throw new Error('The demo app must never run in production.');
   const pglite = await createPgliteDatabase();
   const db = new PgliteDb(pglite);
@@ -62,7 +65,8 @@ export async function createDemoApp(options: { verifyBaseUrl?: string; publishDr
 
   const app = buildApp({
     persistenceMode: 'in-memory', authService, userRepository,
-    v2: { db, judge: new LocalJudge(), profiles: new DemoFixtureProfiles(), mailer: options.mailer,
+    v2: { db, judge: new LocalJudge(), profiles: new DemoFixtureProfiles(), mailer: options.mailer, // Tests never reach GitHub unless a fake is passed in. The demo server uses the real GitHub (public data, read-only).
+      kit: options.kit ?? (process.env.VITEST ? { githubFetch: () => async () => ({ status: 0 }) } : undefined),
       // Tests never call a real AI provider unless one is passed in. The demo server uses the keys in the environment.
       llm: options.llm !== undefined ? options.llm : process.env.VITEST ? null : undefined,
       interviewJudge: options.interviewJudge !== undefined ? options.interviewJudge : process.env.VITEST ? null : undefined,
@@ -109,5 +113,6 @@ export async function createDemoApp(options: { verifyBaseUrl?: string; publishDr
   app.post('/api/demo/ledger/tamper', async () => demoTamper(db));
   app.post('/api/demo/ledger/rewrite', async () => demoRewrite(db, { privateKey, publicKeyPem, verifyBaseUrl: '' }));
   app.post('/api/demo/ledger/restore', async () => demoRestore(db));
-  return { app, db, tokenFor, tokenForSubject };
+  const tokenWithClaims = (claims: { sub: string; email?: string; [k: string]: unknown }) => createTestToken(claims, { customSecret: secret, issuer: null });
+  return { app, db, tokenFor, tokenForSubject, tokenWithClaims };
 }

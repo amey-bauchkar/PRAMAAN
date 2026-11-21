@@ -13,8 +13,9 @@ async function post(fetchImpl: FetchLike, url: string, headers: Record<string, s
   const timer = setTimeout(() => ac.abort(), 20_000);
   try {
     const res = await fetchImpl(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body), signal: ac.signal });
+    if (!res.ok && !process.env.VITEST) console.warn(`[LLM] ${new URL(url).host} answered ${res.status}`); // status only: never the key or the prompt
     return res.ok ? await res.json() : null;
-  } catch { return null; } finally { clearTimeout(timer); }
+  } catch { if (!process.env.VITEST) console.warn(`[LLM] ${new URL(url).host} could not be reached or timed out`); return null; } finally { clearTimeout(timer); }
 }
 
 const text = (t: unknown) => (typeof t === 'string' && t.trim() ? t : null);
@@ -36,7 +37,10 @@ export class GroqClient implements LlmClient {
   constructor(private key: string, private model = 'openai/gpt-oss-120b', private f: FetchLike = fetch as unknown as FetchLike) { this.name = `llm:groq:${model}`; }
   async complete(system: string, user: string, o: Opts = {}) {
     const d = await post(this.f, 'https://api.groq.com/openai/v1/chat/completions', { authorization: `Bearer ${this.key}` }, {
-      model: this.model, temperature: 0, max_tokens: o.maxTokens ?? 1500, ...(o.json ? { response_format: { type: 'json_object' } } : {}),
+      // gpt-oss models think before they answer, and that hidden thinking counts against max_tokens. Low effort keeps it short and
+      // leaves headroom, so a JSON answer is not cut off part-way.
+      model: this.model, temperature: 0, max_tokens: (o.maxTokens ?? 1500) + (/gpt-oss/.test(this.model) ? 600 : 0), ...(/gpt-oss/.test(this.model) ? { reasoning_effort: 'low' } : {}),
+      ...(o.json ? { response_format: { type: 'json_object' } } : {}),
       messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
     });
     return text(d?.choices?.[0]?.message?.content);
@@ -60,12 +64,17 @@ export class FailoverLlm implements LlmClient {
   constructor(private clients: LlmClient[]) {}
   get name() { return this.clients.map(c => c.name).join(' > '); }
   async complete(system: string, user: string, o?: Opts) {
+    const r = await this.completeWithModel(system, user, o);
+    this.lastUsed = r.model;
+    return r.text;
+  }
+  /** Like complete, but returns the answering model with the text, so concurrent callers never read each other's `lastUsed`. */
+  async completeWithModel(system: string, user: string, o?: Opts): Promise<{ text: string | null; model: string | null }> {
     for (const c of this.clients) {
       const t = await c.complete(system, user, o);
-      if (t) { this.lastUsed = c.name; return t; }
+      if (t) return { text: t, model: c.name };
     }
-    this.lastUsed = null;
-    return null;
+    return { text: null, model: null };
   }
 }
 

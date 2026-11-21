@@ -162,7 +162,7 @@ export interface InterviewAnswerScore {
 
 /**
  * Content-only rubric scoring: the share of expected key points an answer covers. No voice, video,
- * keystroke or behavioural signals are used (PS p2: no behavioural monitoring). The result is a draft
+ * keystroke or behavioural signals are used to score it (the problem statement bans behavioural monitoring of under-18s). The result is a draft
  * the student may send for human review.
  */
 export function scoreInterviewAnswer(q: { id: string; topic: string; keyPoints: InterviewKeyPoint[] }, answer: string): InterviewAnswerScore {

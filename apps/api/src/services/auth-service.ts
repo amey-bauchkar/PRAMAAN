@@ -46,6 +46,31 @@ export class AuthService {
   }
 
   /**
+   * Verifies the token only, without looking for a PRAMAAN record. Used by the claim step, where the login is genuine but has no
+   * college record yet. It returns what the identity provider vouches for and nothing else; no role or college comes from here.
+   */
+  public async resolveIdentity(authHeader?: string): Promise<
+    { ok: true; sub: string; email: string | null; emailVerified: boolean; provider: string } | { ok: false; statusCode: number; error: string }
+  > {
+    if (!authHeader || typeof authHeader !== 'string' || !authHeader.startsWith('Bearer ')) {
+      return { ok: false, statusCode: 401, error: 'AUTHENTICATION_REQUIRED: Sign in first.' };
+    }
+    const token = authHeader.slice(7).trim();
+    if (!token) return { ok: false, statusCode: 401, error: 'EMPTY_TOKEN: Bearer token is empty.' };
+    const verified = await this.jwtVerifier.verifyToken(token);
+    if (!verified.valid || !verified.payload) return { ok: false, statusCode: 401, error: `INVALID_OR_EXPIRED_JWT: ${verified.error}` };
+    const claims = verified.payload;
+    if (typeof claims.sub !== 'string' || claims.sub.length < 3) return { ok: false, statusCode: 401, error: 'INVALID_OR_EXPIRED_JWT: missing subject.' };
+    const um = (claims.user_metadata ?? {}) as Record<string, unknown>;
+    const am = (claims.app_metadata ?? {}) as Record<string, unknown>;
+    const email = typeof claims.email === 'string' && claims.email.length > 0 ? claims.email.toLowerCase() : null;
+    // Supabase marks the email as verified in user_metadata once the provider or the confirmation link has proved it.
+    const emailVerified = email !== null && (um.email_verified === true || (claims as any).email_verified === true);
+    const provider = typeof am.provider === 'string' && am.provider ? am.provider : 'email';
+    return { ok: true, sub: claims.sub, email, emailVerified, provider };
+  }
+
+  /**
    * Resolves and verifies session context:
    * 1. Requires standard 'Authorization: Bearer <JWT>' header.
    * 2. Rejects plain user IDs, malformed tokens, or fallback headers (x-user-id).

@@ -4,12 +4,15 @@
   "description": "PRAMAAN Next.js Web Client",
   "private": true,
   "scripts": {
+    "predev": "node scripts/copy-proctor-assets.mjs",
     "dev": "next dev",
+    "prebuild": "node scripts/copy-proctor-assets.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "next lint"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "^1.2.3",
     "@pramaan/contracts": "*",
     "@pramaan/domain": "*",
     "@supabase/supabase-js": "^2.119.0",

@@ -11,7 +11,9 @@ export default tseslint.config(
       '**/node_modules/**',
       '**/coverage/**',
       '**/.turbo/**',
-      '**/*.d.ts'
+      '**/*.d.ts',
+      // MediaPipe's minified WebAssembly runtime, copied in by apps/web/scripts/copy-proctor-assets.mjs.
+      'apps/web/public/proctor/wasm/**'
     ]
   },
   {

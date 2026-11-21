@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import {
   sampleAptitudeSet, scoreAptitude, scoreMachineProblem, buildMockReport,
-  AptitudeQuestion, ProofPath, recourseTiming, planLearningPath, EligibilityEvaluator, buildOpenBadge, signCredential, verifyCredential,
+  AptitudeQuestion, PROCTOR_EVENT_KINDS, PROCTOR_LABELS, PROCTOR_SEVERITY, ProctorEventInput, ProctorEventKind, summarizeIntegrity, mayAwardProof, analyzeTyping, cleanTypingStats, SERVER_ONLY_KINDS, codeTokens, judgeSimilarity, pickDefenceTest, checkDefenceAnswer, DEFENCE_SECONDS_PER_QUESTION, ProofPath, recourseTiming, planLearningPath, EligibilityEvaluator, buildOpenBadge, signCredential, verifyCredential,
 } from '@pramaan/domain';
 import { PROOF_LEVEL_RANK, EligibilityRuleSpecSchema } from '@pramaan/contracts';
 import { Router, HttpError, requireString, requireUuid, one } from './http.js';
@@ -219,6 +219,18 @@ export function registerStudentRoutes(r: Router, deps: StudentDeps) {
     const done = (await sql.query<any>(`SELECT round, score, max_score, details FROM mock_round_results WHERE attempt_id = $1`, [a.id])).rows;
     const has = (r0: string) => done.find(d => d.round === r0);
     const out: any = { id: a.id, role: a.role_title, status: a.status, rounds: done.map(d => ({ round: d.round, score: Number(d.score), maxScore: Number(d.max_score) })), report: a.report };
+    const integ: { summary: ReturnType<typeof summarizeIntegrity>; rows: any[] } = await loadIntegrity(sql, a.id);
+    // Students under 18 are not put under camera or test-window rules at all (project rule D4/D2).
+    out.proctorRequired = !st.isMinor;
+    if (st.isMinor) integ.summary = summarizeIntegrity([], { exempt: true });
+    out.integrity = integ.summary;
+    out.proctorEvents = integ.rows.slice(-100).map(x => ({ kind: x.kind, label: PROCTOR_LABELS[x.kind as ProctorEventKind] ?? x.kind, severity: PROCTOR_SEVERITY[x.kind as ProctorEventKind] ?? 'minor', seconds: x.seconds, why: x.detail?.why ?? null, problem: x.detail?.problem ?? null, at: iso(x.occurred_at) }));
+    // Questions are only sent once a proctored session with the camera on has been started for this attempt.
+    out.questionsLocked = a.status === 'in_progress' && !st.isMinor && !(integ.summary.proctored && integ.summary.cameraOn);
+    if (out.questionsLocked) return out;
+    const pend = (await sql.query<any>(`SELECT d.id, d.problem_id, d.kind, d.entry, d.code, d.args, d.setup, d.deadline_at, c.title FROM mock_defence_checks d JOIN coding_problems c ON c.id = d.problem_id
+      WHERE d.attempt_id = $1 AND d.answered_at IS NULL AND d.deadline_at IS NOT NULL ORDER BY c.title`, [a.id])).rows;
+    if (pend.length) out.defence = pend.map(d => ({ id: d.id, title: d.title, kind: d.kind, entry: d.entry, code: d.code, args: d.args, setup: d.setup, deadlineAt: iso(d.deadline_at), expired: new Date(d.deadline_at).getTime() < Date.now() }));
     if (!has('aptitude')) {
       const q = await sql.query<any>(`SELECT id, topic, subtopic, stem, options FROM aptitude_questions WHERE id = ANY($1)`, [a.aptitude_question_ids]);
       const order = new Map<string, number>(a.aptitude_question_ids.map((x: string, i: number) => [x, i]));
@@ -236,6 +248,46 @@ export function registerStudentRoutes(r: Router, deps: StudentDeps) {
       .map(x => ({ id: x.id, status: x.status, reason: x.reason, note: x.decision_note, previousScore: x.previous_score === null ? null : Number(x.previous_score), revisedScore: x.revised_score === null ? null : Number(x.revised_score), createdAt: iso(x.created_at), decidedAt: iso(x.decided_at) }));
     return out;
   });
+  // ---------- Test integrity (proctoring) ----------
+  // Only rule events are stored (never video). The summary is authoritative here: the browser can warn, but this decides.
+  const loadIntegrity = async (sql: any, attemptId: string) => {
+    const rows = (await sql.query(`SELECT kind, seconds, detail, occurred_at FROM mock_proctor_events WHERE attempt_id = $1 ORDER BY occurred_at, id`, [attemptId])).rows as any[];
+    const events: ProctorEventInput[] = rows.map(x => ({ kind: x.kind as ProctorEventKind, seconds: x.seconds ?? undefined, detail: x.detail ?? {} }));
+    return { summary: summarizeIntegrity(events), rows };
+  };
+  const cleanDetail = (d: any): Record<string, unknown> => {
+    const out: Record<string, unknown> = {};
+    if (d && typeof d === 'object') {
+      if (typeof d.camera === 'boolean') out.camera = d.camera;
+      if (typeof d.why === 'string') out.why = d.why.slice(0, 60);
+      if (typeof d.key === 'string') out.key = d.key.slice(0, 20);
+    }
+    return out;
+  };
+
+  r.post('/api/v2/student/mock/attempts/:id/proctor', S, async ({ ctx, sql, params, body }) => {
+    const st = await studentForUser(sql, ctx);
+    if (st.isMinor) throw new HttpError(403, 'The camera and test-window rules are not used for students under 18.');
+    const a = await loadAttempt(sql, st.id, params.id);
+    if (a.status !== 'in_progress') throw new HttpError(409, 'This attempt is already completed.');
+    const list = Array.isArray(body.events) ? body.events : null;
+    if (!list || list.length === 0 || list.length > 50) throw new HttpError(400, 'Send between 1 and 50 events.');
+    const had = (await loadIntegrity(sql, a.id)).summary;
+    const existing = (await sql.query<{ n: number }>(`SELECT count(*)::int AS n FROM mock_proctor_events WHERE attempt_id = $1`, [a.id])).rows[0].n;
+    if (existing + list.length > 2000) throw new HttpError(429, 'Too many events for one attempt.');
+    for (const e of list) {
+      if (!e || !(PROCTOR_EVENT_KINDS as readonly string[]).includes(e.kind) || (SERVER_ONLY_KINDS as readonly string[]).includes(e.kind)) throw new HttpError(400, `Unknown event kind "${String(e?.kind).slice(0, 30)}".`);
+      const seconds = Number.isFinite(e.seconds) ? Math.max(0, Math.min(86400, Math.round(e.seconds))) : null;
+      // The server clock decides when an event happened, so a client cannot back-date or hide the order of events.
+      await sql.query(`INSERT INTO mock_proctor_events (attempt_id, student_id, kind, seconds, detail) VALUES ($1,$2,$3,$4,$5)`,
+        [a.id, st.id, e.kind, seconds, JSON.stringify(cleanDetail(e.detail))]);
+    }
+    const now = (await loadIntegrity(sql, a.id)).summary;
+    if (!had.proctored && now.proctored) await audit(sql, ctx, 'MOCK_PROCTOR_STARTED', 'mock_attempt', a.id, { camera: now.cameraOn });
+    if (had.status !== 'flagged' && now.status === 'flagged' && now.proctored) await audit(sql, ctx, 'MOCK_PROCTOR_FLAGGED', 'mock_attempt', a.id, { major: now.major, minor: now.minor });
+    return { integrity: now };
+  });
+
   r.post('/api/v2/student/mock/attempts/:id/review', S, async ({ ctx, sql, params, body }) => {
     const st = await studentForUser(sql, ctx);
     const a = await loadAttempt(sql, st.id, params.id);
@@ -252,14 +304,27 @@ export function registerStudentRoutes(r: Router, deps: StudentDeps) {
     return { message: 'Review requested. A placement officer or mentor will read your answers and reply here.' };
   });
 
-  const finishIfComplete = async (sql: any, ctx: any, studentId: string, attemptId: string) => {
+  const finishIfComplete = async (sql: any, ctx: any, studentId: string, attemptId: string, isMinor: boolean) => {
     const rounds = (await sql.query(`SELECT round, details FROM mock_round_results WHERE attempt_id = $1`, [attemptId])).rows as any[];
     if (rounds.length < 3) return null;
+
+    // Follow-up step: the clock starts when the last round ends, and the drive is not finished until every check is answered.
+    const checks = (await sql.query(`SELECT id, problem_id, kind, deadline_at, answered_at, correct FROM mock_defence_checks WHERE attempt_id = $1`, [attemptId])).rows as any[];
+    if (checks.some(c => c.deadline_at === null)) {
+      await sql.query(`UPDATE mock_defence_checks SET deadline_at = now() + ($2 * interval '1 second') WHERE attempt_id = $1 AND deadline_at IS NULL`, [attemptId, DEFENCE_SECONDS_PER_QUESTION * checks.length]);
+      return null;
+    }
+    if (checks.some(c => c.answered_at === null)) return null;
+
     const get = (x: string) => rounds.find(r0 => r0.round === x).details;
     const machine = get('machine_test').problems;
     const report = buildMockReport({ aptitude: get('aptitude'), machine, interview: get('interview').answers, machineSkillSlugs: [] });
     const awarded: AwardResult[] = [];
-    for (const sig of report.skillSignals.filter(s => s.passed)) {
+    const withheld: { what: string; reason: string }[] = [];
+    const integrity = isMinor ? summarizeIntegrity([], { exempt: true }) : (await loadIntegrity(sql, attemptId)).summary;
+    const mayAward = mayAwardProof(integrity);
+    if (!mayAward) withheld.push({ what: 'All proof from this drive', reason: integrity.message });
+    for (const sig of report.skillSignals.filter(s => mayAward && s.passed)) {
       awarded.push(await awardProof(sql, ctx, { studentId, skillSlug: sig.skillSlug, reasonCode: 'MOCK_ROUND_PASSED', level: 1,
         evidence: { kind: 'test_result', description: `Mock drive aptitude: ${sig.percent}% in ${sig.skillSlug.replace('-', ' ')}`, source: 'mock_drive' },
         verification: { type: 'assessment', assessment: { score: sig.percent, maxScore: 100 } } }));
@@ -267,16 +332,25 @@ export function registerStudentRoutes(r: Router, deps: StudentDeps) {
     for (const p of machine) {
       const pct = p.maxMarks ? (p.marks / p.maxMarks) * 100 : 0;
       if (pct < 60) continue;
+      const dc = checks.find(c => c.problem_id === p.problemId);
+      const similar = p.similarity?.flagged === true;
+      const undefended = !!dc && dc.correct !== true;
+      if (similar) withheld.push({ what: p.title, reason: 'The code is very close to another student\'s answer, so it adds no proof. Ask your placement officer to review it if this is a mistake.' });
+      else if (undefended) withheld.push({ what: p.title, reason: 'The follow-up question about your own code was not answered correctly in time, so it adds no proof.' });
+      if (!mayAward || similar || undefended) continue;
       for (const slug of p.skills ?? []) {
         awarded.push(await awardProof(sql, ctx, { studentId, skillSlug: slug, reasonCode: 'MOCK_MACHINE_TEST_PASSED', level: 2,
           evidence: { kind: 'test_result', description: `Mock machine test "${p.title}": ${p.marks}/${p.maxMarks} (${p.passed}/${p.total} hidden tests)`, source: 'mock_drive' },
           verification: { type: 'assessment', assessment: { score: p.marks, maxScore: p.maxMarks } } }));
       }
     }
-    await sql.query(`UPDATE mock_attempts SET status = 'completed', completed_at = now(), report = $2 WHERE id = $1`, [attemptId, JSON.stringify({ ...report, awarded: awarded.map(x => x.message) })]);
+    const defence = checks.map(c => ({ title: machine.find((p: any) => p.problemId === c.problem_id)?.title ?? 'Coding problem', correct: c.correct === true }));
+    const notes = awarded.map(x => x.message);
+    const full = { ...report, awarded: notes, withheld, defence, integrity };
+    await sql.query(`UPDATE mock_attempts SET status = 'completed', completed_at = now(), report = $2 WHERE id = $1`, [attemptId, JSON.stringify(full)]);
     await audit(sql, ctx, 'MOCK_COMPLETED', 'mock_attempt', attemptId, { totalPercent: report.totalPercent, weakTopics: report.weakTopics });
     await reevaluateStudent(sql, ctx, studentId);
-    return { ...report, awarded: awarded.map(x => x.message) };
+    return full;
   };
 
   r.post('/api/v2/student/mock/attempts/:id/aptitude', S, async ({ ctx, sql, params, body }) => {
@@ -290,12 +364,14 @@ export function registerStudentRoutes(r: Router, deps: StudentDeps) {
     const res = scoreAptitude(qs as AptitudeQuestion[], answers);
     await sql.query(`INSERT INTO mock_round_results (attempt_id, round, score, max_score, details) VALUES ($1,'aptitude',$2,$3,$4)`, [a.id, res.score, res.maxScore, JSON.stringify(res)]);
     await audit(sql, ctx, 'MOCK_APTITUDE_SUBMITTED', 'mock_attempt', null, {});
-    return { result: res, report: await finishIfComplete(sql, ctx, st.id, a.id) };
+    return { result: res, report: await finishIfComplete(sql, ctx, st.id, a.id, st.isMinor) };
   });
 
   r.post('/api/v2/student/mock/attempts/:id/machine/run', S, async ({ ctx, sql, params, body }) => {
     const st = await studentForUser(sql, ctx);
     const a = await loadAttempt(sql, st.id, params.id);
+    const sess = (await loadIntegrity(sql, a.id)).summary;
+    if (!st.isMinor && !(sess.proctored && sess.cameraOn)) throw new HttpError(403, 'Start the proctored test window first.');
     const p = await one<any>(sql, `SELECT * FROM coding_problems WHERE id = $1`, [requireUuid(body.problemId, 'problemId')]);
     if (!a.coding_problem_ids.includes(p.id)) throw new HttpError(400, 'Problem is not part of this attempt.');
     const code = requireString(body.code, 'code', 1, 20000);
@@ -315,15 +391,58 @@ export function registerStudentRoutes(r: Router, deps: StudentDeps) {
       const out = code.trim() === ''
         ? { runner: deps.judge.name, results: p.hidden_tests.map((t: any, index: number) => ({ index, passed: false, description: t.description, error: 'No answer submitted' })), passed: 0, total: p.hidden_tests.length }
         : p.language === 'sql' ? await deps.judge.runSql(p.sql_schema, p.hidden_tests, code, p.reference_solution) : await deps.judge.runJavaScript(code, p.entry_function, p.hidden_tests);
-      if (code.trim()) await sql.query(`INSERT INTO judge_runs (student_id, purpose, ref_id, language, code, passed, total, results, runner) VALUES ($1,'mock',$2,$3,$4,$5,$6,$7,$8)`,
-        [st.id, a.id, p.language, code, out.passed, out.total, JSON.stringify(out.results), out.runner]);
+      // Typing observations (students 18 and over only). Counts and timing come from the browser, never the text. They are
+      // recorded as facts for a person to review and never withhold proof on their own.
+      if (!st.isMinor && code.trim()) {
+        const stats = body.typing && typeof body.typing === 'object' && body.typing[p.id] ? cleanTypingStats(body.typing[p.id]) : null;
+        for (const ev of analyzeTyping(stats, code.length)) {
+          await sql.query(`INSERT INTO mock_proctor_events (attempt_id, student_id, kind, detail) VALUES ($1,$2,$3,$4)`,
+            [a.id, st.id, ev.kind, JSON.stringify({ ...(ev.detail ?? {}), problem: String(p.title).slice(0, 80) })]);
+        }
+      }
+      // Similarity: compare with the latest saved answer of every other student in this college for the same problem.
+      let similarity = { flagged: false, score: 0 };
+      if (code.trim()) {
+        const lang = p.language === 'sql' ? 'sql' : 'javascript';
+        const peers = (await sql.query<any>(`SELECT DISTINCT ON (student_id) student_id, ref_id, code FROM judge_runs
+          WHERE purpose = 'mock' AND problem_id = $1 AND student_id <> $2 ORDER BY student_id, created_at DESC LIMIT 500`, [p.id, st.id])).rows;
+        const v = judgeSimilarity(codeTokens(code, lang), peers.map((x: any) => codeTokens(x.code, lang)), p.reference_solution ? codeTokens(p.reference_solution, lang) : null);
+        similarity = { flagged: v.flagged, score: v.score };
+        // The closest attempt goes to the audit log for a person to look at; the student is never told whose it is.
+        if (v.flagged) await audit(sql, ctx, 'MOCK_SIMILARITY_FLAGGED', 'mock_attempt', a.id, { problemId: p.id, score: v.score, otherAttemptId: peers[v.closest]?.ref_id ?? null });
+        await sql.query(`INSERT INTO judge_runs (student_id, purpose, ref_id, problem_id, language, code, passed, total, results, runner) VALUES ($1,'mock',$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [st.id, a.id, p.id, p.language, code, out.passed, out.total, JSON.stringify(out.results), out.runner]);
+      }
       const scored = scoreMachineProblem({ id: p.id, title: p.title, marks: p.marks, topics: p.topics, hiddenTests: p.hidden_tests }, out.results);
-      problems.push({ ...scored, skills: p.skill_slugs, language: p.language });
+      problems.push({ ...scored, skills: p.skill_slugs, language: p.language, similarity });
+      // Follow-up: one hidden test this code passed, whose input the student has never seen.
+      if (scored.maxMarks && (scored.marks / scored.maxMarks) * 100 >= 60) {
+        const t = pickDefenceTest({ language: p.language, hiddenTests: p.hidden_tests }, out.results, `${a.id}:${p.id}`);
+        if (t) await sql.query(`INSERT INTO mock_defence_checks (attempt_id, problem_id, kind, entry, code, args, setup, expected) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (attempt_id, problem_id) DO NOTHING`,
+          [a.id, p.id, t.kind, p.entry_function ?? null, code, t.args ? JSON.stringify(t.args) : null, t.setup ?? null, JSON.stringify(t.expected)]);
+      }
     }
     const score = problems.reduce((s, x) => s + x.marks, 0), max = problems.reduce((s, x) => s + x.maxMarks, 0);
     await sql.query(`INSERT INTO mock_round_results (attempt_id, round, score, max_score, details) VALUES ($1,'machine_test',$2,$3,$4)`, [a.id, score, max, JSON.stringify({ problems })]);
     await audit(sql, ctx, 'MOCK_CODING_SUBMITTED', 'mock_attempt', null, {});
-    return { result: { score, maxScore: max, problems }, report: await finishIfComplete(sql, ctx, st.id, a.id) };
+    return { result: { score, maxScore: max, problems }, report: await finishIfComplete(sql, ctx, st.id, a.id, st.isMinor) };
+  });
+
+  r.post('/api/v2/student/mock/attempts/:id/defence', S, async ({ ctx, sql, params, body }) => {
+    const st = await studentForUser(sql, ctx);
+    const a = await loadAttempt(sql, st.id, params.id);
+    if (a.status !== 'in_progress') throw new HttpError(409, 'This attempt is already completed.');
+    const pend = (await sql.query<any>(`SELECT id, kind, expected, deadline_at FROM mock_defence_checks WHERE attempt_id = $1 AND answered_at IS NULL AND deadline_at IS NOT NULL`, [a.id])).rows;
+    if (pend.length === 0) throw new HttpError(409, 'There is no follow-up question waiting.');
+    const answers = body.answers && typeof body.answers === 'object' ? body.answers : {};
+    for (const d of pend) {
+      const raw = typeof answers[d.id] === 'string' ? answers[d.id].slice(0, 400) : '';
+      // The server clock decides whether the answer came in time. A late answer is recorded but counts as wrong.
+      const inTime = Date.now() <= new Date(d.deadline_at).getTime() + 2000;
+      await sql.query(`UPDATE mock_defence_checks SET answer = $2, correct = $3, answered_at = now() WHERE id = $1`, [d.id, raw, inTime && checkDefenceAnswer(d.kind, raw, d.expected)]);
+    }
+    await audit(sql, ctx, 'MOCK_DEFENCE_ANSWERED', 'mock_attempt', a.id, { questions: pend.length });
+    return { report: await finishIfComplete(sql, ctx, st.id, a.id, st.isMinor) };
   });
 
   r.post('/api/v2/student/mock/attempts/:id/interview', S, async ({ ctx, sql, params, body }) => {
@@ -339,7 +458,7 @@ export function registerStudentRoutes(r: Router, deps: StudentDeps) {
     await sql.query(`INSERT INTO mock_round_results (attempt_id, round, score, max_score, details) VALUES ($1,'interview',$2,$3,$4)`,
       [a.id, score, answers.length * 10, JSON.stringify({ answers, scorer, scoring: (scorer === 'rules' ? 'Keyword rubric: share of expected key points your answer mentions. No AI model was used.' : 'An AI model judged which expected key points your answer covers. The score is the share covered.') + ' This is a draft score and you can ask a person to review it. No voice, video or behaviour is used.' })]);
     await audit(sql, ctx, 'MOCK_INTERVIEW_SUBMITTED', 'mock_attempt', a.id, {});
-    return { result: { score, maxScore: answers.length * 10, answers }, report: await finishIfComplete(sql, ctx, st.id, a.id) };
+    return { result: { score, maxScore: answers.length * 10, answers }, report: await finishIfComplete(sql, ctx, st.id, a.id, st.isMinor) };
   });
 
   // ---------- Learning path (ST-06) ----------
@@ -614,6 +733,8 @@ export function registerStudentRoutes(r: Router, deps: StudentDeps) {
     }
     if (body.action !== 'revoke') throw new HttpError(400, 'action must be grant or revoke.');
     await sql.query(`UPDATE consent_grants SET revoked_at = now() WHERE student_id = $1 AND purpose = $2 AND revoked_at IS NULL`, [st.id, purpose]);
+    // Recruiters may only work with a student who agreed to share. Withdrawing that agreement removes any interview kits made about them.
+    if (purpose === 'recruiter_sharing') await sql.query(`DELETE FROM project_kits WHERE student_id = $1`, [st.id]);
     let demoted = 0;
     let upstream: string = 'not_connected';
     if (purpose === 'repo_verification') {

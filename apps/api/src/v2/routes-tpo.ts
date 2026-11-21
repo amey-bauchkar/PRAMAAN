@@ -864,6 +864,7 @@ export function registerTpoRoutes(r: Router, deps: { judgeName: string; mailer: 
     if (!['complete', 'reject'].includes(body.action)) throw new HttpError(400, 'action must be complete or reject.');
     let removed: any = null;
     if (body.action === 'complete' && q.type === 'erasure') {
+      await sql.query(`DELETE FROM project_kits WHERE student_id = $1`, [q.student_id]);
       removed = (await sql.query<any>(`SELECT erase_student_data($1) AS r`, [q.student_id])).rows[0].r;
     }
     await sql.query(`UPDATE data_requests SET status = $2::varchar, completed_at = now(), exception_note = CASE WHEN $2::varchar = 'rejected' THEN $3::text ELSE NULL END WHERE id = $1`, [q.id, body.action === 'complete' ? 'completed' : 'rejected', note]);

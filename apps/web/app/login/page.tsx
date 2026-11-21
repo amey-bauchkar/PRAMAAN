@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import React, { useEffect, useState } from 'react';
-import { API_URL, authConfigured, DEMO_MODE, demoSignIn, fetchMe, supabase } from '@/lib/session';
+import { API_URL, authConfigured, DEMO_MODE, demoSignIn, fetchMe, GITHUB_SIGNIN, signInWithGitHub, supabase } from '@/lib/session';
 import { Cta } from '@/components/Cta';
 
 interface Persona { key: string; label: string; role: string; workspace: string }
@@ -23,7 +23,11 @@ export default function LoginPage() {
       fetch(`${API_URL}/api/demo/personas`).then(r => r.json()).then(d => setPersonas(d.personas))
         .catch(() => setError(`The demo server is not running at ${API_URL}. Start it with: npm run demo`));
     }
-    if (authConfigured || DEMO_MODE) fetchMe().then(me => { if (me) router.replace(`/${me.workspace}`); });
+    if (authConfigured || DEMO_MODE) fetchMe().then(async me => {
+      if (me) { router.replace(`/${me.workspace}`); return; }
+      // Signed in (for example with GitHub) but no college record yet: say what to do instead of showing a blank form.
+      if (authConfigured && (await supabase().auth.getSession()).data.session) setError('You are signed in, but no college has added you yet. Open the invitation link your placement office emailed you, or ask them to send a new one.');
+    });
   }, [router]);
 
   async function onSubmit(e: React.FormEvent) {
@@ -32,7 +36,7 @@ export default function LoginPage() {
     const { error: err } = await supabase().auth.signInWithPassword({ email, password });
     if (err) { setError(err.message); setBusy(null); return; }
     const me = await fetchMe(true);
-    if (!me) { setError('You are signed in, but no college has added you yet. Ask your placement office to add this email address.'); setBusy(null); return; }
+    if (!me) { setError('You are signed in, but no college has added you yet. Open the invitation link your placement office emailed you, or ask them to send a new one.'); setBusy(null); return; }
     router.replace(`/${me.workspace}`);
   }
 
@@ -58,7 +62,7 @@ export default function LoginPage() {
       <div>
         <Link href="/" className="font-display text-2xl font-bold">PRAMAAN</Link>
         <h1 className="mt-6 font-display text-3xl font-semibold">Sign in</h1>
-        <p className="mt-2 text-muted">{DEMO_MODE ? 'Choose a role to explore the demo. All people here are made up.' : 'Use the account your college placement office gave you.'}</p>
+        <p className="mt-2 text-muted">{DEMO_MODE ? 'Choose a role to explore the demo. All people here are made up.' : 'Sign in with your account. New here? Open the invitation link from your college email.'}</p>
       </div>
 
       {error && <p role="alert" className="rounded-lg border border-red-600/40 bg-red-600/10 p-3 text-sm">{error}</p>}
@@ -105,6 +109,10 @@ export default function LoginPage() {
           </label>
           <Cta type="submit" disabled={busy === 'form'}>{busy === 'form' ? 'Signing in…' : 'Sign in'}</Cta>
         </form>
+      )}
+
+      {authConfigured && GITHUB_SIGNIN && (
+        <button type="button" onClick={async () => { setError(await signInWithGitHub('/login')); }} className="rounded-[14px] border border-line bg-white px-4 py-2.5 text-sm font-medium hover:border-brand">Continue with GitHub</button>
       )}
 
       {!DEMO_MODE && !authConfigured && (

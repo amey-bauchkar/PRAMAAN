@@ -58,3 +58,6 @@ next-env.d.ts
 
 # State file written by scripts/verify-ledger.mjs (the last log state a verifier saw)
 .pramaan-ledger-state.json
+
+# Copied from @mediapipe/tasks-vision by apps/web/scripts/copy-proctor-assets.mjs
+apps/web/public/proctor/wasm/

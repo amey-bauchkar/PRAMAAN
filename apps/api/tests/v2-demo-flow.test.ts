@@ -58,6 +58,9 @@ describe('Student journey (Rahul)', () => {
     const start = await call('rahul', 'POST', '/api/v2/student/mock/attempts', { role: 'Backend Developer' });
     expect(start.status).toBe(200);
     const id = start.body.id;
+    // Questions stay locked until the proctored test window (camera on) has been started.
+    expect((await call('rahul', 'GET', `/api/v2/student/mock/attempts/${id}`)).body.questionsLocked).toBe(true);
+    await call('rahul', 'POST', `/api/v2/student/mock/attempts/${id}/proctor`, { events: [{ kind: 'session_started', detail: { camera: true } }] });
     const att = await call('rahul', 'GET', `/api/v2/student/mock/attempts/${id}`);
     expect(att.body.aptitude).toHaveLength(30);
     expect(att.body.machine).toHaveLength(2);
@@ -80,6 +83,15 @@ describe('Student journey (Rahul)', () => {
     const iv = await call('rahul', 'POST', `/api/v2/student/mock/attempts/${id}/interview`, {
       answers: Object.fromEntries(iq.map((q: any) => [q.id, 'An index speeds up lookups with a B-tree but slows down writes and uses storage. Inner join returns only matching rows; a left join keeps all rows from the left table with NULL.'])),
     });
+    // The drive is not finished until the student answers a follow-up about their own code, on a test input they never saw.
+    expect(iv.body.report).toBeNull();
+    const pending = (await call('rahul', 'GET', `/api/v2/student/mock/attempts/${id}`)).body.defence;
+    expect(pending.length).toBeGreaterThan(0);
+    expect(JSON.stringify(pending)).not.toMatch(/expected/);
+    const exp = (await admin.query<any>(`SELECT id, expected FROM mock_defence_checks WHERE attempt_id = $1`, [id])).rows;
+    const fin = await call('rahul', 'POST', `/api/v2/student/mock/attempts/${id}/defence`, { answers: Object.fromEntries(exp.map((e: any) => [e.id, JSON.stringify(e.expected)])) });
+    expect(fin.status).toBe(200);
+    iv.body.report = fin.body.report;
     expect(iv.body.report).not.toBeNull();
     expect(iv.body.report.rounds.map((x: any) => x.round)).toEqual(['aptitude', 'machine_test', 'interview']);
     expect(iv.body.report.awarded.join(' ')).toMatch(/SQL is now Verified \(L2 assessed\)/);

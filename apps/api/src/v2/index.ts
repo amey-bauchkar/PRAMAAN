@@ -9,6 +9,8 @@ import { registerTpoRoutes } from './routes-tpo.js';
 import { registerRecruiterRoutes } from './routes-recruiter.js';
 import { registerPassRoutes } from './routes-passes.js';
 import { registerLedgerRoutes } from './routes-ledger.js';
+import { registerInviteRoutes, registerClaimRoute } from './routes-invites.js';
+import { registerKitRoutes, KitDeps } from './routes-kit.js';
 import { configureLedger } from './ledger.js';
 import type { DomainFetcher } from './domain-proof.js';
 import { Mailer, createMailerFromEnv } from './mailer.js';
@@ -26,6 +28,8 @@ export interface V2Deps {
   llm?: FailoverLlm | null;
   /** Optional AI judge for interview answers. Without it the keyword rubric is used. */
   interviewJudge?: CoverageJudge | null;
+  /** Project interview kit: GitHub access and PDF reading. Defaults call the real GitHub; tests pass stand-ins. */
+  kit?: Pick<KitDeps, 'githubFetch' | 'pdfToText' | 'serverToken'>;
   /** Revokes the GitHub grant at GitHub and purges the stored token (wired by the app). */
   githubRevoker?: StudentDeps['githubRevoker'];
   /** Reads a recruiter's domain proof file. Defaults to a real HTTPS fetch; the demo and tests pass a stand-in. */
@@ -38,12 +42,17 @@ export interface V2Deps {
 export function registerV2(
   app: FastifyInstance,
   deps: V2Deps,
-  resolveSession: (req: FastifyRequest, reply: FastifyReply) => Promise<SessionContext | null>
+  resolveSession: (req: FastifyRequest, reply: FastifyReply) => Promise<SessionContext | null>,
+  /** Verifies a token without needing a PRAMAAN record (used only by the claim step). */
+  resolveIdentity?: Parameters<typeof registerClaimRoute>[2]
 ): void {
   const router = createRouter(app, { db: deps.db, resolveSession });
   registerStudentRoutes(router, { ...deps, interviewJudge: deps.interviewJudge === undefined ? createCoverageJudgeFromEnv() : deps.interviewJudge });
   registerTpoRoutes(router, { judgeName: deps.judge.name, mailer: deps.mailer ?? createMailerFromEnv(), llm: deps.llm === undefined ? createLlmFromEnv() : deps.llm });
   registerRecruiterRoutes(router);
+  registerKitRoutes(router, { ...deps.kit, serverToken: deps.kit?.serverToken ?? process.env.GITHUB_TOKEN, llm: deps.llm === undefined ? createLlmFromEnv() : deps.llm });
+  registerInviteRoutes(router, { mailer: deps.mailer ?? createMailerFromEnv(), webUrl: process.env.PRAMAAN_WEB_URL ?? 'http://localhost:3000' });
+  if (resolveIdentity) registerClaimRoute(app, deps.db, resolveIdentity);
   registerPublicRoutes(app, deps.db);
   registerPassRoutes(router, app, deps.db, deps.issuer);
   configureLedger(deps.issuer, { originSalt: deps.ledgerOriginSalt });

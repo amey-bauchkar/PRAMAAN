@@ -32,6 +32,7 @@ function run(name, args, env, cwd = root) {
   procs.push(p);
 }
 
+spawnSync(process.execPath, [path.join(root, 'apps', 'web', 'scripts', 'copy-proctor-assets.mjs')], { stdio: 'inherit' });
 run('api', ['tsx', 'apps/api/src/demo-server.ts'], { PORT: process.env.API_PORT ?? '4000' });
 // `npm run demo -- --prod` serves an optimised production build: far smoother than `next dev`.
 const prod = process.argv.includes('--prod');

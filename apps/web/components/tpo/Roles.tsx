@@ -5,6 +5,7 @@ import { api, fmtDateTime, useAction, useApi } from '@/lib/api';
 import { useMe } from '../WorkspaceShell';
 import { DataRequests } from './DataRequests';
 import { RecruiterAccess } from './AccessAndOutcomes';
+import { Invitations } from './Invitations';
 import { Button, Card, ErrorBox, Field, inputCls, Loading, Notice, PageHeader, Table, Td } from '../ui';
 
 export function Roles() {
@@ -45,6 +46,7 @@ export function Roles() {
           )}
         </div>
       </div>
+      {canManage && <Invitations />}
       <RecruiterAccess />
       <DataRequests />
       <Card title="Activity log (latest)" actions={<Button kind="secondary" busy={act.busy} onClick={async () => { const r = await act.run(() => api('/api/v2/tpo/audit/verify')); if (r) setMsg(r.message); }}>Check the log is intact</Button>}>

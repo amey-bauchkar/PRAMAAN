@@ -28,13 +28,14 @@ import { Roles } from './tpo/Roles';
 import { Reviews } from './tpo/Reviews';
 import { Search } from './recruiter/Search';
 import { Pipeline } from './recruiter/Pipeline';
+import { InterviewKit } from './recruiter/InterviewKit';
 import { Outcomes } from './university/Outcomes';
 import { Witness } from './university/Witness';
 
 const VIEWS: Record<string, Record<string, React.ComponentType>> = {
   student: { profile: Profile, import: Import, proofs: Proofs, targets: Targets, 'mock-drive': MockDrive, 'learning-path': LearningPath, drives: MyDrives, passes: Passes, offers: MyOffers, privacy: Privacy },
   tpo: { ledger: TrustLedger, cohort: Cohort, demand: Demand, readiness: Readiness, 'mock-setup': MockSetup, outreach: Outreach, drives: Drives, rules: Rules, applications: Applications, proposals: Proposals, fairness: Fairness, accreditation: Accreditation, roles: Roles, reviews: Reviews },
-  recruiter: { search: Search, pipeline: Pipeline },
+  recruiter: { search: Search, 'interview-kit': InterviewKit, pipeline: Pipeline },
   university: { outcomes: Outcomes, witness: Witness },
 };
 

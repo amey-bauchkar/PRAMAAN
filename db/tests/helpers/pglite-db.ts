@@ -13,7 +13,7 @@ export const SEEDS_DIR = path.join(ROOT, 'db', 'seeds');
  * scripts/migrate-supabase.mjs. Needs no Docker and never touches a live database.
  * Runs as the bootstrap superuser, so RLS is bypassed; use it for schema, trigger and constraint tests.
  */
-export async function createMigratedDb(options: { upTo?: string } = {}): Promise<PGlite> {
+export async function createMigratedDb(options: { upTo?: string; beforeMigrations?: (db: PGlite) => Promise<void> } = {}): Promise<PGlite> {
   const db = await PGlite.create({ extensions: { pgcrypto, btree_gist } });
   // Same foundational roles the migration runner creates before applying files.
   await db.exec(`
@@ -21,6 +21,7 @@ export async function createMigratedDb(options: { upTo?: string } = {}): Promise
     CREATE ROLE ai_worker WITH NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE;
     CREATE ROLE fairness_job WITH NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE;
   `);
+  if (options.beforeMigrations) await options.beforeMigrations(db);
   const files = fs.readdirSync(MIGRATIONS_DIR).filter(f => f.endsWith('.sql')).sort((a, b) => a.localeCompare(b));
   for (const f of files) {
     if (options.upTo && f.localeCompare(options.upTo) > 0) break;

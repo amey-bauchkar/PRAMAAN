@@ -48,6 +48,7 @@ export const WORKSPACES: Record<WorkspaceKey, WorkspaceDef> = {
     key: 'recruiter', title: 'Recruiter', audience: 'Candidates with checked skills from approved drives',
     modules: [
       { slug: 'search', title: 'Candidate Search', req: 'AD-08', summary: 'Filter by verified skill, level of proof and how recent it is. Every match comes with a reason.' },
+      { slug: 'interview-kit', title: 'Project Interview Kit', req: 'New', summary: 'Paste a candidate’s GitHub profile and resume. PRAMAAN finds the highlighted projects in their code and drafts easy, medium and hard questions about them.' },
       { slug: 'pipeline', title: 'Hiring Stages & Feedback', req: 'BR-19', summary: 'See candidates by stage and give feedback after each round.' },
     ],
   },

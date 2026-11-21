@@ -16,7 +16,7 @@ export async function grantFor(sql: Sql, membership: string, driveId: string) {
 }
 
 /** Students a recruiter may see for a drive: eligible or applied, with active recruiter-sharing consent; minors only with verified guardian consent. */
-const SHAREABLE = `
+export const SHAREABLE = `
   s.id IN (SELECT student_id FROM eligibility_decisions WHERE drive_id = $1 AND result = 'eligible' AND status IN ('published', 'overridden')
            UNION SELECT student_id FROM applications WHERE drive_id = $1)
   AND EXISTS (SELECT 1 FROM consent_grants c WHERE c.student_id = s.id AND c.purpose = 'recruiter_sharing' AND c.revoked_at IS NULL)

@@ -73,12 +73,44 @@ export function createRouter(app: FastifyInstance, deps: RouterDeps) {
       },
     });
   };
+  /**
+   * A route that does slow outside work (GitHub, a language model) and so must NOT hold a database transaction open meanwhile. The
+   * session and role are checked the same way; the handler opens short tenant transactions itself through `tx`.
+   */
+  const registerOutside = (method: 'GET' | 'POST', url: string, roles: readonly UserRole[], handler: OutsideHandler, opts: { bodyLimit?: number } = {}) => {
+    app.route({
+      method, url, ...(opts.bodyLimit ? { bodyLimit: opts.bodyLimit } : {}),
+      handler: async (req, reply) => {
+        const ctx = await deps.resolveSession(req, reply);
+        if (!ctx) return;
+        if (!roles.includes(ctx.role)) return reply.status(403).send({ error: `FORBIDDEN_ROLE: ${ctx.role} cannot use this endpoint.` });
+        try {
+          const out = await handler({ ctx, body: (req.body ?? {}) as any, query: (req.query ?? {}) as any, params: (req.params ?? {}) as any, req, reply, tx: fn => deps.db.withTenant(ctx, fn) });
+          return reply.status(200).send(out ?? { ok: true });
+        } catch (err: any) {
+          const mapped = err instanceof HttpError ? err : mapDbError(err);
+          if (mapped) return reply.status(mapped.status).send({ error: mapped.message, code: mapped.code });
+          req.log.error(err); if (process.env.DEBUG_V2_ERRORS) console.error(err);
+          return reply.status(500).send({ error: 'Unexpected server error.' });
+        }
+      },
+    });
+  };
   return {
+    getOutside: (url: string, roles: readonly UserRole[], h: OutsideHandler, o?: { bodyLimit?: number }) => registerOutside('GET', url, roles, h, o),
+    postOutside: (url: string, roles: readonly UserRole[], h: OutsideHandler, o?: { bodyLimit?: number }) => registerOutside('POST', url, roles, h, o),
     get: (url: string, roles: readonly UserRole[], h: Handler, o?: { raw?: boolean }) => register('GET', url, roles, h, o),
     post: (url: string, roles: readonly UserRole[], h: Handler, o?: { raw?: boolean }) => register('POST', url, roles, h, o),
     patch: (url: string, roles: readonly UserRole[], h: Handler, o?: { raw?: boolean }) => register('PATCH', url, roles, h, o),
   };
 }
+
+export interface OutsideArgs {
+  ctx: SessionContext; body: any; query: any; params: any; req: FastifyRequest; reply: FastifyReply;
+  /** Runs `fn` in one short tenant transaction (row-level security on). */
+  tx: <T>(fn: (sql: Sql) => Promise<T>) => Promise<T>;
+}
+export type OutsideHandler = (a: OutsideArgs) => Promise<unknown>;
 
 export type Router = ReturnType<typeof createRouter>;
 

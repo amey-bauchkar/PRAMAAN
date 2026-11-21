@@ -1,16 +1,19 @@
 'use client';
 
 import React from 'react';
+import type { TypingTelemetry } from '@/lib/typing';
 
 /** Plain, accessible code editor (monospace textarea with Tab support). */
-export function CodeEditor({ value, onChange, label, rows = 14 }: { value: string; onChange: (v: string) => void; label: string; rows?: number }) {
+/** `telemetry`, when given, keeps a numbers-only summary of how the answer was typed (practice drive, students 18 and over). */
+export function CodeEditor({ value, onChange, label, rows = 14, telemetry }: { value: string; onChange: (v: string) => void; label: string; rows?: number; telemetry?: TypingTelemetry }) {
   return (
     <label className="flex flex-col gap-1.5 text-sm font-semibold">
       {label}
       <textarea
         value={value} rows={rows} spellCheck={false}
-        onChange={e => onChange(e.target.value)}
+        onChange={e => { telemetry?.change(value.length, e.target.value.length); onChange(e.target.value); }}
         onKeyDown={e => {
+          telemetry?.key(e);
           if (e.key === 'Tab' && !e.shiftKey) {
             e.preventDefault();
             const t = e.currentTarget, s = t.selectionStart;
