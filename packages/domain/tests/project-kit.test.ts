@@ -165,3 +165,28 @@ describe('questions', () => {
     for (const level of ['easy', 'medium', 'hard']) expect(l.filter(q => q.level === level)).toHaveLength(2);
   });
 });
+
+import { readmeTitle } from '../src/project-kit.js';
+
+describe('README titles', () => {
+  it('reads the heading or first line, without markdown, HTML, badges or emoji', () => {
+    expect(readmeTitle('# PRAMAAN\n[![CI](x)](y)\n**Skills you can prove.**')).toBe('PRAMAAN');
+    expect(readmeTitle('# Warrant — Software Supply Chain Risk Analyzer\nEvidence-backed')).toBe('Warrant — Software Supply Chain Risk Analyzer');
+    expect(readmeTitle('# डिजिटल हिशोब वही — Digital Hishob-Khata\nx')).toContain('Digital Hishob-Khata');
+    expect(readmeTitle('<p align="center">\n  🎬 CinePlus — Movie Ticket Price Finder\n</p>')).toBe('CinePlus — Movie Ticket Price Finder');
+    expect(readmeTitle('')).toBeNull();
+  });
+  it('finds a project whose repository has a different name, from the README title, and says why', () => {
+    const repos: RepoLite[] = [
+      { name: 'Mindspark', description: null, topics: [], language: 'Python', fork: false, stars: 0, pushedAt: null, title: 'Warrant — Software Supply Chain Risk Analyzer', readme: 'Upload a package-lock.json or requirements.txt. For each risky package you get a verdict.', tech: ['Python', 'FastAPI', 'React'] },
+      { name: 'ExpenseTracker', description: null, topics: [], language: 'TypeScript', fork: false, stars: 0, pushedAt: null, title: 'डिजिटल हिशोब वही — Digital Hishob-Khata' },
+      { name: 'dotfiles', description: null, topics: [], language: 'Shell', fork: false, stars: 0, pushedAt: null, title: 'My dotfiles' },
+    ];
+    const a = matchProject({ name: 'Warrant, Software Supply Chain Risk Analyzer', summary: 'Upload a package-lock.json and get one decision for every risky dependency.', tech: ['Python', 'FastAPI', 'React'] }, repos);
+    expect(a[0]).toMatchObject({ repo: 'Mindspark', strength: 'strong' });
+    expect(a[0].reasons.join(' ')).toMatch(/README of "Mindspark" is titled/);
+    const b = matchProject({ name: 'Digital Hishob-Khata', summary: 'Household accounting notebook', tech: ['TypeScript'] }, repos);
+    expect(b[0].repo).toBe('ExpenseTracker');
+    expect(matchProject({ name: 'Hostel Mess Feedback Portal', summary: 'Weekly menu ratings', tech: ['PHP'] }, repos)).toEqual([]);
+  });
+});

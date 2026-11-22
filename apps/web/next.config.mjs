@@ -33,6 +33,11 @@ const nextConfig = {
   reactStrictMode: true,
   // The camera check imports the shared integrity rules from packages/domain (pure TypeScript, no Node-only code).
   experimental: { externalDir: true },
+  // GitHub returns the student to this address after they approve the connection. The API receives it and forwards the browser
+  // to the callback page; only this one path is passed through.
+  async rewrites() {
+    return [{ source: '/api/integrations/github/callback', destination: `${api}/api/integrations/github/callback` }];
+  },
   async headers() {
     return [{
       source: '/:path*',

@@ -1,0 +1,19 @@
+VARUN MEHTA
+varun.mehta@students.vppcoe.example | +91 98200 00002
+B.E. Information Technology, VPPCOE, Mumbai | Expected 2027 | CGPA 8.40
+
+PROJECTS
+KrushiDoot AI, Crop Yield Prediction and Prescriptive Optimization Platform | React, Node.js, FastAPI, PostgreSQL
+• Decision-support system for smallholder farmers and agricultural officers: ML-based yield prediction, what-if simulation, explainable AI and fertilizer optimization.
+• React front end, an Express API and a Python FastAPI machine-learning service.
+VARSHA, Municipal Environmental Exposure Surveillance | Python, pytest
+• Explainable, deterministic flood and outbreak early-warning system for Mumbai, built for CodeAstra 2.0 with an automated pytest suite and no external API keys.
+PDF Automation Suite | Python
+• Tools that automate common PDF tasks for office workflows.
+Sandhi | Python
+• Small Python project built during a hackathon.
+Campus Event Calendar | Java, Spring Boot
+• Shared calendar for department events with clash detection.
+
+TECHNICAL SKILLS
+Python, Machine Learning, SQL, React, TypeScript, Git

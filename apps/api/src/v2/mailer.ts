@@ -1,6 +1,9 @@
 import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
 
+/** A single bare address: no display name, quotes, angle brackets, commas, spaces or line breaks. */
+const SAFE_ADDRESS = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
+
 export interface MailMessage { to: string; subject: string; text: string }
 export type MailResult = { ok: true; messageId: string } | { ok: false; error: string };
 
@@ -32,6 +35,11 @@ export function fromTransporter(transporter: Transporter, from: string, perMinut
   return {
     transport: 'smtp', from, perMinute,
     async send(msg) {
+      // One plain address and a one-line subject. Blocks header and SMTP command injection (nodemailer advisories on crafted
+      // addresses and unsanitised envelope values) whatever the caller passes.
+      const to = String(msg.to ?? '').trim();
+      if (!SAFE_ADDRESS.test(to)) return { ok: false, error: 'Invalid recipient address.' };
+      msg = { ...msg, to, subject: String(msg.subject ?? '').replace(/[\r\n]+/g, ' ').slice(0, 300) };
       try {
         const info = await transporter.sendMail({ from, to: msg.to, subject: msg.subject, text: msg.text });
         const rejected = (info.rejected ?? []) as unknown[];

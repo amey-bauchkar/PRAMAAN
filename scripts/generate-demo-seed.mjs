@@ -19,6 +19,16 @@ import { aptitudeBank, codingProblems, LEARNING_TASKS, INTERVIEW_QUESTIONS, RAHU
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SEEDS = path.resolve(__dirname, '..', 'db', 'seeds');
 
+// ---------- tenant mode ----------
+// Default: the two fictional colleges (db/seeds/020). SEED_TENANT=vppcoe builds a realistic sample tenant for VPPCOE instead:
+// real-looking staff and student records and e-mail addresses on the reserved .example domain (they never reach a real inbox),
+// loaded into an existing college row. Output goes to db/sample/ and is not part of the automatic seeds.
+const V = process.env.SEED_TENANT === 'vppcoe';
+const NS = V ? 'pramaan-vppcoe' : 'pramaan-demo';
+/** Department ids of an existing college (JSON {CSE: id, ...}). When given, the sample uses them and does not create departments. */
+const DEPT_IDS = V && process.env.VPPCOE_DEPT_IDS ? JSON.parse(process.env.VPPCOE_DEPT_IDS) : null;
+const slugName = n => n.toLowerCase().replace(/^(dr|prof|shri|smt)\.?\s+/, '').replace(/[^a-z ]/g, '').trim().replace(/\s+/g, '.');
+
 // ---------- deterministic helpers ----------
 let rngState = 20270123;
 function rand() { // mulberry32
@@ -68,9 +78,10 @@ const between = (lo, hi) => lo + rand() * (hi - lo);
 const int = (lo, hi) => Math.floor(between(lo, hi + 1));
 /** Stable UUID from a name (v5-style layout over SHA-1). */
 function uid(name) {
-  const h = crypto.createHash('sha1').update(`pramaan-demo:${name}`).digest('hex');
+  const h = crypto.createHash('sha1').update(`${NS}:${name}`).digest('hex');
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-${(8 + (parseInt(h[16], 16) & 3)).toString(16)}${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
+const deptId = key => (DEPT_IDS && DEPT_IDS[String(key).toUpperCase()]) || uid(`dept:${key}`);
 const q = v => v === null || v === undefined ? 'NULL' : typeof v === 'number' ? String(v) : typeof v === 'boolean' ? (v ? 'TRUE' : 'FALSE') : `'${String(v).replace(/'/g, "''")}'`;
 const row = vals => `(${vals.map(q).join(', ')})`;
 function chunked(header, rows, footer = '', size = 400) {
@@ -120,7 +131,7 @@ function taxonomySql() {
 // ---------- 020 synthetic tenant ----------
 
 const UNI = uid('org:university');
-const COL_A = uid('org:college-a');
+const COL_A = V ? (process.env.VPPCOE_ORG_ID || uid('org:vppcoe')) : uid('org:college-a');
 const COL_B = uid('org:college-b');
 
 const DEPTS = [
@@ -131,6 +142,32 @@ const DEPTS = [
   { key: 'dce', org: COL_B, name: 'Diploma in Civil Engineering', code: 'DCE', n: 40, poly: true },
   { key: 'dee', org: COL_B, name: 'Diploma in Electrical Engineering', code: 'DEE', n: 40, poly: true },
 ];
+if (V) DEPTS.splice(0, DEPTS.length,
+  { key: 'cse', org: COL_A, name: 'Computer Engineering', code: 'CSE', n: 60, poly: false },
+  { key: 'it', org: COL_A, name: 'Information Technology', code: 'IT', n: 40, poly: false },
+  { key: 'entc', org: COL_A, name: 'Electronics and Telecommunication Engineering', code: 'ENTC', n: 40, poly: false });
+
+/** Sample staff for VPPCOE. Names are generated, not real people. The college admin is a real login (an invitation), so none is seeded. */
+function vppcoeStaff() {
+  const s = (key, name, org, role, dept, email) => ({ key, name, org, role, dept, email: email ?? `${slugName(name)}@vppcoe.example` });
+  return [
+    s('uni-admin', 'Dr. Rajendra Pawar', UNI, 'university_admin', null, 'rajendra.pawar@university.example'),
+    s('tpo-a', 'Prof. Kavita Rane', COL_A, 'officer', null), s('tpo-a2', 'Prof. Sandeep Bhosale', COL_A, 'officer', null),
+    s('coord-cse', 'Prof. Sachin Mhatre', COL_A, 'dept_coordinator', 'cse'), s('coord-it', 'Prof. Neelam Joshi', COL_A, 'dept_coordinator', 'it'), s('coord-entc', 'Prof. Arun Kamat', COL_A, 'dept_coordinator', 'entc'),
+    s('mentor-cse', 'Dr. Preeti Sawant', COL_A, 'mentor', 'cse'), s('mentor-cse2', 'Prof. Nikhil Dhuri', COL_A, 'mentor', 'cse'),
+    s('mentor-it', 'Prof. Hemant Gadkari', COL_A, 'mentor', 'it'), s('mentor-entc', 'Dr. Shirin Khan', COL_A, 'mentor', 'entc'),
+    s('recruiter-1', 'Rohan Mehra', COL_A, 'recruiter', null, 'rohan.mehra@nimbusanalytics.example'),
+    s('recruiter-2', 'Priyanka Nair', COL_A, 'recruiter', null, 'priyanka.nair@quantafintech.example'),
+    s('recruiter-3', 'Karan Malhotra', COL_A, 'recruiter', null, 'karan.malhotra@orbitcloud.example'),
+  ];
+}
+
+/** Strong, drive-ready candidates at fixed positions (fictional names), so the project interview kit has good candidates to pair with real GitHub profiles. */
+const VIPS = {
+  'cse:1': { first: 'Aarav', last: 'Deshpande', cgpa: 8.6, tenth: 90.2, twelfth: 86.5, skills: ['javascript', 'typescript', 'react', 'nodejs', 'rest-api', 'mongodb', 'python', 'sql', 'git', 'docker', 'data-structures', 'machine-learning', 'quant-aptitude', 'communication', 'problem-solving'] },
+  'cse:2': { first: 'Ishita', last: 'Joshi', cgpa: 8.2, tenth: 88.4, twelfth: 83.0, skills: ['javascript', 'html', 'css', 'react', 'python', 'sql', 'git', 'data-structures', 'communication', 'teamwork'] },
+  'it:0': { first: 'Varun', last: 'Mehta', cgpa: 8.4, tenth: 87.6, twelfth: 84.5, skills: ['python', 'machine-learning', 'sql', 'git', 'data-structures', 'data-analysis', 'typescript', 'react', 'excel', 'communication', 'problem-solving'] },
+};
 
 // Skills each branch typically shows; drawn per student.
 const BRANCH_SKILLS = {
@@ -204,13 +241,17 @@ function demoTenantSql() {
   const out = [BANNER('PRAMAAN SEED 020: SYNTHETIC DEMO TENANT (all people and organisations are fictional)')];
 
   // Organisations
-  out.push(`INSERT INTO organizations (id, parent_id, kind, name, tier, config) VALUES
+  if (V) out.push(`INSERT INTO organizations (id, parent_id, kind, name, tier, config) VALUES
+${row([UNI, null, 'university', 'University of Mumbai', null, '{"sample_data": true}'])},
+${row([COL_A, UNI, 'college', "Vasantdada Patil Pratishthan's College of Engineering and Visual Arts (VPPCOE)", 'Tier 2', '{"sample_data": true}'])}
+ON CONFLICT (id) DO UPDATE SET parent_id = EXCLUDED.parent_id, config = organizations.config || '{"sample_data": true}'::jsonb;`);
+  else out.push(`INSERT INTO organizations (id, parent_id, kind, name, tier, config) VALUES
 ${row([UNI, null, 'university', '[SYNTHETIC] Deccan Technological University', null, '{"synthetic": true}'])},
 ${row([COL_A, UNI, 'college', '[SYNTHETIC] Sahyadri College of Engineering', 'Tier 2', '{"synthetic": true}'])},
 ${row([COL_B, UNI, 'college', '[SYNTHETIC] Konkan Government Polytechnic', 'Tier 3', '{"synthetic": true}'])}
 ON CONFLICT (id) DO NOTHING;`);
 
-  out.push(chunked(`INSERT INTO departments (id, org_id, name, code) VALUES`,
+  if (!DEPT_IDS) out.push(chunked(`INSERT INTO departments (id, org_id, name, code) VALUES`,
     DEPTS.map(d => row([uid(`dept:${d.key}`), d.org, d.name, d.code])), `ON CONFLICT (id) DO NOTHING`));
 
   // Staff
@@ -228,13 +269,14 @@ ON CONFLICT (id) DO NOTHING;`);
     { key: 'recruiter-1', name: 'Neha Kapoor', org: COL_A, role: 'recruiter', dept: null },
     { key: 'recruiter-2', name: 'Arvind Krishnan', org: COL_A, role: 'recruiter', dept: null },
   ];
+  if (V) staff.splice(0, staff.length, ...vppcoeStaff());
   const users = [], members = [];
   for (const s of staff) {
-    users.push(row([uid(`user:${s.key}`), `demo|${s.key}`, `${s.key}@demo.pramaan.invalid`, `${s.name} [SYNTHETIC]`]));
-    members.push(row([uid(`member:${s.key}`), uid(`user:${s.key}`), s.org, s.dept ? uid(`dept:${s.dept}`) : null, s.role]));
+    users.push(V ? row([uid(`user:${s.key}`), `sample|${s.key}`, s.email, s.name]) : row([uid(`user:${s.key}`), `demo|${s.key}`, `${s.key}@demo.pramaan.invalid`, `${s.name} [SYNTHETIC]`]));
+    members.push(row([uid(`member:${s.key}`), uid(`user:${s.key}`), s.org, s.dept ? deptId(s.dept) : null, s.role]));
   }
   const memberOf = key => uid(`member:${key}`);
-  const mentorFor = { cse: 'mentor-cse', it: 'mentor-cse', entc: 'mentor-entc', mech: 'mentor-mech', dce: 'mentor-dce', dee: 'mentor-dee' };
+  const mentorFor = V ? { cse: 'mentor-cse', it: 'mentor-it', entc: 'mentor-entc' } : { cse: 'mentor-cse', it: 'mentor-cse', entc: 'mentor-entc', mech: 'mentor-mech', dce: 'mentor-dce', dee: 'mentor-dee' };
   const tpoFor = org => (org === COL_A ? 'tpo-a' : 'tpo-b');
 
   // Students
@@ -244,7 +286,7 @@ ON CONFLICT (id) DO NOTHING;`);
   const studentIndex = [];
   let seq = 0;
   const makeName = nameMaker(rand3);
-  const makeNameA = f => makeName(MIX.collegeA, f);
+  const makeNameA = f => makeName(V ? MIX.vppcoe : MIX.collegeA, f);
   const makeNameB = f => makeName(MIX.collegeB, f);
 
   for (const d of DEPTS) {
@@ -253,11 +295,13 @@ ON CONFLICT (id) DO NOTHING;`);
       const isHero = d.key === 'cse' && i === 0;
       if (!isHero) { rand(); rand(); rand(); } // keep the original stream positions stable
       const female = isHero ? false : rand3() < FEMALE_P[d.key];
-      const nm = isHero ? { first: 'Rahul', last: 'Deshmukh' } : (d.org === COL_A ? makeNameA : makeNameB)(female);
+      const vip = V ? VIPS[`${d.key}:${i}`] : undefined;
+      const generated = isHero ? null : (d.org === COL_A ? makeNameA : makeNameB)(female); // always drawn, so the name stream stays stable
+      const nm = isHero ? { first: 'Rahul', last: 'Deshmukh' } : vip ? { first: vip.first, last: vip.last } : generated;
       const first = nm.first, last = nm.last;
       const key = `student:${d.key}:${i}`;
       const userId = uid(`user:${key}`), memberId = uid(`member:${key}`), studentId = uid(key);
-      const enrol = `${d.poly ? 'KGP' : 'SCOE'}-2027-${d.code}-${String(i + 1).padStart(3, '0')}`;
+      const enrol = V ? `VPP27${d.code}${String(i + 1).padStart(3, '0')}` : `${d.poly ? 'KGP' : 'SCOE'}-2027-${d.code}-${String(i + 1).padStart(3, '0')}`;
 
       // Ages: degree students born 2004–05; diploma students 2007–09, about ten of them still 17.
       let dob;
@@ -267,9 +311,9 @@ ON CONFLICT (id) DO NOTHING;`);
       const minor = new Date(`${dob}T00:00:00Z`).getTime() > NOW - 18 * 365.25 * day;
       if (minor) summary.minors += 1;
 
-      users.push(row([userId, `demo|${key}`, `${first.toLowerCase()}.${last.toLowerCase()}.${seq}@demo.pramaan.invalid`, `${first} ${last} [SYNTHETIC]`]));
-      members.push(row([memberId, userId, d.org, uid(`dept:${d.key}`), 'student']));
-      students.push(row([studentId, d.org, userId, uid(`dept:${d.key}`), enrol, 2027, minor, dob]));
+      users.push(V ? row([userId, `sample|${key}`, `${first.toLowerCase()}.${last.toLowerCase()}${seq}@students.vppcoe.example`, `${first} ${last}`]) : row([userId, `demo|${key}`, `${first.toLowerCase()}.${last.toLowerCase()}.${seq}@demo.pramaan.invalid`, `${first} ${last} [SYNTHETIC]`]));
+      members.push(row([memberId, userId, d.org, deptId(d.key), 'student']));
+      students.push(row([studentId, d.org, userId, deptId(d.key), enrol, 2027, minor, dob]));
       summary.students += 1;
 
       // Realistic academic model: one latent ability drives 10th, 12th/diploma and CGPA, so they correlate
@@ -282,20 +326,20 @@ ON CONFLICT (id) DO NOTHING;`);
       const schoolGap = { 'SC': -9, 'ST': -11, 'OBC': -3, 'EWS': -4 }[categoryOf(catR)] ?? 0;
       const ability = normal();
       const branchOffset = { cse: 0.25, it: 0.1, entc: 0, mech: -0.2, dce: 0.1, dee: 0 }[d.key];
-      const lateral = !d.poly && !isHero && rand4() < 0.12; // lateral-entry (diploma) students in the degree course
+      const lateral = !d.poly && !isHero && !vip && rand4() < 0.12; // lateral-entry (diploma) students in the degree course
       const ssc = v => Number((Math.round(clampN(v, 50, 98.6) * 5) / 5).toFixed(1));
       const hsc = v => Number((Math.round(clampN(v, 48, 95) * 6) / 6).toFixed(2));
       const dip = v => Number(clampN(v, 50, 92).toFixed(2));
-      const tenth = isHero ? 86.4 : ssc((d.poly ? 74 : 78) + 8.5 * ability + 3.5 * normal() + schoolGap);
-      const twelfth = d.poly || lateral ? null : isHero ? 78.2 : hsc(72 + 9.5 * (0.75 * ability + 0.66 * normal()) + schoolGap);
+      const tenth = isHero ? 86.4 : vip ? vip.tenth : ssc((d.poly ? 74 : 78) + 8.5 * ability + 3.5 * normal() + schoolGap);
+      const twelfth = d.poly || lateral ? null : isHero ? 78.2 : vip ? vip.twelfth : hsc(72 + 9.5 * (0.75 * ability + 0.66 * normal()) + schoolGap);
       const diploma = d.poly ? dip(68 + 8 * (0.8 * ability + 0.6 * normal()) + schoolGap) : lateral ? dip(70 + 8 * (0.7 * ability + 0.7 * normal()) + schoolGap) : null;
-      const cgpa = isHero ? 7.8 : Number(clampN(d.poly ? (diploma / 10) + 0.25 * normal() : 7.0 + 0.8 * (0.6 * ability + 0.8 * normal()) + branchOffset, 5.0, 9.7).toFixed(2));
+      const cgpa = isHero ? 7.8 : vip ? vip.cgpa : Number(clampN(d.poly ? (diploma / 10) + 0.25 * normal() : 7.0 + 0.8 * (0.6 * ability + 0.8 * normal()) + branchOffset, 5.0, 9.7).toFixed(2));
       const pBack = cgpa < 6.3 ? 0.5 : cgpa < 7 ? 0.28 : cgpa < 7.8 ? 0.1 : 0.03;
-      const backlogs = isHero ? 0 : rand4() < pBack ? 1 + (rand4() < 0.35 ? 1 : 0) + (rand4() < 0.12 ? 1 : 0) : 0;
-      const gap = isHero ? 0 : rand4() < (cgpa < 6.5 ? 0.14 : 0.05) ? 1 : 0;
-      const history = backlogs + (isHero ? 0 : rand4() < (cgpa < 7 ? 0.25 : 0.07) ? 1 : 0);
+      const backlogs = isHero || vip ? 0 : rand4() < pBack ? 1 + (rand4() < 0.35 ? 1 : 0) + (rand4() < 0.12 ? 1 : 0) : 0;
+      const gap = isHero || vip ? 0 : rand4() < (cgpa < 6.5 ? 0.14 : 0.05) ? 1 : 0;
+      const history = backlogs + (isHero || vip ? 0 : rand4() < (cgpa < 7 ? 0.25 : 0.07) ? 1 : 0);
       academics.push(row([uid(`acad:${key}`), studentId, cgpa, backlogs, tenth, twelfth, diploma, gap, history]));
-      const si = { key, studentId, dept: d.key, org: d.org, isHero, cgpa, backlogs, minor, verified: new Set() };
+      const si = { key, studentId, dept: d.key, org: d.org, isHero, vip: Boolean(vip), cgpa, backlogs, minor, verified: new Set() };
       studentIndex.push(si);
 
       // Consents: everyone for placement operations; others vary. Minors never share with recruiters
@@ -307,7 +351,7 @@ ON CONFLICT (id) DO NOTHING;`);
         return id;
       };
       grant('placement_operations');
-      const hasRepo = isHero || (SOFTWARE.has(d.key) ? rand() < 0.75 : rand() < 0.3);
+      const hasRepo = isHero || Boolean(vip) || (SOFTWARE.has(d.key) ? rand() < 0.75 : rand() < 0.3);
       grant('repo_verification', hasRepo);
       let guardianVerified = false;
       if (minor) {
@@ -316,8 +360,8 @@ ON CONFLICT (id) DO NOTHING;`);
           guardianVerified ? 'verified' : 'pending', guardianVerified ? memberOf(tpoFor(d.org)) : null,
           guardianVerified ? 'digilocker' : null, guardianVerified ? iso(NOW - 30 * day) : null]));
       }
-      grant('recruiter_sharing', (!minor || guardianVerified) && rand() < 0.85);
-      const fairnessGrant = grant('fairness_monitoring', rand() < 0.88);
+      grant('recruiter_sharing', (!minor || guardianVerified) && (Boolean(vip) || rand() < 0.85));
+      const fairnessGrant = grant('fairness_monitoring', !vip && rand() < 0.88);
       if (fairnessGrant) {
         const gender = rand() < 0.05 ? 'Prefer not to say' : female ? 'Female' : 'Male';
         rand(); // keep the main PRNG stream unchanged
@@ -331,7 +375,7 @@ ON CONFLICT (id) DO NOTHING;`);
       const b2 = rand3() < 0.45 ? bundles[Math.floor(rand3() * bundles.length)] : [];
       const extras = BRANCH_SKILLS[d.key].filter(() => rand3() < 0.06);
       const commons = COMMON.filter(() => rand3() < 0.45);
-      const chosen = isHero
+      const chosen = vip ? vip.skills : isHero
         ? ['python', 'sql', 'java', 'git', 'data-structures', 'excel', 'javascript', 'react', 'docker', 'quant-aptitude', 'communication']
         : [...new Set([...CORE[d.key], ...b1, ...b2, ...extras, ...(commons.length ? commons : [COMMON[Math.floor(rand3() * COMMON.length)]])])];
       const heroStates = { python: ['verified', 'L1_code_backed', 2], sql: ['claimed', null, 1], java: ['verified', 'L2_assessed', 2], git: ['verified', 'L1_code_backed', 2], 'data-structures': ['evidence_linked', null, 2], excel: ['verified', 'L1_code_backed', 1], javascript: ['evidence_linked', null, 2], react: ['observed', null, 1], docker: ['claimed', null, 1], 'quant-aptitude': ['verified', 'L2_assessed', 2], communication: ['claimed', null, 1] };
@@ -340,7 +384,11 @@ ON CONFLICT (id) DO NOTHING;`);
         const ssId = uid(`ss:${key}:${slug}`);
         let state, proof, level;
         if (isHero) [state, proof, level] = heroStates[slug];
-        else {
+        else if (vip) {
+          // A portfolio-ready candidate: everything proven. Coding skills with code, SQL and the common skills by assessment.
+          state = 'verified'; level = 2;
+          proof = COMMON.includes(slug) || slug === 'sql' || slug === 'data-structures' ? 'L2_assessed' : CODE_SKILLS.has(slug) ? 'L1_code_backed' : 'L2_assessed';
+        } else {
           const r = rand();
           // Better CGPA students have somewhat more proof, so cohort analytics have signal.
           const boost = (cgpa - 7) * 0.04 + (CORE[d.key].includes(slug) ? 0.2 : 0);
@@ -418,6 +466,7 @@ ON CONFLICT (id) DO NOTHING;`);
     ['tejas-semi', 'Tejas Semiconductors', 'Semiconductors'], ['pragati', 'Pragati Consulting', 'IT Services'], ['medisys', 'Medisys Health Tech', 'Healthcare Software'],
     ['krishi', 'Krishi Data Labs', 'AgriTech'], ['urja', 'Urja Solar', 'Renewable Energy'], ['shakti', 'Shakti Automation', 'Industrial Automation'],
   ];
+  if (V) companies.splice(0, companies.length, ...companies.filter(([k]) => !['vistar', 'urja', 'kaveri', 'sahyadri-power', 'shakti'].includes(k)));
   out.push(chunked(`INSERT INTO companies (id, org_id, name, industry, contact_email) VALUES`,
     companies.map(([k, n, ind]) => row([uid(`company:${k}`), ['vistar', 'urja'].includes(k) ? COL_B : COL_A, `[SYNTHETIC] ${n}`, ind, `campus@${k}.demo.pramaan.invalid`])), `ON CONFLICT (id) DO NOTHING`));
 
@@ -434,6 +483,7 @@ ON CONFLICT (id) DO NOTHING;`);
     ['electrical-tech', 'urja', 'Solar Installation Technician', COL_B, 33, 'scheduled', ['DEE'], 5.5, 1, [['solar-pv', 1, 'L1'], ['electrical-design', 1, 'L1']], 'Install and commission rooftop solar PV; wiring, earthing and electrical safety.'],
     ['past-backend', 'medisys', 'Associate Software Engineer (completed)', COL_A, -40, 'completed', ['CSE', 'IT'], 6.5, 0, [['sql', 1, 'L1']], 'Healthcare software: Java or Python services and SQL. Completed drive used for funnel analytics.'],
   ];
+  if (V) drives.splice(0, drives.length, ...drives.filter(([k, , , org]) => org === COL_A && k !== 'design-eng'));
   const roles = [], roleSkills = [], driveRows = [], ruleSets = [], ruleVersions = [];
   for (const [k, comp, title, org, offset, status, branches, minCgpa, maxBacklogs, skills, jd] of drives) {
     const roleId = uid(`role:${k}`), driveId = uid(`drive:${k}`), rsId = uid(`ruleset:${k}`), rvId = uid(`rulever:${k}`);
@@ -468,7 +518,7 @@ ON CONFLICT (id) DO NOTHING;`);
   // Applicants are the eligible students who chose to apply (about 70%). Selection follows a noisy score
   // of CGPA and verified SQL, like a real shortlist: about 12% offered, 18% interviews, 30% shortlisted.
   const applicants = studentIndex
-    .filter(st => (st.dept === 'cse' || st.dept === 'it') && !st.isHero && st.cgpa >= 6.5 && st.backlogs === 0 && rand3() < 0.7)
+      .filter(st => (st.dept === 'cse' || st.dept === 'it') && !st.isHero && !st.vip && st.cgpa >= 6.5 && st.backlogs === 0 && rand3() < 0.7)
     .map(st => ({ st, score: (st.cgpa - 7) * 0.9 + (st.verified.has('sql') ? 0.6 : 0) + (st.verified.has('java') || st.verified.has('python') ? 0.3 : 0) + 0.7 * normal() }))
     .sort((a, b) => b.score - a.score);
   applicants.forEach(({ st, score }, idx) => {
@@ -501,6 +551,7 @@ ON CONFLICT (id) DO NOTHING;`);
   out.push(chunked(`UPDATE drives d SET role_id = v.role::uuid, rule_set_id = v.rs::uuid, rule_version_id = v.rv::uuid, ctc_inr = v.ctc::numeric\nFROM (VALUES`, dl, `) v(id, role, rs, rv, ctc) WHERE d.id = v.id::uuid`));
 
   const rooms = [[COL_A, 'Seminar Hall 1', 120], [COL_A, 'Auditorium', 300], [COL_A, 'Computer Lab 1', 60], [COL_A, 'Computer Lab 2', 60], [COL_A, 'Interview Room A', 6], [COL_A, 'Interview Room B', 6], [COL_B, 'Main Hall', 150], [COL_B, 'Workshop Lab', 40]];
+  if (V) rooms.splice(0, rooms.length, ...rooms.filter(r => r[0] === COL_A));
   out.push(chunked(`INSERT INTO rooms (id, org_id, name, capacity) VALUES`, rooms.map(([o, n, c]) => row([uid(`room:${o}:${n}`), o, n, c])), `ON CONFLICT (id) DO NOTHING`));
   const room = (o, n) => uid(`room:${o}:${n}`);
   // IST wall-clock time on the day `offsetDays` after the reference date.
@@ -514,9 +565,13 @@ ON CONFLICT (id) DO NOTHING;`);
     ['cloud', 'technical_test', 'Linux practical', 35, [10, 30], [12, 0], room(COL_A, 'Computer Lab 2')],
     ['site-eng', 'interview', 'Interviews', 30, [10, 0], [14, 0], room(COL_B, 'Main Hall')],
   ];
+  if (V) rounds.splice(0, rounds.length, ...rounds.filter(r => drives.some(d => d[0] === r[0])));
   out.push(chunked(`INSERT INTO drive_rounds (id, drive_id, kind, title, starts_at, ends_at, room_id, status) VALUES`,
     rounds.map(([k, kind, t, o, s1, e1, r]) => row([uid(`round:${k}:${kind}`), uid(`drive:${k}`), kind, t, at(o, ...s1), at(o, ...e1), r, 'scheduled'])), `ON CONFLICT (id) DO NOTHING`));
 
+  if (V) out.push(`INSERT INTO recruiter_access_grants (id, recruiter_membership_id, drive_id, scope, approved_by, expires_at) VALUES
+${row([uid('grant:recruiter-3:cloud'), memberOf('recruiter-3'), uid('drive:cloud'), '{"fields": ["verified_skills", "evidence_cards"]}', memberOf('tpo-a'), '2027-01-31T18:29:59.000Z'])}
+ON CONFLICT (id) DO NOTHING;`);
   out.push(`INSERT INTO recruiter_access_grants (id, recruiter_membership_id, drive_id, scope, approved_by, expires_at) VALUES
 ${[['recruiter-1', 'backend'], ['recruiter-1', 'past-backend'], ['recruiter-2', 'data-analyst']].map(([r, k]) => row([uid(`grant:${r}:${k}`), memberOf(r), uid(`drive:${k}`), '{"fields": ["verified_skills", "evidence_cards"]}', memberOf('tpo-a'), '2027-01-31T18:29:59.000Z'])).join(',\n')}
 ON CONFLICT (id) DO NOTHING;`);
@@ -555,7 +610,7 @@ ${row([uid('inbound:orbit'), COL_A, uid('company:orbit'), 'campus@orbit.demo.pra
 ON CONFLICT (id) DO NOTHING;`);
 
   // Interview questions per role, approved by the placement office.
-  const iqs = INTERVIEW_QUESTIONS.map(([role, topic, qq, kps], i) => {
+  const iqs = (V ? INTERVIEW_QUESTIONS.filter(([role]) => !['Junior Site Engineer', 'Solar Installation Technician', 'Design Engineer (GET)'].includes(role)) : INTERVIEW_QUESTIONS).map(([role, topic, qq, kps], i) => {
     const org = ['Junior Site Engineer', 'Solar Installation Technician'].includes(role) ? COL_B : COL_A;
     return row([uid(`iq:${i}`), org, role, topic, qq, JSON.stringify(kps.map(([point, keywords]) => ({ point, keywords }))), 'approved', 'officer', memberOf(tpoFor(org))]);
   });
@@ -614,16 +669,30 @@ ON CONFLICT (id) DO NOTHING;`);
 ${row([baseline, COL_A, 'Season baseline (synthetic)', iso(SEPT + 3 * day), JSON.stringify({ synthetic: true, note: 'Baseline captured before the SQL workshop.' })])}
 ON CONFLICT (id) DO NOTHING;`);
   out.push(`INSERT INTO interventions (id, org_id, title, skill_id, department_id, starts_on, ends_on, before_snapshot_id, created_by)
-SELECT ${q(uid('intervention:sql'))}::uuid, ${q(COL_A)}::uuid, 'SQL workshop for Computer Engineering', s.id, ${q(uid('dept:cse'))}::uuid, '2026-10-05', '2026-10-16', ${q(baseline)}::uuid, ${q(memberOf('tpo-a'))}::uuid
+SELECT ${q(uid('intervention:sql'))}::uuid, ${q(COL_A)}::uuid, 'SQL workshop for Computer Engineering', s.id, ${q(deptId('cse'))}::uuid, '2026-10-05', '2026-10-16', ${q(baseline)}::uuid, ${q(memberOf('tpo-a'))}::uuid
 FROM skills s WHERE s.slug = 'sql'
 ON CONFLICT (id) DO NOTHING;`);
   out.unshift(`-- Summary: ${summary.students} students, ${summary.minors} minors by date of birth, ${summary.verified} verified skills,\n-- ${drives.length} drives, ${funnel.length} applications in the completed drive. Reference date 2026-11-16.\n`);
-  return { sql: out.join('\n\n') + '\n', summary };
+  let text = out.join('\n\n') + '\n';
+  if (V) {
+    // Remove the markers that belong to the fictional colleges, and point company contacts at the reserved .example domain.
+    text = text.replace(/\[SYNTHETIC sample \d+\]/g, 'market sample').replace(/\[SYNTHETIC\] /g, '').replace(/ \[SYNTHETIC\]/g, '').replace(/\.demo\.pramaan\.invalid/g, '.example').replace(/ \(synthetic\)/g, '')
+      .replace('PRAMAAN SEED 020: SYNTHETIC DEMO TENANT (all people and organisations are fictional)', 'PRAMAAN SAMPLE TENANT: VPPCOE (generated sample data, realistic but not real people)');
+  }
+  return { sql: text, summary };
 }
 
-fs.writeFileSync(path.join(SEEDS, '010_skill_taxonomy.sql'), taxonomySql());
-fs.writeFileSync(path.join(SEEDS, '015_assessment_banks.sql'), banksSql());
-const { sql, summary } = demoTenantSql();
-fs.writeFileSync(path.join(SEEDS, '020_synthetic_demo_tenant.sql'), sql);
-console.log(`[SEED-GEN] taxonomy: ${TAXONOMY.length} skills`);
-console.log(`[SEED-GEN] demo tenant: ${JSON.stringify(summary)}`);
+if (V) {
+  const SAMPLE = path.resolve(__dirname, '..', 'db', 'sample');
+  fs.mkdirSync(SAMPLE, { recursive: true });
+  const { sql, summary } = demoTenantSql();
+  fs.writeFileSync(path.join(SAMPLE, 'vppcoe_sample_tenant.sql'), sql);
+  console.log(`[SEED-GEN] VPPCOE sample tenant: ${JSON.stringify(summary)} -> db/sample/vppcoe_sample_tenant.sql`);
+} else {
+  fs.writeFileSync(path.join(SEEDS, '010_skill_taxonomy.sql'), taxonomySql());
+  fs.writeFileSync(path.join(SEEDS, '015_assessment_banks.sql'), banksSql());
+  const { sql, summary } = demoTenantSql();
+  fs.writeFileSync(path.join(SEEDS, '020_synthetic_demo_tenant.sql'), sql);
+  console.log(`[SEED-GEN] taxonomy: ${TAXONOMY.length} skills`);
+  console.log(`[SEED-GEN] demo tenant: ${JSON.stringify(summary)}`);
+}

@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { api, fmtDate, useAction, useApi } from '@/lib/api';
 import { DEMO_MODE } from '@/lib/session';
 import { ImportedCode } from './ImportedCode';
+import { GitHubRepos } from './GitHubRepos';
 import { Button, Card, ErrorBox, Field, inputCls, Notice, PageHeader, Table, Td } from '../ui';
 
 export function Import() {
@@ -12,6 +13,7 @@ export function Import() {
   const privacy = useApi('/api/v2/student/privacy');
   const act = useAction();
   const [msg, setMsg] = useState<string | null>(null);
+  const [codeKey, setCodeKey] = useState(0);
   const [provider, setProvider] = useState<'leetcode' | 'codeforces'>('leetcode');
   const [handle, setHandle] = useState('');
   const [pending, setPending] = useState<{ token: string; instructions: string } | null>(null);
@@ -47,8 +49,8 @@ export function Import() {
           <p className="mt-2 text-sm text-muted">You choose which repositories to share. We read the files at one fixed point in time, confirm they are unchanged, and never run your code on our servers. You can stop sharing in Privacy & Consent at any time.</p>
           {DEMO_MODE
             ? <Notice>Demo: GitHub sign-in is not connected here, so the demo uses sample code from a student project (Rahul’s canteen app). It is labelled as sample code wherever it appears.</Notice>
-            : <Button className="mt-3" onClick={async () => { const r = await act.run(() => api('/api/integrations/github/connect')); if (r?.authorizeUrl) window.location.href = r.authorizeUrl; }}>Connect GitHub</Button>}
-          <ImportedCode onDone={profile.reload} />
+            : <GitHubRepos onDone={() => { profile.reload(); setCodeKey(k => k + 1); }} />}
+          <ImportedCode key={codeKey} onDone={profile.reload} />
         </Card>
 
         <Card title="LeetCode or Codeforces">

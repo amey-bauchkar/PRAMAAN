@@ -1,0 +1,22 @@
+AARAV DESHPANDE
+aarav.deshpande@students.vppcoe.example | +91 98200 00001
+B.E. Computer Engineering, VPPCOE, Mumbai | Expected 2027 | CGPA 8.60
+
+PROJECTS
+PRAMAAN | TypeScript, Next.js, Fastify, PostgreSQL, Supabase
+• Campus-placement platform where student work becomes graded, verifiable proof of skill: versioned eligibility rules checked for fairness, and an append-only signed log of placements.
+• Built invitation-based sign-in, row-level security for tenant isolation, and a recruiter project interview kit that uses Groq and Gemini.
+Namma Space | Python, 3D reconstruction
+• Turns photos or a video of a room into a photo-textured 3D model you can walk through in the browser, with labelled places, search and walking paths.
+• Built for Techfest IIT Bombay 2026-27, Round 1 (reconstruction and roaming) and Round 2 (points of interest and navigation).
+DepthWizard | Python, computer vision
+• Single-view height estimation and 3D flythrough of terrain for disaster management, built for Smart India Hackathon 2024 (ISRO problem statement).
+Warrant, Software Supply Chain Risk Analyzer | Python, FastAPI, React
+• Upload a package-lock.json or requirements.txt and get one evidence-backed decision for every risky dependency, computed from a printed rule table instead of a black-box score.
+Digital Hishob-Khata | TypeScript, offline-first PWA
+• Marathi-first, mobile-first, offline-first household accounting notebook for daily expenses and lending, with tests and a production build.
+Hostel Mess Feedback Portal | PHP, MySQL
+• Weekly menu ratings and complaint tracking for the college hostel mess, used by 200 students.
+
+TECHNICAL SKILLS
+JavaScript, TypeScript, Python, SQL, React, Node.js, Git

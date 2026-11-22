@@ -50,6 +50,7 @@ export const GROUPS = {
 /** Community mix per college, as [group, weight]. Pune-region engineering college vs. Konkan polytechnic. */
 export const MIX = {
   collegeA: [['marathi', 0.55], ['hindi', 0.12], ['south', 0.08], ['muslim', 0.08], ['gujarati_marwari', 0.06], ['goan_christian', 0.05], ['bengali_odia', 0.03], ['sikh_punjabi', 0.03]],
+  vppcoe: [['marathi', 0.42], ['hindi', 0.16], ['gujarati_marwari', 0.12], ['muslim', 0.09], ['south', 0.08], ['goan_christian', 0.06], ['sikh_punjabi', 0.04], ['bengali_odia', 0.03]],
   collegeB: [['marathi', 0.8], ['muslim', 0.08], ['goan_christian', 0.07], ['hindi', 0.05]],
 };
 

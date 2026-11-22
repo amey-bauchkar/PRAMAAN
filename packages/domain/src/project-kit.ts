@@ -197,6 +197,17 @@ export interface RepoLite {
   name: string; description: string | null; topics: string[]; language: string | null; fork: boolean; stars: number; pushedAt: string | null;
   /** Filled in by the deep scan when available. */
   readme?: string | null; tech?: string[];
+  /** The README's own title. Projects are often named there and not in the repository's name ("Warrant" in a repo called "Mindspark"). */
+  title?: string | null;
+}
+
+/** The README's heading or first line of text, without markdown, HTML or emoji. */
+export function readmeTitle(readme: string | null | undefined): string | null {
+  const lines = String(readme ?? '').replace(/\r/g, '').split('\n');
+  const clean = (l: string) => l.replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/<[^>]+>/g, '').replace(/[*_`>#|]/g, '').replace(/\p{Extended_Pictographic}/gu, '').replace(/\s+/g, ' ').trim();
+  const h1 = lines.find(l => /^#\s+\S/.test(l));
+  const t = clean(h1 ?? lines.find(l => clean(l).length >= 3) ?? '');
+  return t ? t.slice(0, 120) : null;
 }
 
 export interface RepoMatch { repo: string; score: number; strength: 'strong' | 'possible'; reasons: string[] }
@@ -218,17 +229,21 @@ export function matchProject(project: ResumeProject, repos: RepoLite[]): RepoMat
   const pWords = wordSet(project.summary);
   const out: RepoMatch[] = [];
   for (const r of repos) {
-    const rt = nameTokens(r.name);
-    const rSquash = squash(r.name);
-    let name = 0;
-    if (pSquash && pSquash === rSquash) name = 1;
-    else if (pSquash.length >= 4 && (rSquash.includes(pSquash) || pSquash.includes(rSquash)) && rSquash.length >= 4) name = 0.85;
-    else if (pt.length && rt.length) {
-      const inter = pt.filter(t => rt.includes(t)).length;
-      const jac = inter / new Set([...pt, ...rt]).size;
-      const cont = inter / Math.min(pt.length, rt.length);
-      name = Math.max(jac, cont * 0.8);
-    }
+    const nameScoreOf = (label: string) => {
+      const rt = nameTokens(label);
+      const rSquash = squash(label);
+      if (pSquash && pSquash === rSquash) return 1;
+      if (pSquash.length >= 4 && rSquash.length >= 4 && (rSquash.includes(pSquash) || pSquash.includes(rSquash))) return 0.85;
+      if (pt.length && rt.length) {
+        const inter = pt.filter(t => rt.includes(t)).length;
+        return Math.max(inter / new Set([...pt, ...rt]).size, (inter / Math.min(pt.length, rt.length)) * 0.8);
+      }
+      return 0;
+    };
+    const byRepoName = nameScoreOf(r.name);
+    // A README title counts a little less than the repository's own name, since many READMEs repeat a generic heading.
+    const byTitle = r.title ? nameScoreOf(r.title) * 0.95 : 0;
+    const name = Math.max(byRepoName, byTitle);
     const repoTech = new Set([...(r.tech ?? []), ...(r.language ? [r.language] : []), ...r.topics].map(t => t.toLowerCase()));
     const sharedTech = [...pTech].filter(t => repoTech.has(t));
     const tech = pTech.size ? Math.min(1, sharedTech.length / Math.min(pTech.size, 3)) : 0;
@@ -238,7 +253,8 @@ export function matchProject(project: ResumeProject, repos: RepoLite[]): RepoMat
     const score = Math.round((0.6 * name + 0.2 * tech + 0.2 * text) * 100) / 100;
     if (score < 0.3 && name < 0.8) continue;
     const reasons: string[] = [];
-    if (name >= 0.8) reasons.push(name === 1 ? `The repository name "${r.name}" is the project name.` : `The repository name "${r.name}" contains or is contained in the project name.`);
+    if (byTitle > byRepoName && name >= 0.5) reasons.push(`The README of "${r.name}" is titled "${r.title}", which matches the project name.`);
+    else if (name >= 0.8) reasons.push(name === 1 ? `The repository name "${r.name}" is the project name.` : `The repository name "${r.name}" contains or is contained in the project name.`);
     else if (name > 0.3) reasons.push(`The names share words ("${r.name}" and "${project.name}").`);
     if (sharedTech.length) reasons.push(`Same technology: ${sharedTech.slice(0, 4).join(', ')}.`);
     if (sharedWords.length >= 2) reasons.push(`Description words in common: ${sharedWords.slice(0, 5).join(', ')}.`);

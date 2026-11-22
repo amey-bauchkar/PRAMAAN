@@ -386,11 +386,13 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
   installRateLimit(app, {
     perMinute: Number(process.env.RATE_LIMIT_PER_MINUTE ?? 600),
     strictPerMinute: Number(process.env.RATE_LIMIT_STRICT_PER_MINUTE ?? 30),
-    strict: /\/(machine\/(run|submit)|mutate|learning-path\/items\/[^/]+\/submit|demo\/login|public\/credentials)/,
+    strict: /\/(machine\/(run|submit)|mutate|learning-path\/items\/[^/]+\/submit|demo\/login|public\/(credentials|pass-requests|passes)|auth\/claim|kit\/|integrations\/github\/(connect|callback|repositories)|repositories\/ingest)/,
     disabled: process.env.NODE_ENV === 'test' && !process.env.RATE_LIMIT_PER_MINUTE,
   });
 
-  app.register(swagger, {
+  // API docs expose the full route map, and @fastify/swagger-ui serves static files: off in production unless asked for.
+  const docsEnabled = !isProduction || process.env.API_DOCS_ENABLED === 'true';
+  if (docsEnabled) app.register(swagger, {
     openapi: {
       info: {
         title: 'PRAMAAN Placement Intelligence API',
@@ -400,8 +402,15 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
     }
   });
 
-  app.register(swaggerUi, {
+  if (docsEnabled) app.register(swaggerUi, {
     routePrefix: '/docs'
+  });
+
+  // One error handler for everything not caught by a route: client errors keep their message, server errors never reveal internals.
+  app.setErrorHandler((err: any, req, reply) => {
+    const status = typeof err?.statusCode === 'number' && err.statusCode >= 400 && err.statusCode < 600 ? err.statusCode : 500;
+    if (status >= 500) { req.log.error(err); return reply.status(status).send({ error: 'Unexpected server error.' }); }
+    return reply.status(status).send({ error: String(err?.message ?? 'Bad request.').slice(0, 300) });
   });
 
   // Health endpoint (Public)
@@ -718,10 +727,10 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       return reply.status(201).send(regResult);
     } catch (err: any) {
       if (err.message.startsWith('DURABLE_STORAGE_REQUIRED')) {
-        return reply.status(503).send({ error: err.message });
+        req.log.error(err); return reply.status(503).send({ error: `${String(err.message).split(':')[0]}: The service is temporarily unavailable. Try again.` });
       }
       if (err.message.startsWith('CONSENT_SERVICE_UNAVAILABLE')) {
-        return reply.status(503).send({ error: err.message });
+        req.log.error(err); return reply.status(503).send({ error: `${String(err.message).split(':')[0]}: The service is temporarily unavailable. Try again.` });
       }
       if (err.message.startsWith('FORBIDDEN_STUDENT_ACCESS')) {
         return reply.status(403).send({ error: err.message });
@@ -736,7 +745,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
         return reply.status(400).send({ error: err.message });
       }
       if (err.message.startsWith('SNAPSHOT_REGISTRATION_FAILED')) {
-        return reply.status(500).send({ error: err.message });
+        req.log.error(err); return reply.status(500).send({ error: 'Unexpected server error.' });
       }
       return reply.status(400).send({ error: err.message });
     }
@@ -784,7 +793,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
         return reply.status(422).send({ error: err.message });
       }
       if (err.message.startsWith('CONSENT_SERVICE_UNAVAILABLE')) {
-        return reply.status(503).send({ error: err.message });
+        req.log.error(err); return reply.status(503).send({ error: `${String(err.message).split(':')[0]}: The service is temporarily unavailable. Try again.` });
       }
       return reply.status(400).send({ error: err.message });
     }
@@ -840,7 +849,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       if (err.message.startsWith('FORBIDDEN_DELEGATED_CONNECTION') || err.message.startsWith('FORBIDDEN_STUDENT_ACCESS')) {
         return reply.status(403).send({ error: err.message });
       }
-      return reply.status(500).send({ error: err.message });
+      req.log.error(err); return reply.status(500).send({ error: 'Unexpected server error.' });
     }
   });
 
@@ -895,7 +904,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
         context,
         'integration.github.connected',
         'github_connection',
-        result.githubUserId,
+        student.id,
         {
           studentId: student.id,
           githubUsername: result.githubUsername,
@@ -917,7 +926,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       ) {
         return reply.status(403).send({ error: err.message });
       }
-      return reply.status(500).send({ error: err.message });
+      req.log.error(err); return reply.status(500).send({ error: 'Unexpected server error.' });
     }
   });
 
@@ -955,7 +964,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
         context,
         'integration.github.connected',
         'github_connection',
-        result.githubUserId,
+        student.id,
         {
           studentId: student.id,
           githubUsername: result.githubUsername,
@@ -977,7 +986,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       ) {
         return reply.status(403).send({ error: err.message });
       }
-      return reply.status(500).send({ error: err.message });
+      req.log.error(err); return reply.status(500).send({ error: 'Unexpected server error.' });
     }
   });
 
@@ -1015,7 +1024,35 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       const status = await githubAccountService.getConnectionStatus(context, targetStudentId);
       return reply.status(200).send(status);
     } catch (err: any) {
-      return reply.status(500).send({ error: err.message });
+      req.log.error(err); return reply.status(500).send({ error: 'Unexpected server error.' });
+    }
+  });
+
+  // The student's own public repositories, newest first, so they can pick which ones to share. Uses the student's stored token
+  // on the server; the token is never returned. Fixed host, no user-supplied URL.
+  app.get('/api/integrations/github/repositories', async (req, reply) => {
+    const context = await resolveSessionContext(req, reply);
+    if (!context) return;
+    if (context.role !== 'student') return reply.status(403).send({ error: 'FORBIDDEN_ROLE: Only students list their own repositories.' });
+    const student = await tenantRepo.getStudentByUserId(context, context.userId);
+    if (!student) return reply.status(404).send({ error: 'STUDENT_RECORD_NOT_FOUND: No student profile found for current user in this institution.' });
+    try {
+      const token = await githubAccountService.getDecryptedAccessToken(context, student.id);
+      const res = await fetch('https://api.github.com/user/repos?visibility=public&affiliation=owner&sort=pushed&per_page=60', {
+        headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'user-agent': 'pramaan' },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) return reply.status(502).send({ error: `GITHUB_UNAVAILABLE: GitHub answered ${res.status}.` });
+      const rows = (await res.json()) as any[];
+      return reply.status(200).send({
+        repositories: rows.filter(r => !r.fork && !r.private).map(r => ({
+          owner: String(r.owner?.login ?? ''), name: String(r.name ?? ''), description: r.description ? String(r.description).slice(0, 200) : null,
+          language: r.language ?? null, stars: Number(r.stargazers_count ?? 0), defaultBranch: String(r.default_branch ?? 'main'), pushedAt: r.pushed_at ?? null,
+        })),
+      });
+    } catch (err: any) {
+      if (String(err.message).startsWith('NO_ACTIVE_GITHUB_CONNECTION') || String(err.message).startsWith('GITHUB_TOKEN_EXPIRED')) return reply.status(422).send({ error: err.message });
+      req.log.error(err); return reply.status(500).send({ error: 'Unexpected server error.' });
     }
   });
 
@@ -1060,7 +1097,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       );
       return reply.status(200).send({ success: true, disconnected: unlinked });
     } catch (err: any) {
-      return reply.status(500).send({ error: err.message });
+      req.log.error(err); return reply.status(500).send({ error: 'Unexpected server error.' });
     }
   });
 
@@ -1136,7 +1173,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
         err.message.startsWith('CONSENT_SERVICE_UNAVAILABLE') ||
         err.message.startsWith('CONSENT_SERVICE_UNAVAILABLE_PRE_PERSIST')
       ) {
-        return reply.status(503).send({ error: err.message });
+        req.log.error(err); return reply.status(503).send({ error: `${String(err.message).split(':')[0]}: The service is temporarily unavailable. Try again.` });
       }
       if (
         err.message.startsWith('NO_ACTIVE_GITHUB_CONNECTION') ||
@@ -1176,7 +1213,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       ) {
         return reply.status(422).send({ error: err.message });
       }
-      return reply.status(500).send({ error: err.message });
+      req.log.error(err); return reply.status(500).send({ error: 'Unexpected server error.' });
     }
   });
 
@@ -1208,7 +1245,7 @@ export function buildApp(opts: AppOptions = {}): FastifyInstance & { persistence
       }
       return reply.status(200).send(job);
     } catch (err: any) {
-      return reply.status(500).send({ error: err.message });
+      req.log.error(err); return reply.status(500).send({ error: 'Unexpected server error.' });
     }
   });
 

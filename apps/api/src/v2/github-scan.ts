@@ -85,7 +85,7 @@ export async function scanProfile(gh: GhFetch, login: string): Promise<ProfileSc
     for (const x of r.json) {
       if (!x || typeof x.name !== 'string' || !REPO.test(x.name)) continue;
       repos.push({
-        name: x.name, fullName: String(x.full_name ?? `${login}/${x.name}`), url: String(x.html_url ?? `https://github.com/${login}/${x.name}`),
+        name: x.name, fullName: String(x.full_name ?? `${login}/${x.name}`), url: /^https:\/\/github\.com\//.test(String(x.html_url)) ? String(x.html_url) : `https://github.com/${login}/${x.name}`,
         description: typeof x.description === 'string' ? x.description.slice(0, 300) : null, language: typeof x.language === 'string' ? x.language : null,
         topics: Array.isArray(x.topics) ? x.topics.filter((t: unknown) => typeof t === 'string').slice(0, 12) : [], fork: !!x.fork, archived: !!x.archived,
         stars: Number(x.stargazers_count) || 0, forks: Number(x.forks_count) || 0, sizeKb: Number(x.size) || 0, pushedAt: x.pushed_at ?? null, createdAt: x.created_at ?? null,

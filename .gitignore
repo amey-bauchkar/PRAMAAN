@@ -61,3 +61,9 @@ next-env.d.ts
 
 # Copied from @mediapipe/tasks-vision by apps/web/scripts/copy-proctor-assets.mjs
 apps/web/public/proctor/wasm/
+
+# Generated VPPCOE sample tenant (npm run sample:vppcoe regenerates it)
+db/sample/
+
+# Generated sample logins and passwords (never commit)
+.local/

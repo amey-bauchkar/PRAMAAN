@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
 import {
-  parseGitHubProfile, matchProject, nameTokens, KitQuestion, ProjectFacts, ResumeProject, RepoMatch,
+  parseGitHubProfile, matchProject, nameTokens, readmeTitle, scrubSecrets, techFromText, KitQuestion, ProjectFacts, ResumeProject, RepoMatch,
 } from '@pramaan/domain';
 import { Router, HttpError, requireUuid, membershipId } from './http.js';
 import { audit } from './audit.js';
@@ -33,6 +33,8 @@ export async function defaultPdfToText(buf: Buffer): Promise<string> {
 const R = ['recruiter'] as const;
 const MAX_PDF_BYTES = 3 * 1024 * 1024;
 const DEEP_CAP = 10;
+/** READMEs read (one request each) to find projects whose repository is named differently. */
+const PROBE_CAP = 14;
 const CALLS_PER_REPO = 11;
 const iso = (v: any) => (v ? new Date(v).toISOString() : null);
 
@@ -145,16 +147,32 @@ export function registerKitRoutes(r: Router, deps: KitDeps) {
     if (extracted.projects.length === 0) throw new HttpError(422, 'No projects were found in the resume. Paste the text of its Projects section.');
 
     // 3. Match each resume project to repositories by what GitHub lists, read the best candidates in depth, then match again with their README and technology.
-    const first = extracted.projects.map(p => matchProject(p, scan.repos));
+    // 3a. A README often names a project better than its repository does ("Warrant" lives in a repository called "Mindspark"). For projects
+    // without a strong match, read a few README files, one request each, and look again with their titles and words.
+    let remaining = scan.rateRemaining;
+    const probed = new Map<string, { readme: string; title: string | null; tech: string[] }>();
+    const metaOnly = extracted.projects.map(p => matchProject(p, scan.repos));
+    if (metaOnly.some(m => !m[0] || m[0].strength !== 'strong')) {
+      const strong = new Set(metaOnly.flatMap(m => m.filter(x => x.strength === 'strong').map(x => x.repo)));
+      const room = remaining === null ? PROBE_CAP : Math.max(0, Math.min(PROBE_CAP, remaining - 20));
+      const toRead = scan.repos.filter(x => !x.fork && !strong.has(x.name)).slice(0, room);
+      await pool(toRead, 3, async r => {
+        const res = await gh(`/repos/${login}/${r.name}/readme`, { raw: true });
+        if (res.status === 200 && res.text) { const text = scrubSecrets(res.text).slice(0, 4000); probed.set(r.name, { readme: text, title: readmeTitle(text), tech: techFromText(text.slice(0, 2500)) }); }
+      });
+      if (remaining !== null) remaining -= toRead.length;
+    }
+    const lite = scan.repos.map(x => ({ ...x, readme: probed.get(x.name)?.readme ?? null, title: probed.get(x.name)?.title ?? null, tech: probed.get(x.name)?.tech }));
+    const first = extracted.projects.map(p => matchProject(p, lite));
     const wanted = [...new Set(first.flatMap(m => m.filter(x => x.score >= 0.3).slice(0, 2).map(x => x.repo)))];
     const recent = scan.repos.filter(x => !x.fork && !x.archived && !wanted.includes(x.name)).map(x => x.name);
-    const budget = scan.rateRemaining === null ? DEEP_CAP : Math.max(0, Math.min(DEEP_CAP, Math.floor((scan.rateRemaining - 8) / CALLS_PER_REPO)));
+    const budget = remaining === null ? DEEP_CAP : Math.max(0, Math.min(DEEP_CAP, Math.floor((remaining - 8) / CALLS_PER_REPO)));
     const deepNames = [...wanted, ...recent].slice(0, budget);
     const deepList = await pool(deepNames, 3, async name => { const meta = scan.repos.find(x => x.name === name)!; try { return await deepScanRepo(gh, login, meta); } catch { return null; } });
     const deep = new Map<string, DeepRepo>();
     deepList.forEach((d, i) => { if (d) deep.set(deepNames[i], d); });
     const rateLimited = budget < Math.min(DEEP_CAP, wanted.length) || [...deep.values()].some(d => d.partial);
-    const enriched = scan.repos.map(x => ({ ...x, readme: deep.get(x.name)?.readme ?? null, tech: deep.get(x.name)?.tech }));
+    const enriched = scan.repos.map(x => ({ ...x, readme: deep.get(x.name)?.readme ?? probed.get(x.name)?.readme ?? null, title: probed.get(x.name)?.title ?? readmeTitle(deep.get(x.name)?.readme), tech: deep.get(x.name)?.tech ?? probed.get(x.name)?.tech }));
 
     const projects: StoredProject[] = extracted.projects.map((p, index) => {
       const m: RepoMatch[] = matchProject(p, enriched);

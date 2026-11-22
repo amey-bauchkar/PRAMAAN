@@ -416,15 +416,16 @@ export class StaticRepoIngestionService {
       const verifiedSnapshots: SourceSnapshot[] = [];
       let totalRetainedBytes = 0;
 
+      // Download the files a few at a time; the checks below still run one file at a time, in the same order.
+      const blobs = new Map<string, Awaited<ReturnType<typeof this.githubClient.getBlob>>>();
+      for (let i = 0; i < eligibleEntries.length; i += 6) {
+        await Promise.all(eligibleEntries.slice(i, i + 6).map(async ({ entry }) => {
+          blobs.set(entry.sha, await this.githubClient.getBlob(accessToken, request.owner, request.repo, entry.sha, abortController.signal));
+        }));
+      }
+
       for (const { entry, canonicalPath } of eligibleEntries) {
-        // Fetch blob
-        const blobRes = await this.githubClient.getBlob(
-          accessToken,
-          request.owner,
-          request.repo,
-          entry.sha,
-          abortController.signal
-        );
+        const blobRes = blobs.get(entry.sha)!;
 
         const rawBytes =
           blobRes.encoding === 'base64'

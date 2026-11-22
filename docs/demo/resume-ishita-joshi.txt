@@ -1,0 +1,12 @@
+ISHITA JOSHI
+ishita.joshi@students.vppcoe.example | +91 98200 00003
+B.E. Computer Engineering, VPPCOE, Mumbai | Expected 2027 | CGPA 8.20
+
+PROJECTS
+AI Student Dashboard | JavaScript, HTML, CSS
+• Dashboard that gives students a single view of their progress, with AI-assisted insights.
+Library Seat Booking | React, Node.js
+• Lets students book study seats in the college library and shows live availability.
+
+TECHNICAL SKILLS
+JavaScript, React, HTML, CSS, Python, SQL, Git

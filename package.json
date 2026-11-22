@@ -25,6 +25,8 @@
     "dev:runner": "npm run dev --workspace=@pramaan/runner",
     "bootstrap:college": "node scripts/bootstrap-college.mjs",
     "enable:github-login": "node scripts/enable-github-login.mjs",
+    "sample:vppcoe": "node scripts/load-vppcoe-sample.mjs",
+    "sample:logins": "node scripts/create-sample-logins.mjs",
     "seed:generate": "node scripts/generate-demo-seed.mjs",
     "verify:ledger": "node scripts/verify-ledger.mjs",
     "demo": "node scripts/demo.mjs",
